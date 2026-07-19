@@ -331,4 +331,4 @@ export interface ApiResponse<T> {
   error?: string;
 }
 
-export type View = 'dashboard' | 'networks' | 'assets' | 'topology' | 'timeline' | 'iocs' | 'notes' | 'export' | 'about';
+export type View = 'dashboard' | 'networks' | 'assets' | 'topology' | 'timeline' | 'iocs' | 'notes' | 'activity' | 'export' | 'about';

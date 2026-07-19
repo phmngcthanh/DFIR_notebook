@@ -2,7 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   Clock, Download, FileText, FolderOpen, GitGraph, LayoutDashboard,
-  Info, LockKeyhole, Network, Plus, Server, ShieldAlert, UserRound,
+  Info, LockKeyhole, Network, Plus, Server, ShieldAlert, SquareKanban, UserRound,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -20,6 +20,7 @@ const NetworkTopology = lazy(() => import('@/components/NetworkTopology'));
 const TimelineView = lazy(() => import('@/components/TimelineView'));
 const IocManager = lazy(() => import('@/components/IocManager'));
 const NoteManager = lazy(() => import('@/components/NoteManager'));
+const ActivityBoard = lazy(() => import('@/components/ActivityBoard'));
 const ExportImport = lazy(() => import('@/components/ExportImport'));
 const AboutPage = lazy(() => import('@/components/AboutPage'));
 
@@ -31,6 +32,7 @@ const NAV_ITEMS: { view: View; label: string; icon: React.ReactNode }[] = [
   { view: 'timeline', label: 'Timeline', icon: <Clock size={18} /> },
   { view: 'iocs', label: 'IOCs', icon: <ShieldAlert size={18} /> },
   { view: 'notes', label: 'Notes', icon: <FileText size={18} /> },
+  { view: 'activity', label: 'Activity Board', icon: <SquareKanban size={18} /> },
   { view: 'export', label: 'Expert Merge', icon: <Download size={18} /> },
   { view: 'about', label: 'About', icon: <Info size={18} /> },
 ];
@@ -173,6 +175,7 @@ function App() {
               {currentView === 'timeline' && <TimelineView refreshTrigger={refreshTrigger} />}
               {currentView === 'iocs' && <IocManager refreshTrigger={refreshTrigger} />}
               {currentView === 'notes' && <NoteManager refreshTrigger={refreshTrigger} />}
+              {currentView === 'activity' && <ActivityBoard refreshTrigger={refreshTrigger} />}
               {currentView === 'export' && <ExportImport refreshTrigger={refreshTrigger} onImport={() => setRefreshTrigger((value) => value + 1)} />}
             </Suspense>
           </div>

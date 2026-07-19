@@ -46,8 +46,8 @@ There is **no** React Hook Form, Zod, HTTP client, or state-management library.
 src/                          # Frontend
 ├── components/               # Feature components (Dashboard, NetworkManager, AssetManager,
 │   │                         #   NetworkTopology, TimelineView, IocManager, NoteManager,
-│   │                         #   ExportImport, PartialImportPanel, CaseSetup, ExpertSetup,
-│   │                         #   FirewallDetails, AboutPage)
+│   │                         #   ActivityBoard, ExportImport, PartialImportPanel, CaseSetup,
+│   │                         #   ExpertSetup, FirewallDetails, AboutPage)
 │   └── ui/                   # Generated shadcn/ui components — avoid editing
 ├── lib/                      # utils.ts (cn), topology-layout.ts (+ tests)
 ├── config/branding.ts        # White-label strings
