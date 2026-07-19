@@ -131,3 +131,7 @@ Windows output is written to `src-tauri/target/release/bundle/nsis/`. Linux x86_
 The lean MVP is manual DFIR documentation and visualization. These are intentionally not implemented: FastAPI or another HTTP backend, PostgreSQL/Redis, identity authentication/RBAC, live collaboration, tasks, automated log ingestion/parsing, YARA, STIX/OpenIOC export, attack-path algorithms, standardized PDF reporting, database-password recovery, and cryptographic identity signatures.
 
 The files `dfir_network_investigation_platform.md`, `encryption_analysis.md`, `architecture_diagram.png`, `database_schema.png`, and `encryption_comparison.png` are archived design research only and are not descriptions of the current application.
+
+## License
+
+DFIR Network Investigator is licensed under the [GNU Affero General Public License v3.0 only](LICENSE). Third-party components remain under their respective licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

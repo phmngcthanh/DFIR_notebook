@@ -2,6 +2,7 @@
   "name": "dfir-investigator",
   "private": true,
   "version": "1.0.20",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite",
