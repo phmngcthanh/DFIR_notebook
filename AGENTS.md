@@ -145,6 +145,16 @@ npm run tauri build
 
 The built application bundles will be in `src-tauri/target/release/bundle/`.
 
+### Windows build rule for agents
+
+Use the repository wrapper for the supported Windows/NSIS build:
+
+```powershell
+npm run tauri-build -- --bundles nsis
+```
+
+On Windows, `scripts/tauri-build.mjs` selects `stable-x86_64-pc-windows-msvc`, adds the `x86_64-pc-windows-msvc` target, and invokes the project-local Tauri CLI. Do not treat a standalone `cargo test` or `cargo check` failure from the machine's default `x86_64-pc-windows-gnu` host—especially `dlltool.exe: program not found`—as a failure of the supported application build. GNU `dlltool` is not required for this MSVC/NSIS workflow. Use the wrapper when validating distributable Windows builds; run standalone Rust tests only from a correctly initialized MSVC Rust/build-tools environment.
+
 ---
 
 ## IPC Command Reference (Frontend ↔ Backend)

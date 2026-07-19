@@ -118,7 +118,9 @@ PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 ```
 
-The current schema version is `PRAGMA user_version = 5`.
+The current schema version is `PRAGMA user_version = 6`.
+
+Topology presentation is stored in `topology_views`, independently for each layout mode. A saved view contains device and layout-anchor positions plus the Cytoscape pan/zoom camera. This state belongs to the physical case database but is intentionally excluded from evidence history and expert export/merge bundles.
 
 ### 3.4 Database unlock lifecycle
 
@@ -170,6 +172,7 @@ erDiagram
 | `timeline_events` | Evidence chronology | optional asset, preserved raw time/zone, clock profile and copied offset, corrected UTC timestamp, precision, type, description, severity, source, MITRE |
 | `iocs` | Indicators of compromise | type, value, description, threat level, first/last seen |
 | `notes` | Versioned investigator notes | title, Markdown text, created/updated timestamps |
+| `topology_views` | Case-local topology presentation | layout mode, node positions, pan/zoom camera, updated timestamp |
 
 ### 4.2 Primary-interface projection
 

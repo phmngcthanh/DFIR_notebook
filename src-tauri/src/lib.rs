@@ -471,6 +471,23 @@ fn list_networks(state: State<DbState>) -> Response<Vec<Network>> {
     with_conn(&state, |conn| get_networks(conn))
 }
 #[tauri::command]
+fn get_topology_view(state: State<DbState>, layout: String) -> Response<Option<TopologyViewState>> {
+    with_conn(&state, |conn| db::get_topology_view(conn, &layout))
+}
+#[tauri::command]
+fn save_topology_view(
+    state: State<DbState>,
+    layout: String,
+    positions: Vec<TopologyNodePosition>,
+    zoom: f64,
+    pan_x: f64,
+    pan_y: f64,
+) -> Response<TopologyViewState> {
+    with_conn(&state, |conn| {
+        db::save_topology_view(conn, &layout, positions, zoom, pan_x, pan_y)
+    })
+}
+#[tauri::command]
 fn remove_network(state: State<DbState>, id: String) -> Response<bool> {
     with_actor_conn(&state, |conn, actor| {
         delete_network(conn, actor, &id).map(|_| true)
@@ -1703,6 +1720,8 @@ pub fn run() {
             create_new_network,
             update_existing_network,
             list_networks,
+            get_topology_view,
+            save_topology_view,
             remove_network,
             create_new_asset,
             update_existing_asset,

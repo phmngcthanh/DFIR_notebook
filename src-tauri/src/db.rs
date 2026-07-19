@@ -232,6 +232,23 @@ pub struct NetworkConnection {
     pub device_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopologyNodePosition {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TopologyViewState {
+    pub layout: String,
+    pub positions: Vec<TopologyNodePosition>,
+    pub zoom: f64,
+    pub pan_x: f64,
+    pub pan_y: f64,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ImportEntitySummary {
     pub inserted: usize,
@@ -454,6 +471,14 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             last_seen TEXT,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS topology_views (
+            layout TEXT PRIMARY KEY,
+            positions_json TEXT NOT NULL,
+            zoom REAL NOT NULL,
+            pan_x REAL NOT NULL,
+            pan_y REAL NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS history_commits (
             id TEXT PRIMARY KEY,
             case_id TEXT NOT NULL,
@@ -512,7 +537,7 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_connections_target ON network_connections(target_network_id);
         CREATE INDEX IF NOT EXISTS idx_history_changes_entity ON history_changes(entity_type, entity_id);
         CREATE INDEX IF NOT EXISTS idx_history_changes_commit ON history_changes(commit_id);
-        PRAGMA user_version = 5;",
+        PRAGMA user_version = 6;",
     )
     .map_err(|e| e.to_string())
 }
@@ -1009,6 +1034,93 @@ fn map_case(row: &rusqlite::Row<'_>) -> rusqlite::Result<Case> {
 pub fn get_networks(conn: &Connection) -> AppResult<Vec<Network>> {
     query_vec(conn, "SELECT id,name,subnet,network_type,description,vlan_id,created_at FROM networks ORDER BY name", [], |row| {
         Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, created_at: row.get(6)? })
+    })
+}
+
+fn validate_topology_layout(layout: &str) -> AppResult<()> {
+    if ["dagre", "grid", "circle", "concentric", "breadthfirst"].contains(&layout) {
+        Ok(())
+    } else {
+        Err(format!("Unsupported topology layout: {layout}"))
+    }
+}
+
+pub fn get_topology_view(conn: &Connection, layout: &str) -> AppResult<Option<TopologyViewState>> {
+    validate_topology_layout(layout)?;
+    let stored = conn
+        .query_row(
+            "SELECT positions_json,zoom,pan_x,pan_y,updated_at FROM topology_views WHERE layout=?1",
+            params![layout],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, f64>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    stored
+        .map(|(positions_json, zoom, pan_x, pan_y, updated_at)| {
+            let positions = serde_json::from_str(&positions_json).map_err(|e| e.to_string())?;
+            Ok(TopologyViewState {
+                layout: layout.to_string(),
+                positions,
+                zoom,
+                pan_x,
+                pan_y,
+                updated_at,
+            })
+        })
+        .transpose()
+}
+
+pub fn save_topology_view(
+    conn: &Connection,
+    layout: &str,
+    positions: Vec<TopologyNodePosition>,
+    zoom: f64,
+    pan_x: f64,
+    pan_y: f64,
+) -> AppResult<TopologyViewState> {
+    validate_topology_layout(layout)?;
+    if positions.len() > 20_000 {
+        return Err("Topology view contains too many node positions".to_string());
+    }
+    if !(0.05..=10.0).contains(&zoom)
+        || !pan_x.is_finite()
+        || !pan_y.is_finite()
+        || positions.iter().any(|position| {
+            position.id.trim().is_empty()
+                || position.id.len() > 512
+                || !position.x.is_finite()
+                || !position.y.is_finite()
+                || position.x.abs() > 10_000_000.0
+                || position.y.abs() > 10_000_000.0
+        })
+    {
+        return Err("Topology view contains an invalid position, pan, or zoom value".to_string());
+    }
+    let updated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let positions_json = serde_json::to_string(&positions).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO topology_views(layout,positions_json,zoom,pan_x,pan_y,updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6)
+         ON CONFLICT(layout) DO UPDATE SET positions_json=excluded.positions_json,
+             zoom=excluded.zoom,pan_x=excluded.pan_x,pan_y=excluded.pan_y,updated_at=excluded.updated_at",
+        params![layout, positions_json, zoom, pan_x, pan_y, updated_at],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(TopologyViewState {
+        layout: layout.to_string(),
+        positions,
+        zoom,
+        pan_x,
+        pan_y,
+        updated_at,
     })
 }
 
@@ -4946,8 +5058,45 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            5
+            6
         );
+    }
+
+    #[test]
+    fn topology_views_round_trip_and_are_scoped_by_layout() {
+        let (conn, _, _) = fresh_case();
+        let first = save_topology_view(
+            &conn,
+            "grid",
+            vec![TopologyNodePosition {
+                id: "asset-a".into(),
+                x: 12.5,
+                y: -4.0,
+            }],
+            1.25,
+            40.0,
+            80.0,
+        )
+        .unwrap();
+        assert_eq!(get_topology_view(&conn, "grid").unwrap(), Some(first));
+        assert_eq!(get_topology_view(&conn, "circle").unwrap(), None);
+
+        let updated = save_topology_view(
+            &conn,
+            "grid",
+            vec![TopologyNodePosition {
+                id: "asset-a".into(),
+                x: 90.0,
+                y: 30.0,
+            }],
+            0.8,
+            -12.0,
+            15.0,
+        )
+        .unwrap();
+        assert_eq!(get_topology_view(&conn, "grid").unwrap(), Some(updated));
+        assert!(get_topology_view(&conn, "not-a-layout").is_err());
+        assert!(save_topology_view(&conn, "grid", Vec::new(), f64::NAN, 0.0, 0.0).is_err());
     }
 
     #[test]

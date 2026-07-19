@@ -179,6 +179,23 @@ export interface NetworkConnection {
   device_name?: string;
 }
 
+export type TopologyLayoutName = 'dagre' | 'grid' | 'circle' | 'concentric' | 'breadthfirst';
+
+export interface TopologyNodePosition {
+  id: string;
+  x: number;
+  y: number;
+}
+
+export interface TopologyViewState {
+  layout: TopologyLayoutName;
+  positions: TopologyNodePosition[];
+  zoom: number;
+  pan_x: number;
+  pan_y: number;
+  updated_at: string;
+}
+
 export interface ExpertIdentity {
   name: string;
   session_id: string;
