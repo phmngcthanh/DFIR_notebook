@@ -21,9 +21,12 @@ export default function ExpertSetup({ onComplete, onCancel }: Props) {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    void invoke<ApiResponse<Network[]>>('list_networks').then((response) => {
-      if (response.success) setNetworks(response.data ?? []);
-    });
+    void invoke<ApiResponse<Network[]>>('list_networks')
+      .then((response) => {
+        if (response.success) setNetworks(response.data ?? []);
+        else setError(response.error || 'Could not load network zones');
+      })
+      .catch((reason) => setError(String(reason)));
   }, []);
 
   const toggleNetwork = (id: string) => {

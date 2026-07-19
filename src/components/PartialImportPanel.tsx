@@ -135,7 +135,12 @@ export default function PartialImportPanel({ disabled, onApplied }: Props) {
   };
 
   const discard = async () => {
-    if (preview) await invoke<ApiResponse<boolean>>('discard_pending_partial_import', { previewId: preview.preview_id });
+    try {
+      if (preview) {
+        const response = await invoke<ApiResponse<boolean>>('discard_pending_partial_import', { previewId: preview.preview_id });
+        if (!response.success) throw new Error(response.error || 'Could not discard the pending preview');
+      }
+    } catch (reason) { toast.error(String(reason)); }
     setPreview(null);
     setSelected({});
     setValidation(null);

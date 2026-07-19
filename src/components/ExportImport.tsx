@@ -180,7 +180,8 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
 
   const discard = async (preview: MergePreview) => {
     try {
-      await invoke<ApiResponse<boolean>>('discard_pending_change_bundle', { bundleId: preview.bundle_id });
+      const response = await invoke<ApiResponse<boolean>>('discard_pending_change_bundle', { bundleId: preview.bundle_id });
+      if (!response.success) throw new Error(response.error || 'Could not discard the loaded bundle');
       setPreviews((current) => current.filter((item) => item.bundle_id !== preview.bundle_id));
     } catch (reason) { toast.error(String(reason)); }
   };

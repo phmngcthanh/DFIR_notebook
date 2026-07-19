@@ -1,282 +1,140 @@
 # DFIR Network Investigator — Agent Guide
 
-> Desktop application for DFIR (Digital Forensics and Incident Response) network investigation. Built with **Tauri (Rust + React)** and **SQLite**.
+> Offline desktop workbench for DFIR (Digital Forensics and Incident Response) network investigation. **Tauri v2 (Rust + React 19)** with **SQLCipher-encrypted SQLite** case files. No server, no cloud, no accounts.
+
+This file is a quick orientation for coding agents. The `docs/` folder is the authoritative documentation — when this file and `docs/` disagree, trust `docs/` and the code.
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — current application and data architecture
+- [docs/RUNNING_AND_BUILDING.md](docs/RUNNING_AND_BUILDING.md) — dev/build/release per platform
+- [docs/INPUT_FORMATS.md](docs/INPUT_FORMATS.md) — snapshot, expert-bundle, and partial-import contracts
+- [PORTABLE_EXPORT_FORMAT.md](PORTABLE_EXPORT_FORMAT.md) — encrypted `.dfirx` envelope spec
+- `dfir_network_investigation_platform.md`, `encryption_analysis.md`, `technology.md`, and the root PNGs are **archived design research**, not descriptions of the current app.
 
 ---
 
 ## Project Overview
 
-This is a **portable desktop workbench** for 3rd-party DFIR teams who work on client sites without access to the client's SIEM. Each investigator runs the app independently on their laptop, manages one case at a time, and exports/merges findings via JSON at the end of the day.
+A portable workbench for 3rd-party DFIR teams on client sites without SIEM access. Each investigator runs the app on their own laptop against one case file at a time. Collaboration is file-based: Git-like "expert change bundles" are exchanged and merged at a daily team meeting; full JSON snapshots exist for backup/legacy transfer.
 
 ### Key Features
 
-- **Case Management** — Create and open investigation cases stored as SQLite `.db` files.
-- **Network Topology** — Visualize network zones and assets with interactive compound-node graphs (Cytoscape.js).
-- **Asset Management** — Track VMs, workstations, and servers with IP, OS, MAC, user, and custom JSON properties.
-- **Infection Timeline** — Document attack-chain events with MITRE ATT&CK tactic/technique mapping.
-- **IOC Management** — Track indicators of compromise (IP, hash, domain, URL).
-- **Notes** — Markdown notes for investigation findings.
-- **Export / Merge** — Export a case to JSON; import/merge teammate exports (duplicate IDs are skipped, no overwrite).
-- **Firewall & Network Connections** — Document firewall rules and inter-network links.
-
-### Architecture
-
-```
-┌─────────────────────────────────────────┐
-│  Frontend: React 19 + TypeScript + Vite │
-│  UI: Tailwind CSS v3 + shadcn/ui        │
-│  Visualization: Cytoscape.js + Vis.js   │
-├─────────────────────────────────────────┤
-│  Bridge: Tauri v2 (IPC invoke/commands) │
-├─────────────────────────────────────────┤
-│  Backend: Rust (Tauri runtime)          │
-│  Database: SQLite via rusqlite          │
-│  File dialogs: Tauri dialog plugin      │
-└─────────────────────────────────────────┘
-```
-
----
+- **Case files** — one SQLCipher-encrypted `.db` per case at a user-chosen path; password required to create/open; append-only commit history for every change.
+- **Network topology** — zones, assets, multi-NIC interfaces, firewalls (interfaces, VIP/DNAT/SNAT/port NAT rules), zone-to-zone connections; Cytoscape.js graph with saved topology views and PNG export.
+- **Timeline** — events with MITRE ATT&CK fields, preserved raw server time, reusable clock-correction profiles, dual zone/UTC display (vis-timeline).
+- **IOCs, Notes** — searchable IOC list; versioned Markdown notes rendered via a safe React-only renderer (embedded HTML is never executed).
+- **Expert Merge** — export/import change bundles (commits since a shared baseline), three-way preview with per-field conflict resolution, transactional apply, merge commits with two parents.
+- **Partial import** — case-aware JSON template for LLM/human filling, previewed and applied transactionally with add-only or incoming-overwrite policy.
+- **Portable exports** — every snapshot/bundle can be plain JSON or an encrypted `.dfirx` (Argon2id + AES-256-GCM) with an independent export password.
 
 ## Technology Stack
 
-| Layer | Technology | Version / Notes |
+| Layer | Technology | Notes |
 |---|---|---|
-| Frontend Framework | React | 19.2.0 |
-| Build Tool | Vite | 7.2.4 |
-| Language | TypeScript | ~5.9.3, strict mode enabled |
-| Styling | Tailwind CSS | 3.4.19 |
-| UI Components | shadcn/ui | `new-york` style, 40+ components in `src/components/ui/` |
-| Icons | Lucide React | `lucide-react` |
-| Desktop Shell | Tauri | 2.11.2 |
-| Backend Language | Rust | Edition 2021, min 1.77.2 |
-| Database | SQLite | `rusqlite` with `bundled`, `chrono`, `uuid`, `serde_json` |
-| Network Graph | Cytoscape.js | `cytoscape` + `cytoscape-dagre` + `react-cytoscapejs` |
-| Timeline | Vis.js | `vis-timeline` + `vis-data` |
-| Forms | React Hook Form + Zod | `@hookform/resolvers` |
+| Frontend | React 19 + TypeScript (strict) + Vite 7 | path alias `@/*` |
+| UI | Tailwind CSS 3 + shadcn/ui (`src/components/ui/`) + lucide-react + sonner toasts | |
+| Graph / timeline | Cytoscape.js + cytoscape-dagre; vis-timeline + vis-data | |
+| Shell | Tauri 2 (`tauri-plugin-dialog` only) | |
+| Backend | Rust, edition 2021; toolchain pinned in `rust-toolchain.toml` | |
+| Database | `rusqlite` with **`bundled-sqlcipher-vendored-openssl`** — SQLCipher + OpenSSL are compiled from source (Strawberry Perl needed on Windows, build-time only) | |
+| Crypto | `aes-gcm`, `argon2`, `getrandom`, `zeroize` for portable exports; SQLCipher for the DB at rest | |
 
----
+There is **no** React Hook Form, Zod, HTTP client, or state-management library.
 
 ## Project Structure
 
 ```
-.
-├── src/                          # Frontend (React + TypeScript)
-│   ├── components/
-│   │   ├── ui/                   # shadcn/ui components (auto-generated)
-│   │   ├── CaseSetup.tsx         # New / Open case dialog
-│   │   ├── Dashboard.tsx         # Investigation stats & recent events
-│   │   ├── NetworkManager.tsx    # CRUD for network zones
-│   │   ├── AssetManager.tsx      # CRUD for assets
-│   │   ├── NetworkTopology.tsx   # Cytoscape.js graph view
-│   │   ├── TimelineView.tsx      # Vis.js timeline + event CRUD
-│   │   ├── IocManager.tsx        # IOC management
-│   │   ├── NoteManager.tsx       # Markdown notes CRUD
-│   │   └── ExportImport.tsx      # Export case to JSON / import & merge
-│   ├── hooks/
-│   │   └── use-mobile.ts         # Mobile breakpoint detection
-│   ├── lib/
-│   │   └── utils.ts              # `cn()` Tailwind class merger
-│   ├── pages/
-│   │   └── Home.tsx              # Unused Vite starter page
-│   ├── types/
-│   │   ├── index.ts              # Core TypeScript interfaces
-│   │   └── declarations.d.ts     # Module declarations
-│   ├── App.tsx                   # Root layout (sidebar + view router)
-│   ├── main.tsx                  # ReactDOM entry point
-│   ├── index.css                 # Tailwind directives + CSS variables
-│   └── App.css                   # App-specific styles
-│
-├── src-tauri/                    # Backend (Rust + Tauri)
-│   ├── src/
-│   │   ├── main.rs               # Entry point (calls lib::run)
-│   │   ├── lib.rs                # Tauri command handlers + app setup
-│   │   └── db.rs                 # SQLite schema + CRUD operations
-│   ├── icons/                    # App icons (Windows, macOS, Linux)
-│   ├── Cargo.toml                # Rust dependencies
-│   ├── tauri.conf.json           # Tauri window, bundle, plugin config
-│   └── build.rs                  # Tauri build script
-│
-├── package.json                  # Node scripts & dependencies
-├── vite.config.ts                # Vite config (base: './', port 5173)
-├── tailwind.config.js            # Tailwind theme + shadcn colors
-├── tsconfig.app.json             # TS strict config, path alias `@/*`
-├── eslint.config.js              # ESLint flat config (TS + React Hooks)
-└── components.json               # shadcn/ui configuration
+src/                          # Frontend
+├── components/               # Feature components (Dashboard, NetworkManager, AssetManager,
+│   │                         #   NetworkTopology, TimelineView, IocManager, NoteManager,
+│   │                         #   ExportImport, PartialImportPanel, CaseSetup, ExpertSetup,
+│   │                         #   FirewallDetails, AboutPage)
+│   └── ui/                   # Generated shadcn/ui components — avoid editing
+├── lib/                      # utils.ts (cn), topology-layout.ts (+ tests)
+├── config/branding.ts        # White-label strings
+└── types/index.ts            # Shared TypeScript interfaces incl. ApiResponse<T>
+
+src-tauri/src/
+├── main.rs                   # Entry point (calls lib::run)
+├── lib.rs                    # All #[tauri::command] handlers, shared state, with_conn helpers
+├── db.rs                     # Schema DDL, migrations (PRAGMA user_version), CRUD, snapshot import/export
+├── secure_db.rs              # SQLCipher key/rekey/legacy-migration via FFI
+├── history.rs                # Commit history, change bundles, three-way merge preview/apply
+├── portable_export.rs        # .dfirx envelope: Argon2id KDF + AES-256-GCM
+└── partial_import.rs         # Template generation, preview, validated transactional apply
 ```
 
----
-
-## Build and Run Commands
-
-### Prerequisites
-
-- [Node.js](https://nodejs.org/) 18+ (project uses Node 20)
-- [Rust](https://rustup.rs/) latest stable
-- Tauri CLI: `cargo install tauri-cli` (optional but recommended)
-
-### Frontend Only
+## Build, Run, Test
 
 ```bash
-# Install dependencies
 npm install
-
-# Start Vite dev server
-npm run dev
-
-# Production build (outputs to `dist/`)
-npm run build
-
-# Preview production build
-npm run preview
-
-# Lint
-npm run lint
+npm run tauri-dev        # full desktop app (required for any native/DB feature)
+npm run dev              # Vite only — invoke() fails, UI shell only
+npm run lint             # eslint
+npm run build            # tsc -b && vite build
+npm test                 # vitest run (tests in tests/ and co-located *.test.ts[x])
 ```
 
-### Full Desktop App (Tauri)
+Rust tests (unit tests live in `#[cfg(test)]` modules inside each backend file):
 
-```bash
-# Development mode (starts Vite + Tauri)
-npm run tauri dev
-
-# Production build (creates installers/binaries)
-npm run tauri build
+```powershell
+cargo +stable-x86_64-pc-windows-msvc test --manifest-path src-tauri\Cargo.toml
 ```
-
-The built application bundles will be in `src-tauri/target/release/bundle/`.
 
 ### Windows build rule for agents
 
 Use the repository wrapper for the supported Windows/NSIS build:
 
 ```powershell
-npm run tauri-build -- --bundles nsis
+npm run tauri-build:windows
 ```
 
-On Windows, `scripts/tauri-build.mjs` selects `stable-x86_64-pc-windows-msvc`, adds the `x86_64-pc-windows-msvc` target, and invokes the project-local Tauri CLI. Do not treat a standalone `cargo test` or `cargo check` failure from the machine's default `x86_64-pc-windows-gnu` host—especially `dlltool.exe: program not found`—as a failure of the supported application build. GNU `dlltool` is not required for this MSVC/NSIS workflow. Use the wrapper when validating distributable Windows builds; run standalone Rust tests only from a correctly initialized MSVC Rust/build-tools environment.
+`scripts/tauri-build.mjs` selects the MSVC toolchain matching the channel pinned in `rust-toolchain.toml`, prepends Strawberry Perl to `PATH`, and invokes the project-local Tauri CLI. Do **not** treat a failure of plain `cargo check`/`cargo test` under a default GNU host (e.g. `dlltool.exe: program not found`) as a failure of the supported build — GNU dlltool is not part of the MSVC/NSIS workflow. Output: `src-tauri/target/release/bundle/nsis/` (see `tauri-build:linux` / `tauri-build:mac-*` for other platforms).
 
----
+Clean builds are slow because SQLCipher + OpenSSL compile from C source. Avoid `cargo clean`; do not create extra `target-*` directories (each one recompiles OpenSSL from scratch).
 
-## IPC Command Reference (Frontend ↔ Backend)
+## IPC Pattern
 
-All commands return a standardized `Response<T>`:
+Every command returns `{ success, data, error }` (`ApiResponse<T>` on the frontend, `Response<T>` in Rust). Frontend calls use `invoke` from `@tauri-apps/api/core` wrapped in try/catch, surfacing errors with `toast.error`. The full command list (~60 commands) is registered in `lib.rs::run()`; groups:
 
-```json
-{ "success": true, "data": { ... }, "error": null }
-```
+- Case/session: `create_new_case`, `open_existing_case`, `migrate_legacy_case`, `change_database_password`, `close_current_case`, `get_current_case_info`, `update_current_case`, `set_current_expert`, `get_current_expert`, `get_db_path`
+- Networks/assets/interfaces: `create_new_network`, `update_existing_network`, `list_networks`, `remove_network`, `list_assets*`, `set_asset_suspicious`, `remove_asset`, `list_network_interfaces`, `set_primary_network_interface`, …
+- Topology views: `get_topology_view`, `save_topology_view`
+- Timeline/clock: `list_timeline_events`, `preview_timestamp`, `list_clock_profiles`, …
+- Notes/IOCs/firewalls/connections: CRUD + list commands per entity
+- Snapshot export/import: `export_case_json`, `import_case_json`, `save_export_to_file`, `load_import_from_file`, `save_export_as_text`
+- Partial import: `get_partial_import_template`, `preview_partial_import_text`, `validate_pending_partial_import`, `apply_pending_partial_import`, `discard_pending_partial_import`, …
+- Expert merge/history: `save_change_bundle_to_file`, `load_change_bundle_from_file`, `refresh_pending_change_bundle`, `apply_pending_change_bundle`, `discard_pending_change_bundle`, `list_case_history`, `mark_current_shared_baseline`
 
-| Command | Input | Output | Description |
-|---|---|---|---|
-| `create_new_case` | `name`, `description`, `clientName`, `investigator` | `caseId` | Creates `.db` in app data dir |
-| `open_existing_case` | — | `"Case opened"` | File picker for `.db` files |
-| `get_current_case_info` | — | `Case \| null` | Current case metadata |
-| `create_new_network` | network fields | `Network` | Add network zone |
-| `list_networks` | — | `Network[]` | |
-| `remove_network` | `id` | `boolean` | |
-| `create_new_asset` | asset fields | `Asset` | Add asset to a network |
-| `list_assets` | — | `Asset[]` | |
-| `list_assets_by_network` | `networkId` | `Asset[]` | |
-| `set_asset_suspicious` | `id`, `suspicious` | `boolean` | Toggle suspicious flag |
-| `remove_asset` | `id` | `boolean` | |
-| `create_new_timeline_event` | event fields | `TimelineEvent` | |
-| `list_timeline_events` | — | `TimelineEvent[]` | Sorted by timestamp |
-| `remove_timeline_event` | `id` | `boolean` | |
-| `create_new_note` | `title`, `content` | `Note` | |
-| `list_notes` | — | `Note[]` | Sorted by `updated_at` DESC |
-| `update_existing_note` | `id`, `title`, `content` | `boolean` | |
-| `remove_note` | `id` | `boolean` | |
-| `create_new_ioc` | IOC fields | `Ioc` | |
-| `list_iocs` | — | `Ioc[]` | |
-| `remove_ioc` | `id` | `boolean` | |
-| `create_new_firewall` | firewall fields | `Firewall` | |
-| `list_firewalls` | — | `Firewall[]` | |
-| `remove_firewall` | `id` | `boolean` | |
-| `create_new_network_connection` | connection fields | `NetworkConnection` | |
-| `list_network_connections` | — | `NetworkConnection[]` | |
-| `remove_network_connection` | `id` | `boolean` | |
-| `export_case_json` | — | `JSON string` | Serialize entire case |
-| `import_case_json` | `jsonData` | `boolean` | Merge into current case |
-| `save_export_to_file` | — | `filePath` | Export + native save dialog |
-| `load_import_from_file` | — | `boolean` | Native open dialog + merge |
-| `get_db_path` | — | `string \| null` | Current DB file path |
+## Database
 
----
+All DDL and migrations live in `db.rs`; current schema version is tracked via `PRAGMA user_version` (see `validate_and_migrate_case`). Tables:
 
-## Database Schema
+`cases`, `networks`, `assets`, `network_interfaces`, `network_connections`, `firewalls`, `firewall_interfaces`, `firewall_nat_rules`, `clock_profiles`, `timeline_events`, `notes`, `iocs`, `topology_views`, plus history tables (`history_commits`, `history_commit_parents`, `history_changes`, `history_entity_heads`, `history_state`).
 
-SQLite database managed entirely in `src-tauri/src/db.rs`.
+- Case files live wherever the user chose in the native Save dialog (not a fixed app-data dir).
+- `properties`/`scan_results`/`rules` are JSON strings in TEXT columns.
+- UUIDs (`uuid::Uuid::new_v4()`) for all entity IDs, generated in Rust.
+- Legacy snapshot import uses `INSERT OR IGNORE` (duplicate IDs skipped, never overwritten); expert-merge and partial-import paths are transactional with per-field conflict handling.
+- Foreign keys and a 5-second busy timeout are enabled on every connection.
 
-| Table | Purpose |
-|---|---|
-| `cases` | Single case metadata (name, client, investigator, status) |
-| `networks` | Network zones (subnet, VLAN, type) |
-| `assets` | Machines in networks (IP, MAC, OS, user, properties JSON, scan_results JSON, suspicious flag) |
-| `network_interfaces` | NICs per asset (multi-homed support) |
-| `network_connections` | Links between network zones |
-| `firewalls` | Firewall devices + rules JSON + config text |
-| `timeline_events` | Events with MITRE tactic/technique |
-| `notes` | Markdown notes |
-| `iocs` | Indicators of compromise |
+## Security Model (current, verified)
 
-Indexes exist on foreign keys and frequently queried columns (`assets.network_id`, `timeline_events.asset_id`, `timeline_events.timestamp`, etc.).
+- **CSP is strict and local-only** (`tauri.conf.json`): `default-src 'self'`, `script-src 'self'`, `connect-src` limited to the Tauri IPC origin. Keep it that way — no remote content.
+- **Capabilities are minimal** (`src-tauri/capabilities/default.json`): `core:default` + dialog open/save only. No fs, shell, http, or opener permissions. Do not add capabilities without a strong reason.
+- **DB at rest:** SQLCipher; key applied via FFI in `secure_db.rs` with `cipher_memory_security = ON`. Passwords cross IPC wrapped in `Zeroizing` and are never stored, logged, or bound to the expert name.
+- **Exports:** Argon2id (64 MiB, t=3, p=1) + AES-256-GCM, fresh random salt/nonce per file (`portable_export.rs`).
+- **SQL:** always parameterized; table names only via hardcoded `match` arms. Keep it that way.
+- **Frontend:** no `dangerouslySetInnerHTML`, no `console.*`. Markdown notes render through the React-only `SafeMarkdown` (NoteManager) that escapes HTML and allows only `http:`/`https:`/`mailto:` links. vis-timeline `content`/`title` strings rely on the library's built-in XSS filter — do not disable it or introduce custom `template` functions that return raw HTML.
+- No accounts/RBAC by design: the expert name is self-declared attribution; the DB password is the access control for a physical file copy.
 
-### Data Storage Locations
+## Code Style
 
-SQLite `.db` files are stored per-platform:
-
-- **Windows:** `%APPDATA%\DFIR-Investigator\<case-name>.db`
-- **macOS:** `~/Library/Application Support/DFIR-Investigator/<case-name>.db`
-- **Linux:** `~/.local/share/DFIR-Investigator/<case-name>.db`
-
----
-
-## Code Style Guidelines
-
-### Frontend (TypeScript / React)
-
-- **Components:** Functional components, default exports for pages/features.
-- **Imports:** Use path alias `@/` for project modules (e.g., `@/components/ui/button`, `@/types`).
-- **Styling:** Tailwind utility classes. Use `cn()` from `@/lib/utils` for conditional class merging.
-- **shadcn/ui:** Components live in `src/components/ui/`. Import them as needed; do not modify generated files unless necessary.
-- **IPC Calls:** Use `invoke` from `@tauri-apps/api/core`. Wrap in `try/catch`. Type responses with `ApiResponse<T>`.
-- **State:** `useState` + `useEffect` for local state. A `refreshTrigger` counter prop is used to signal child components to re-fetch data.
-- **Naming:** PascalCase for components, camelCase for variables/functions, UPPER_SNAKE for constants.
-
-### Backend (Rust)
-
-- **Commands:** Marked with `#[tauri::command]`, snake_case naming.
-- **Error Handling:** Commands return `Response<T>`; errors are converted to strings.
-- **Database Access:** Use the `with_conn` helper to safely access the shared `DbState` mutex.
-- **Schema:** All DDL lives in `db.rs::init_database()`. Use `INSERT OR IGNORE` for import/merge operations.
-
----
-
-## Testing
-
-**No automated tests are currently present** in this project. There are no unit tests, integration tests, or end-to-end tests.
-
-If you add tests:
-
-- **Frontend:** Consider [Vitest](https://vitest.dev/) (aligns with Vite) + React Testing Library.
-- **Backend:** Use `cargo test` with temporary SQLite databases in memory (`:memory:`).
-
----
-
-## Security Considerations
-
-- **CSP is disabled** (`"csp": null` in `tauri.conf.json`). If you add remote content or external assets, configure a strict Content-Security-Policy.
-- **Database paths** are resolved via `dirs::data_dir()`. Filenames are sanitized (`sanitize_filename`) to alphanumeric, hyphens, and underscores.
-- **File dialogs** use Tauri's native dialog plugin (blocking API).
-- **No authentication or RBAC** is implemented. The app is single-user, offline, and relies on physical access control.
-- **Import merge behavior:** Duplicate IDs are skipped (`INSERT OR IGNORE`). This is intentional to prevent accidental overwrites during team collaboration, but it also means **updated records from a teammate will not overwrite local changes** if they share the same UUID.
-
----
+- **Frontend:** functional components, default exports for features; `@/` imports; Tailwind + `cn()`; local state via `useState`/`useEffect` with a `refreshTrigger` counter prop for re-fetch signaling; errors surfaced with sonner `toast.error`.
+- **Backend:** `#[tauri::command]` snake_case handlers returning `Response<T>`; DB access only through the `with_conn`/`with_actor_conn` helpers on the shared `Mutex<Option<Connection>>`; no `unwrap()` in command paths; multi-step writes always inside `conn.transaction()` with a history commit recorded in the same transaction.
 
 ## Development Notes
 
-- The app is designed around a **single-case-at-a-time** model. The `DbState` holds one open connection in a `Mutex<Option<Connection>>`.
-- `src/pages/Home.tsx` is leftover from the Vite starter template and is **not used** by the application.
-- The sidebar in `App.tsx` acts as the main router; views are conditionally rendered based on `currentView` state.
-- `properties` and `scan_results` on assets, as well as `rules` on firewalls, are stored as **JSON strings** in SQLite (not JSONB, since this is SQLite, not PostgreSQL).
-- UUIDs are generated with `uuid::Uuid::new_v4()` on the Rust side for all entities.
-- Timeline events are ordered by `timestamp` (string, RFC 3339 format).
+- Single-case-at-a-time: one open connection in `DbState`; pending merge/import previews are cleared when a case is opened or closed.
+- Deleting an asset preserves its timeline events (asset reference nulled); networks cannot be deleted while referenced.
+- The Rust toolchain is pinned in `rust-toolchain.toml`; bump it deliberately (a channel change triggers a full rebuild including OpenSSL).
+- CI (`.github/workflows/desktop-build.yml`) is `workflow_dispatch`-only with `Swatinem/rust-cache`.

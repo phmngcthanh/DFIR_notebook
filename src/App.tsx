@@ -55,9 +55,10 @@ function App() {
       setCurrentCase(loadedCase);
       setCurrentExpert(expert);
       setShowExpertSetup(Boolean(loadedCase && !expert));
-    } catch {
+    } catch (reason) {
       setCurrentCase(null);
       setCurrentExpert(null);
+      toast.error(`Could not load the current case: ${String(reason)}`);
     }
   }, []);
 
