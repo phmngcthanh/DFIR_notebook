@@ -1,0 +1,74 @@
+/* DFIR Investigator App Styles */
+
+body {
+  margin: 0;
+  overflow: hidden;
+}
+
+/* Cytoscape tooltip styles */
+.cy-tooltip {
+  position: absolute;
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  font-size: 12px;
+  z-index: 100;
+  pointer-events: none;
+}
+
+/* Vis.js timeline custom styles */
+.vis-timeline {
+  border-color: #e2e8f0 !important;
+  font-family: inherit !important;
+}
+
+.vis-item {
+  border-color: #0891b2 !important;
+  background-color: #cffafe !important;
+}
+
+.vis-item.vis-selected {
+  border-color: #0891b2 !important;
+  background-color: #67e8f9 !important;
+}
+
+.vis-item.timeline-info { background-color: #f1f5f9 !important; border-color: #64748b !important; }
+.vis-item.timeline-low { background-color: #dbeafe !important; border-color: #3b82f6 !important; }
+.vis-item.timeline-medium { background-color: #fef3c7 !important; border-color: #f59e0b !important; }
+.vis-item.timeline-high { background-color: #ffedd5 !important; border-color: #f97316 !important; }
+.vis-item.timeline-critical { background-color: #fee2e2 !important; border-color: #dc2626 !important; }
+
+.vis-item-content {
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+}
+
+.vis-time-axis .vis-text {
+  color: #64748b !important;
+}
+
+/* Scrollbar styles */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Form inputs */
+input, textarea, select {
+  font-family: inherit;
+}
