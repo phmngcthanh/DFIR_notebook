@@ -318,9 +318,9 @@ Smoke-test on both an Intel Mac and an Apple Silicon Mac when distributing the u
 
 ### GitHub Actions cross-platform builds
 
-`.github/workflows/desktop-build.yml` builds the native packages on GitHub-hosted Windows, Ubuntu 22.04, and macOS runners. It runs for pushes and pull requests targeting `main`, version tags matching `v*`, and manual `workflow_dispatch` runs.
+`.github/workflows/desktop-build.yml` builds the native packages on GitHub-hosted Windows, Ubuntu 22.04, and macOS runners. It runs only when started manually with **Actions > Desktop builds > Run workflow**, so commits and tags do not automatically start expensive native builds.
 
-Every successful job stores its packages as downloadable workflow artifacts. Release publishing is intentionally separate, so this build workflow only needs read access to repository contents.
+Every successful job stores its packages as downloadable workflow artifacts. The manual run also creates or updates a draft `v<app-version>` GitHub Release, attaches the native packages, and includes the standalone Windows executable. Review and smoke-test the draft before publishing it.
 
 The macOS CI package is built as a universal Intel/Apple Silicon application. Without Apple Developer secrets it is not notarized for general distribution; configure the repository's Apple signing and notarization secrets before treating it as a public macOS release.
 

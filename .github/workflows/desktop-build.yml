@@ -2,12 +2,9 @@ name: Desktop builds
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: desktop-build-${{ github.ref }}
@@ -82,10 +79,17 @@ jobs:
         run: npm ci
 
       - name: Build and package desktop application
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUSTUP_TOOLCHAIN: stable
         with:
           args: ${{ matrix.tauri_args }}
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: ${{ matrix.artifact_name }}
+          uploadPlainBinary: ${{ runner.os == 'Windows' }}
+          tagName: v__VERSION__
+          releaseName: DFIR Investigator v__VERSION__
+          releaseBody: Native Windows, Linux, and macOS packages produced by GitHub Actions.
+          releaseDraft: true
+          prerelease: false
