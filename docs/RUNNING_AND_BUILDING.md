@@ -74,7 +74,7 @@ Build each desktop release on that operating system:
 
 Do not plan on producing macOS release artifacts from Windows. Tauri applications use Apple's native SDK, bundle tools, signing/notarization path, and WebKit framework assumptions. Linux should also be built on Linux because its WebKitGTK/AppIndicator packaging dependencies are distro-native.
 
-The repository uses `rust-toolchain.toml` with `channel = "stable"` so Linux and macOS builders are not forced into a Windows-only Rust host. The Windows release script sets `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc` for the Tauri command so Cargo host build-dependencies do not fall back to GNU.
+The repository uses `rust-toolchain.toml` with `channel = "stable"` so Linux and macOS builders are not forced into a Windows-only Rust host. `npm run tauri-build` runs through `scripts/tauri-build.mjs`; on Windows that wrapper sets `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc`, prepends the common Strawberry Perl path, and defaults the Tauri target to `x86_64-pc-windows-msvc` so Cargo host build-dependencies do not fall back to GNU.
 
 ## 4. Windows development prerequisites
 
@@ -262,6 +262,12 @@ To request every bundle target configured in `tauri.conf.json`, use:
 npm run tauri-build
 ```
 
+To use the forwarding form, this also works on Windows:
+
+```powershell
+npm run tauri-build -- --bundles nsis
+```
+
 Building all targets can require additional Windows packaging tools such as WiX. A failure in optional MSI packaging does not invalidate a successfully produced NSIS installer, but release records must state which artifact was actually tested.
 
 Do not distribute an older executable merely because it exists in `target/release`; confirm its modification time after the build.
@@ -324,7 +330,7 @@ rustc -vV
 npm run tauri-dev
 ```
 
-If the active host is still GNU, check for a directory-level Rust override or an environment variable forcing a GNU target.
+If the active host is still GNU, use `npm run tauri-build:windows` or `npm run tauri-build -- --bundles nsis`; both commands route the build through the MSVC toolchain wrapper.
 
 ### Linux build cannot find WebKitGTK or AppIndicator
 
