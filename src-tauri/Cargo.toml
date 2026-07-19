@@ -1,6 +1,6 @@
 [package]
 name = "dfir-investigator"
-version = "0.1.0"
+version = "1.0.20"
 description = "DFIR Network Investigation Desktop App"
 authors = ["DFIR Team"]
 license = "MIT"

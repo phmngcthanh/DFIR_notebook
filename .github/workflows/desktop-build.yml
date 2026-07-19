@@ -2,6 +2,11 @@ name: Desktop builds
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Git tag and draft release name (for example, v1.0.20.19072026)
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -91,8 +96,8 @@ jobs:
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: ${{ matrix.artifact_name }}
           uploadPlainBinary: ${{ runner.os == 'Windows' }}
-          tagName: v__VERSION__
-          releaseName: DFIR Investigator v__VERSION__
+          tagName: ${{ inputs.release_tag }}
+          releaseName: DFIR Investigator ${{ inputs.release_tag }}
           releaseBody: Native Windows, Linux, and macOS packages produced by GitHub Actions.
           releaseDraft: true
           prerelease: false

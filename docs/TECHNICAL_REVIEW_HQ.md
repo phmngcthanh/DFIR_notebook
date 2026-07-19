@@ -3,7 +3,7 @@
 ## DFIR Network Investigator — Lean Offline Coordination Workbench
 
 Document version: 1.0  
-Application version reviewed: 0.1.0  
+Application version reviewed: 1.0.20
 Review date: 2026-07-18  
 Review basis: implemented source, automated gates, Windows release build, and launch verification
 

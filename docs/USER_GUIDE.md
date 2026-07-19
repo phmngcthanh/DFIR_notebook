@@ -1,7 +1,7 @@
 # DFIR Network Investigator User Guide
 
 Document version: 1.0  
-Application version: 0.1.0  
+Application version: 1.0.20
 Last reviewed: 2026-07-19
 
 ## 1. Purpose
@@ -23,7 +23,7 @@ It is a documentation and coordination tool. It does not collect evidence automa
 
 Use the package built for your operating system. The verified Windows setup executable is:
 
-- `src-tauri/target/release/bundle/nsis/DFIR-Investigator_0.1.0_x64-setup.exe`
+- `src-tauri/target/release/bundle/nsis/DFIR-Investigator_1.0.20_x64-setup.exe`
 
 The standalone release executable is `src-tauri/target/release/dfir-investigator.exe`. It is a GUI application, so it normally prints nothing in a terminal; it should open a window titled **DFIR Network Investigator**.
 

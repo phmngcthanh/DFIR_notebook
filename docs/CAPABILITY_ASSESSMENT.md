@@ -1,7 +1,7 @@
 # Capability Assessment
 
 Assessment date: 2026-07-19  
-Application version: 0.1.0, schema version 5  
+Application version: 1.0.20, schema version 5
 Assessment basis: implemented source, automated tests, production build, and the supplied 30-machine/two-perimeter-firewall scenario
 
 ## 1. Conclusion

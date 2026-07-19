@@ -1,7 +1,7 @@
 # Running and Building DFIR Network Investigator
 
 Document version: 1.0  
-Application version: 0.1.0  
+Application version: 1.0.20
 Last reviewed: 2026-07-19
 
 ## 1. Runtime model
@@ -19,7 +19,7 @@ Do not open the same case file for writing from two application instances, espec
 Recommended installer:
 
 ```text
-src-tauri\target\release\bundle\nsis\DFIR-Investigator_0.1.0_x64-setup.exe
+src-tauri\target\release\bundle\nsis\DFIR-Investigator_1.0.20_x64-setup.exe
 ```
 
 Install the application and launch **DFIR-Investigator** from Windows. Microsoft Edge WebView2 Runtime must be installed; it is normally already present on supported Windows releases.
@@ -253,7 +253,7 @@ Important outputs:
 
 ```text
 src-tauri\target\release\dfir-investigator.exe
-src-tauri\target\release\bundle\nsis\DFIR-Investigator_0.1.0_x64-setup.exe
+src-tauri\target\release\bundle\nsis\DFIR-Investigator_1.0.20_x64-setup.exe
 ```
 
 To request every bundle target configured in `tauri.conf.json`, use:
@@ -320,7 +320,7 @@ Smoke-test on both an Intel Mac and an Apple Silicon Mac when distributing the u
 
 `.github/workflows/desktop-build.yml` builds the native packages on GitHub-hosted Windows, Ubuntu 22.04, and macOS runners. It runs only when started manually with **Actions > Desktop builds > Run workflow**, so commits and tags do not automatically start expensive native builds.
 
-Every successful job stores its packages as downloadable workflow artifacts. The manual run also creates or updates a draft `v<app-version>` GitHub Release, attaches the native packages, and includes the standalone Windows executable. Review and smoke-test the draft before publishing it.
+Every successful job stores its packages as downloadable workflow artifacts. The required `release_tag` input selects the Git tag and draft GitHub Release name; the run attaches the native packages and includes the standalone Windows executable. Review and smoke-test the draft before publishing it.
 
 The macOS CI package is built as a universal Intel/Apple Silicon application. Without Apple Developer secrets it is not notarized for general distribution; configure the repository's Apple signing and notarization secrets before treating it as a public macOS release.
 

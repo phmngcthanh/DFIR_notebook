@@ -1,6 +1,6 @@
 # DFIR Network Investigator Documentation
 
-This directory documents the implemented desktop application as of 2026-07-19, application version 0.1.0.
+This directory documents the implemented desktop application as of 2026-07-19, application version 1.0.20.
 
 | Document | Audience | Purpose |
 |---|---|---|

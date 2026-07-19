@@ -7,6 +7,6 @@ export const branding = {
     'A local-first workbench for mapping networks, recording assets and evidence, correlating unreliable server clocks, and reviewing attributed expert changes.',
   supportEmail: 'support@example.invalid',
   website: '',
-  version: '0.1.0',
+  version: '1.0.20',
   copyright: 'Replace this text with your organization copyright notice.',
 } as const;

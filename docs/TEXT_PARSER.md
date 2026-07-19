@@ -1,7 +1,7 @@
 # DFIR Export Text Parser
 
 Document version: 1.0  
-Application version: 0.1.0  
+Application version: 1.0.20
 Last reviewed: 2026-07-18
 
 ## 1. Scope
