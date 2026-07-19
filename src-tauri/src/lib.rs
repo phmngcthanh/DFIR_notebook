@@ -3,6 +3,7 @@ mod history;
 mod partial_import;
 mod portable_export;
 mod secure_db;
+mod storage;
 
 use db::*;
 use history::*;
@@ -13,7 +14,7 @@ use secure_db::*;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -112,6 +113,7 @@ fn selected_path(file_path: tauri_plugin_dialog::FilePath) -> AppResult<PathBuf>
         .ok_or_else(|| "Selected location is not a local filesystem path".to_string())
 }
 
+#[cfg(not(target_os = "android"))]
 fn ensure_extension(mut path: PathBuf, extension: &str) -> PathBuf {
     if path.extension().is_none() {
         path.set_extension(extension);
@@ -161,18 +163,27 @@ fn create_new_case(
         Ok(actor) => actor,
         Err(error) => return Response::err(error),
     };
-    let selection = app_handle
-        .dialog()
-        .file()
-        .set_file_name(format!("{}.db", sanitize_filename(&name)))
-        .add_filter("DFIR Case", &["db"])
-        .blocking_save_file();
-    let path = match selection
-        .and_then(|value| selected_path(value).ok())
-        .map(|path| ensure_extension(path, "db"))
-    {
-        Some(path) => path,
-        None => return Response::err("Case creation cancelled"),
+    // Android has no native save dialog; cases live in app-private storage.
+    #[cfg(target_os = "android")]
+    let path = match storage::cases_dir(&app_handle) {
+        Ok(dir) => storage::unique_path(&dir, &sanitize_filename(&name), "db"),
+        Err(error) => return Response::err(error),
+    };
+    #[cfg(not(target_os = "android"))]
+    let path = {
+        let selection = app_handle
+            .dialog()
+            .file()
+            .set_file_name(format!("{}.db", sanitize_filename(&name)))
+            .add_filter("DFIR Case", &["db"])
+            .blocking_save_file();
+        match selection
+            .and_then(|value| selected_path(value).ok())
+            .map(|path| ensure_extension(path, "db"))
+        {
+            Some(path) => path,
+            None => return Response::err("Case creation cancelled"),
+        }
     };
     if path.exists() {
         return Response::err("Refusing to overwrite an existing case file");
@@ -235,7 +246,11 @@ async fn open_existing_case(
         None => return Response::err("Open cancelled"),
     };
     let state = app_handle.state::<DbState>();
-    let mut conn = match open_encrypted_connection(&path, database_password.as_str()) {
+    open_case_at(&state, path, database_password.as_str())
+}
+
+fn open_case_at(state: &DbState, path: PathBuf, database_password: &str) -> Response<String> {
+    let mut conn = match open_encrypted_connection(&path, database_password) {
         Ok(conn) => conn,
         Err(error) => return Response::err(format!("Failed to open case: {error}")),
     };
@@ -267,9 +282,88 @@ async fn open_existing_case(
 }
 
 #[tauri::command]
+fn open_local_case(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    file_name: String,
+    database_password: String,
+) -> Response<String> {
+    let database_password = Zeroizing::new(database_password);
+    let dir = match storage::cases_dir(&app_handle) {
+        Ok(dir) => dir,
+        Err(error) => return Response::err(error),
+    };
+    let path = match storage::safe_child_path(&dir, &file_name) {
+        Ok(path) => path,
+        Err(error) => return Response::err(error),
+    };
+    if !path.is_file() {
+        return Response::err("Case file was not found");
+    }
+    open_case_at(&state, path, database_password.as_str())
+}
+
+#[tauri::command]
+fn list_local_cases(app_handle: tauri::AppHandle) -> Response<Vec<storage::LocalCaseFile>> {
+    match storage::list_case_files(&app_handle) {
+        Ok(cases) => Response::ok(cases),
+        Err(error) => Response::err(error),
+    }
+}
+
+#[derive(Serialize)]
+struct PlatformInfo {
+    platform: String,
+    cases_dir: String,
+    exports_dir: String,
+    inbox_dir: String,
+}
+
+#[tauri::command]
+fn get_platform_info(app_handle: tauri::AppHandle) -> Response<PlatformInfo> {
+    let dirs = storage::cases_dir(&app_handle).and_then(|cases| {
+        storage::exports_dir(&app_handle)
+            .and_then(|exports| storage::inbox_dir(&app_handle).map(|inbox| (cases, exports, inbox)))
+    });
+    match dirs {
+        Ok((cases, exports, inbox)) => Response::ok(PlatformInfo {
+            platform: if cfg!(target_os = "android") {
+                "android".to_string()
+            } else {
+                "desktop".to_string()
+            },
+            cases_dir: cases.to_string_lossy().to_string(),
+            exports_dir: exports.to_string_lossy().to_string(),
+            inbox_dir: inbox.to_string_lossy().to_string(),
+        }),
+        Err(error) => Response::err(error),
+    }
+}
+
+#[tauri::command]
 fn migrate_legacy_case(
     app_handle: tauri::AppHandle,
     state: State<DbState>,
+    database_password: String,
+) -> Response<String> {
+    migrate_legacy_case_impl(app_handle, state, database_password)
+}
+
+// Legacy migration is a desktop workflow: it needs two native file dialogs
+// and plaintext legacy databases only ever existed on desktop installs.
+#[cfg(target_os = "android")]
+fn migrate_legacy_case_impl(
+    _app_handle: tauri::AppHandle,
+    _state: State<'_, DbState>,
+    _database_password: String,
+) -> Response<String> {
+    Response::err("Legacy case migration is a desktop-only workflow")
+}
+
+#[cfg(not(target_os = "android"))]
+fn migrate_legacy_case_impl(
+    app_handle: tauri::AppHandle,
+    state: State<'_, DbState>,
     database_password: String,
 ) -> Response<String> {
     let database_password = Zeroizing::new(database_password);
@@ -1634,6 +1728,7 @@ fn get_db_path(state: State<DbState>) -> Response<Option<String>> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn save_text_file(
     app_handle: &tauri::AppHandle,
     default_name: impl AsRef<str>,
@@ -1660,6 +1755,34 @@ fn save_text_file(
     }
 }
 
+// Android has no save dialog: exports land in the app-private exports
+// directory and the returned path tells the user where (retrievable via the
+// share flow later, or `adb pull` during development).
+#[cfg(target_os = "android")]
+fn save_text_file(
+    app_handle: &tauri::AppHandle,
+    default_name: impl AsRef<str>,
+    _label: &str,
+    extension: &str,
+    contents: &str,
+) -> Response<String> {
+    let dir = match storage::exports_dir(app_handle) {
+        Ok(dir) => dir,
+        Err(error) => return Response::err(error),
+    };
+    let stem = Path::new(default_name.as_ref())
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("dfir-export")
+        .to_string();
+    let path = storage::unique_path(&dir, &stem, extension);
+    match fs::write(&path, contents) {
+        Ok(()) => Response::ok(path.to_string_lossy().to_string()),
+        Err(error) => Response::err(format!("Failed to write file: {error}")),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn pick_text_file(
     app_handle: &tauri::AppHandle,
     label: &str,
@@ -1672,7 +1795,30 @@ fn pick_text_file(
         .blocking_pick_file()
         .ok_or_else(|| "Open cancelled".to_string())?;
     let path = selected_path(selection)?;
-    let length = fs::metadata(&path)
+    read_portable_file(&path)
+}
+
+// Android file picks return content:// URIs that rusqlite/fs cannot use, so
+// import commands read the newest matching file from the app-private inbox
+// directory instead (populated via `adb push` or a future share integration).
+#[cfg(target_os = "android")]
+fn pick_text_file(
+    app_handle: &tauri::AppHandle,
+    _label: &str,
+    extensions: &[&str],
+) -> AppResult<String> {
+    let dir = storage::inbox_dir(app_handle)?;
+    let path = storage::newest_file_with_extensions(&dir, extensions)?.ok_or_else(|| {
+        format!(
+            "No matching file in the import inbox. Copy the file into {} and retry.",
+            dir.display()
+        )
+    })?;
+    read_portable_file(&path)
+}
+
+fn read_portable_file(path: &Path) -> AppResult<String> {
+    let length = fs::metadata(path)
         .map_err(|error| format!("Failed to inspect file: {error}"))?
         .len();
     if length > MAX_PORTABLE_FILE_BYTES {
@@ -1712,6 +1858,9 @@ pub fn run() {
             get_current_expert,
             create_new_case,
             open_existing_case,
+            open_local_case,
+            list_local_cases,
+            get_platform_info,
             migrate_legacy_case,
             change_database_password,
             close_current_case,
