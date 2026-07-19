@@ -8,7 +8,7 @@ This file is a quick orientation for coding agents. The `docs/` folder is the au
 - [docs/RUNNING_AND_BUILDING.md](docs/RUNNING_AND_BUILDING.md) — dev/build/release per platform
 - [docs/INPUT_FORMATS.md](docs/INPUT_FORMATS.md) — snapshot, expert-bundle, and partial-import contracts
 - [PORTABLE_EXPORT_FORMAT.md](PORTABLE_EXPORT_FORMAT.md) — encrypted `.dfirx` envelope spec
-- `dfir_network_investigation_platform.md`, `encryption_analysis.md`, `technology.md`, and the root PNGs are **archived design research**, not descriptions of the current app.
+- Everything under `docs/archive/` is **archived design research**, not a description of the current app. Root-level `technology.md` is current product/capability documentation.
 
 ---
 

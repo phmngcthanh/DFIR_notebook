@@ -440,9 +440,9 @@ The implemented release passed:
 
 - ESLint;
 - TypeScript and Vite production build;
-- 7 frontend tests;
+- the full frontend Vitest suite;
 - Rust formatting check;
-- 23 Rust tests;
+- the full Rust test suite;
 - optimized Tauri build under the Windows MSVC toolchain;
 - NSIS setup generation; and
 - responsive-window launch verification of the packaged executable.

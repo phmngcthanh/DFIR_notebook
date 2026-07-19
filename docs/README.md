@@ -17,4 +17,4 @@ This directory documents the implemented desktop application as of 2026-07-19, a
 | [../PORTABLE_EXPORT_FORMAT.md](../PORTABLE_EXPORT_FORMAT.md) | Integrators | Language-neutral `.dfirx` encryption envelope specification |
 | [../THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md) | Operators and legal/security reviewers | SQLCipher Community Edition and OpenSSL attribution and license notices |
 
-The root-level `architecture_diagram.png`, `database_schema.png`, `dfir_network_investigation_platform.md`, and `encryption_analysis.md` are archived design material. They describe server-side or proposed components that are not authoritative for the current application.
+The files in `archive/` (`architecture_diagram.png`, `database_schema.png`, `encryption_comparison.png`, `dfir_network_investigation_platform.md`, and `encryption_analysis.md`) are archived design material. They describe server-side or proposed components that are not authoritative for the current application.

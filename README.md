@@ -130,7 +130,7 @@ Windows output is written to `src-tauri/target/release/bundle/nsis/`. Linux x86_
 
 The lean MVP is manual DFIR documentation and visualization. These are intentionally not implemented: FastAPI or another HTTP backend, PostgreSQL/Redis, identity authentication/RBAC, live collaboration, tasks, automated log ingestion/parsing, YARA, STIX/OpenIOC export, attack-path algorithms, standardized PDF reporting, database-password recovery, and cryptographic identity signatures.
 
-The files `dfir_network_investigation_platform.md`, `encryption_analysis.md`, `architecture_diagram.png`, `database_schema.png`, and `encryption_comparison.png` are archived design research only and are not descriptions of the current application.
+The files in `docs/archive/` (`dfir_network_investigation_platform.md`, `encryption_analysis.md`, and the design diagrams) are archived design research only and are not descriptions of the current application.
 
 ## License
 

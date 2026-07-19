@@ -32,7 +32,6 @@ export default function Dashboard({ refreshTrigger, onCaseUpdated }: Props) {
       for (const response of [caseRes, networkRes, assetRes, eventRes, iocRes, noteRes, firewallRes]) if (!response.success) throw new Error(response.error || 'Dashboard query failed');
       const assets = assetRes.data ?? []; const events = eventRes.data ?? []; const currentCase = caseRes.data ?? null;
       setCaseInfo(currentCase);
-      if (currentCase && !editing) setCaseForm({ name: currentCase.name, description: currentCase.description, clientName: currentCase.client_name, status: currentCase.status });
       setStats({ networks: (networkRes.data ?? []).length, assets: assets.length,
         infectedAssets: assets.filter((item) => item.compromise_status === 'infected' || item.compromise_status === 'suspected').length,
         incompleteAssets: assets.filter((item) => item.investigation_status !== 'completed').length,
@@ -40,8 +39,13 @@ export default function Dashboard({ refreshTrigger, onCaseUpdated }: Props) {
         iocs: (iocRes.data ?? []).length, notes: (noteRes.data ?? []).length, firewalls: (firewallRes.data ?? []).length });
       setRecentEvents([...events].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 10));
     } catch (reason) { toast.error(String(reason)); }
-  }, [editing]);
+  }, []);
   useEffect(() => { void loadStats(); }, [loadStats, refreshTrigger]);
+
+  const toggleEditing = () => {
+    if (!editing && caseInfo) setCaseForm({ name: caseInfo.name, description: caseInfo.description, clientName: caseInfo.client_name, status: caseInfo.status });
+    setEditing((value) => !value);
+  };
 
   const saveCase = async () => {
     try {
@@ -82,7 +86,7 @@ export default function Dashboard({ refreshTrigger, onCaseUpdated }: Props) {
   ];
 
   return <div className="space-y-6 p-6">
-    <div className="flex items-start justify-between"><div><h2 className="text-2xl font-bold text-slate-800">Investigation Dashboard</h2><p className="text-sm text-slate-500">Full-case counts and latest evidence</p></div><Button variant="outline" size="sm" onClick={() => setEditing((value) => !value)}><Pencil size={14} className="mr-2" />Case metadata</Button></div>
+    <div className="flex items-start justify-between"><div><h2 className="text-2xl font-bold text-slate-800">Investigation Dashboard</h2><p className="text-sm text-slate-500">Full-case counts and latest evidence</p></div><Button variant="outline" size="sm" onClick={toggleEditing}><Pencil size={14} className="mr-2" />Case metadata</Button></div>
     {editing && <Card><CardHeader><CardTitle className="text-sm">Edit case metadata</CardTitle></CardHeader><CardContent className="space-y-3"><div className="grid gap-3 md:grid-cols-3"><Field label="Case name"><Input value={caseForm.name} onChange={(event) => setCaseForm((value) => ({ ...value, name: event.target.value }))} /></Field><Field label="Client"><Input value={caseForm.clientName} onChange={(event) => setCaseForm((value) => ({ ...value, clientName: event.target.value }))} /></Field><Field label="Status"><Select value={caseForm.status} onValueChange={(status) => setCaseForm((value) => ({ ...value, status }))}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['active','closed','archived'].map((value) => <SelectItem key={value} value={value}>{value}</SelectItem>)}</SelectContent></Select></Field></div><Field label="Description"><Textarea rows={2} value={caseForm.description} onChange={(event) => setCaseForm((value) => ({ ...value, description: event.target.value }))} /></Field><p className="text-xs text-slate-500">Session expert names provide change attribution. Changing the case name does not rename the SQLite file.</p><Button onClick={() => void saveCase()}>Save case</Button></CardContent></Card>}
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{statCards.map(([label, value, icon, color]) => <Card key={String(label)}><CardContent className="flex items-center gap-3 p-4"><div className={`rounded-lg p-2 ${color}`}>{icon}</div><div><p className="text-2xl font-bold text-slate-800">{value}</p><p className="text-xs text-slate-500">{label}</p></div></CardContent></Card>)}</div>
     <div className="grid gap-6 xl:grid-cols-2"><Card><CardHeader><CardTitle className="text-sm">Recent timeline events</CardTitle></CardHeader><CardContent className="max-h-96 overflow-auto">{recentEvents.length === 0 ? <p className="py-8 text-center text-sm text-slate-400">No events yet</p> : <div className="space-y-2">{recentEvents.map((event) => <div key={event.id} className="rounded bg-slate-50 p-3 text-xs"><div className="flex items-center gap-2"><span className={`rounded px-2 py-0.5 text-white ${severityColor(event.severity)}`}>{event.severity}</span><span className="text-slate-500">{displayTime(event.timestamp)}</span></div><p className="mt-1 text-slate-800">{event.description}</p>{event.asset_name && <p className="text-slate-500">Asset: {event.asset_name}</p>}</div>)}</div>}</CardContent></Card>
