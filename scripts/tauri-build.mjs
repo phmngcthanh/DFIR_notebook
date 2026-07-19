@@ -11,7 +11,8 @@ if (process.platform === 'win32') {
 
   const strawberryPerl = 'C:\\Strawberry\\perl\\bin';
   if (existsSync(path.join(strawberryPerl, 'perl.exe'))) {
-    env.PATH = `${strawberryPerl};${env.PATH ?? ''}`;
+    const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
+    env[pathKey] = `${strawberryPerl};${env[pathKey] ?? ''}`;
   }
 
   const hasExplicitTarget = args.some((arg) => arg === '--target' || arg.startsWith('--target='));
