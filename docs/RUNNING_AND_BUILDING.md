@@ -316,6 +316,14 @@ src-tauri/target/release/bundle/dmg/*.dmg
 
 Smoke-test on both an Intel Mac and an Apple Silicon Mac when distributing the universal package.
 
+### GitHub Actions cross-platform builds
+
+`.github/workflows/desktop-build.yml` builds the native packages on GitHub-hosted Windows, Ubuntu 22.04, and macOS runners. It runs for pushes and pull requests targeting `main`, version tags matching `v*`, and manual `workflow_dispatch` runs.
+
+Every successful job stores its packages as downloadable workflow artifacts. Release publishing is intentionally separate, so this build workflow only needs read access to repository contents.
+
+The macOS CI package is built as a universal Intel/Apple Silicon application. Without Apple Developer secrets it is not notarized for general distribution; configure the repository's Apple signing and notarization secrets before treating it as a public macOS release.
+
 ## 10. Troubleshooting
 
 ### `dlltool.exe`: program not found

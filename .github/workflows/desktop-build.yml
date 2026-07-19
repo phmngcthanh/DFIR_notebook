@@ -1,0 +1,96 @@
+name: Desktop builds
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64 (NSIS)
+            runner: windows-latest
+            rust_targets: x86_64-pc-windows-msvc
+            tauri_args: --target x86_64-pc-windows-msvc --bundles nsis
+            artifact_name: windows-x64-[bundle]
+          - name: Linux x64 (Debian and AppImage)
+            runner: ubuntu-22.04
+            rust_targets: x86_64-unknown-linux-gnu
+            tauri_args: --bundles deb,appimage
+            artifact_name: linux-x64-[bundle]
+          - name: macOS universal (Intel and Apple Silicon)
+            runner: macos-latest
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauri_args: --target universal-apple-darwin --bundles app,dmg
+            artifact_name: macos-universal-[bundle]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ matrix.runner }}-${{ matrix.rust_targets }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            perl \
+            pkg-config
+
+      - name: Install Strawberry Perl
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          choco install strawberryperl --no-progress -y
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build and package desktop application
+        uses: tauri-apps/tauri-action@v0
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        with:
+          args: ${{ matrix.tauri_args }}
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: ${{ matrix.artifact_name }}
