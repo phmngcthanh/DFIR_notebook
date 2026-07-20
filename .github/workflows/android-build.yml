@@ -36,6 +36,17 @@ jobs:
       - name: Install NDK
         run: sdkmanager "ndk;27.0.12077973" "platforms;android-34" "build-tools;34.0.0"
 
+      # openssl-src's Android makefiles invoke GNU-prefixed binutils
+      # (aarch64-linux-android-ranlib etc.) that NDK r23+ no longer ships;
+      # shim them onto the LLVM equivalents.
+      - name: Shim NDK binutils names for openssl
+        run: |
+          TOOLBIN="$ANDROID_SDK_ROOT/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for tool in ranlib ar strip; do
+            ln -sf "$TOOLBIN/llvm-$tool" "$TOOLBIN/aarch64-linux-android-$tool"
+          done
+          "$TOOLBIN/aarch64-linux-android-ranlib" --version | head -1
+
       - name: Install Rust target
         run: |
           rustup target add aarch64-linux-android
