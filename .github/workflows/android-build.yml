@@ -66,7 +66,13 @@ jobs:
       - name: Build APK
         env:
           NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.0.12077973
+          # openssl's generated Makefile resolves $(RANLIB)/$(AR) as bare
+          # cross-prefixed names via PATH; give Configure absolute paths and
+          # put the (shimmed) NDK toolchain bin on PATH as a fallback.
+          RANLIB: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+          AR: ${{ env.ANDROID_SDK_ROOT }}/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
         run: |
+          export PATH="$ANDROID_SDK_ROOT/ndk/27.0.12077973/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           if [ "${{ inputs.build_profile }}" = "debug" ]; then
             npx tauri android build --apk --target aarch64 --debug
           else
