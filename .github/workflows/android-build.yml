@@ -9,9 +9,14 @@ on:
         default: debug
         type: choice
         options: [debug, release]
+      release_tag:
+        description: Optional. Attach the APK to a draft release with this tag (use the same tag as a Desktop builds run to combine them, e.g. v1.0.20.20072026). Leave empty for artifact-only.
+        required: false
+        default: ''
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   android-apk:
@@ -84,3 +89,23 @@ jobs:
           name: dfir-investigator-android-${{ inputs.build_profile }}
           path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
+
+      - name: Stage APK with release name
+        if: inputs.release_tag != ''
+        run: |
+          mkdir -p release-apk
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)
+          cp "$apk" "release-apk/dfir-investigator-${{ inputs.release_tag }}-android-arm64-${{ inputs.build_profile }}.apk"
+          ls -l release-apk
+
+      # Reuses an existing draft release with the same tag (e.g. one created
+      # by the Desktop builds workflow), so desktop bundles and the APK can
+      # ship in a single release. Publish the draft manually on GitHub.
+      - name: Attach APK to draft release
+        if: inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: DFIR Investigator ${{ inputs.release_tag }}
+          draft: true
+          files: release-apk/*.apk
