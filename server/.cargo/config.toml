@@ -1,0 +1,9 @@
+# Deliberately share the desktop crate's target directory.
+#
+# Both crates compile rusqlite with `bundled-sqlcipher-vendored-openssl`, which
+# builds SQLCipher and OpenSSL from C source. A separate target directory would
+# recompile all of that from scratch (see AGENTS.md: "do not create extra
+# target-* directories"). Sharing lets Cargo reuse the identical dependency
+# artifacts; the two crates only contend on the target-directory lock.
+[build]
+target-dir = "../src-tauri/target"

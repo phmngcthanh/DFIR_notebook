@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { downloadText, invoke, pickTextFile } from '@/lib/api';
 import { AlertTriangle, CheckCircle2, FileJson2, FileUp, ListChecks, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -59,10 +59,11 @@ export default function PartialImportPanel({ disabled, onApplied }: Props) {
 
   const saveTemplate = async () => {
     try {
-      const response = await invoke<ApiResponse<string>>('save_partial_import_template');
-      if (!response.success) throw new Error(response.error || 'Could not save template');
-      toast.success('Plain partial-import template saved');
-    } catch (reason) { if (!String(reason).includes('cancelled')) toast.error(String(reason)); }
+      const response = await invoke<ApiResponse<string>>('get_partial_import_template');
+      if (!response.success || !response.data) throw new Error(response.error || 'Could not save template');
+      downloadText('dfir-partial-import-template.json', response.data);
+      toast.success('Plain partial-import template downloaded');
+    } catch (reason) { toast.error(String(reason)); }
   };
 
   const previewText = async () => {
@@ -80,12 +81,14 @@ export default function PartialImportPanel({ disabled, onApplied }: Props) {
   const loadFile = async () => {
     setBusy(true);
     try {
-      const response = await invoke<ApiResponse<PartialImportPreview>>('load_partial_import_from_file');
+      const file = await pickTextFile('.json');
+      if (!file) return;
+      const response = await invoke<ApiResponse<PartialImportPreview>>('preview_partial_import_text', { jsonData: file.text });
       if (!response.success || !response.data) throw new Error(response.error || 'Could not load plain JSON');
       setJsonText('');
       initializePreview(response.data);
       toast.success(`Verified ${response.data.changes.length} proposed record(s)`);
-    } catch (reason) { if (!String(reason).includes('cancelled')) toast.error(String(reason)); }
+    } catch (reason) { toast.error(String(reason)); }
     finally { setBusy(false); }
   };
 

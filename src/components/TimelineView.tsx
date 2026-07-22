@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '@/lib/api';
 import { DataSet } from 'vis-data';
 import { Timeline as VisTimeline } from 'vis-timeline';
 import { Clock, Pencil, Plus, Search, ServerCog, Trash2 } from 'lucide-react';

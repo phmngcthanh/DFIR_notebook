@@ -32,6 +32,16 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     host: true,
+    // `npm run dev` serves the UI while the Rust case server handles /api.
+    // Point DFIR_SERVER_URL at an https:// address once you stop using
+    // --insecure; `secure: false` accepts the server's self-signed certificate.
+    proxy: {
+      '/api': {
+        target: process.env.DFIR_SERVER_URL ?? 'http://127.0.0.1:8443',
+        changeOrigin: true,
+        secure: false,
+      },
+    },
   },
   resolve: {
     alias: {

@@ -1,11 +1,19 @@
 # DFIR Network Investigator Documentation
 
-This directory documents the implemented desktop application as of 2026-07-19, application version 1.0.20.
+This directory documents application version 1.0.20.
+
+**Branch note.** This is the `server` branch: the UI runs in a browser against a
+centralized case server. [SERVER.md](SERVER.md) is authoritative for anything
+about running, authenticating, or deploying. The other documents describe the
+investigation features and data formats, which are shared with the offline
+desktop product on `main` and unchanged here — where they mention native file
+dialogs, Tauri, or the daily bundle-merge meeting, read SERVER.md instead.
 
 | Document | Audience | Purpose |
 |---|---|---|
+| [SERVER.md](SERVER.md) | Operators and engineers | Running the case server, CLI flags, TLS, case directory, security model, and live update |
 | [USER_GUIDE.md](USER_GUIDE.md) | Investigators and merge leads | Daily operating instructions, collaboration, encryption, and troubleshooting |
-| [RUNNING_AND_BUILDING.md](RUNNING_AND_BUILDING.md) | Operators, developers, and release engineers | Installed/standalone startup, platform prerequisites, development commands, Windows/Linux/macOS release packaging, and build troubleshooting |
+| [RUNNING_AND_BUILDING.md](RUNNING_AND_BUILDING.md) | Operators, developers, and release engineers | Desktop-shell startup, platform prerequisites, development commands, and build troubleshooting |
 | [WHITE_LABELING.md](WHITE_LABELING.md) | Product owners and release engineers | Editable About-page branding and native package identity |
 | [INPUT_FORMATS.md](INPUT_FORMATS.md) | Investigators, LLM/script integrators, and reviewers | Accepted case/snapshot/bundle/partial formats, complete partial field reference, examples, and merge semantics |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Engineers, security reviewers, and maintainers | Application structure, data model, trust boundaries, history model, and deployment |

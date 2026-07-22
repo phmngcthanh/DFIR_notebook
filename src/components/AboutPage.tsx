@@ -3,9 +3,9 @@ import { branding } from '@/config/branding';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 
 const capabilities = [
-  [HardDrive, 'Local by design', 'Case data stays in an embedded SQLite case file; no database server or web service is required.'],
-  [LockKeyhole, 'Protected cases and exports', 'Case-file passwords and optional export passwords are independent.'],
-  [GitCompareArrows, 'Expert review and merge', 'Attributed changes can be compared and selectively merged in one transaction.'],
+  [HardDrive, 'One encrypted case file', 'Case data stays in an embedded SQLCipher case file held by the team\'s server; no separate database service is required.'],
+  [LockKeyhole, 'Password-only access', 'The case password is the sole credential — no accounts, no roles. Export passwords are independent of it.'],
+  [GitCompareArrows, 'Attributed shared editing', 'Everyone edits the same case; each change carries its expert name, and offline bundles can still be reviewed and merged in one transaction.'],
   [GitGraph, 'Shared operational picture', 'Zones, devices, NICs, connections, firewalls, evidence, and clock-corrected events stay connected.'],
 ] as const;
 

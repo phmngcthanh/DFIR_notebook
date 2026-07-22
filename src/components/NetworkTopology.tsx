@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '@/lib/api';
 import CytoscapeComponent from 'react-cytoscapejs';
 import type cytoscape from 'cytoscape';
 import { Download, GitGraph, Maximize2, RefreshCw, RotateCcw, Save, ZoomIn, ZoomOut } from 'lucide-react';

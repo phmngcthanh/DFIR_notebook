@@ -1,0 +1,37 @@
+[package]
+name = "dfir-server"
+version = "1.0.20"
+description = "DFIR Network Investigation centralized case server"
+authors = ["DFIR Team"]
+license = "AGPL-3.0-only"
+edition = "2021"
+rust-version = "1.77.2"
+
+[[bin]]
+name = "dfir-server"
+path = "src/main.rs"
+
+[dependencies]
+# Shared with src-tauri. These versions must stay identical to
+# ../src-tauri/Cargo.toml because both crates compile the same core sources.
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl", "chrono", "uuid", "serde_json"] }
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+uuid = { version = "1.10", features = ["serde", "v4"] }
+aes-gcm = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+getrandom = "0.2"
+zeroize = "1.8"
+
+# Server only.
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rcgen = "0.13"
+sha2 = "0.10"
+clap = { version = "4", features = ["derive"] }

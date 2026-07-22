@@ -1,9 +1,27 @@
-# DFIR Network Investigator
+# DFIR Network Investigator — centralized server branch
 
-Lean, offline desktop workbench for documenting a network investigation. The application is React inside Tauri; Rust talks directly to an embedded SQLite case file. There is no web service, database server, account service, or cloud dependency.
+Browser-based workbench for documenting a network investigation, backed by a small
+Rust server that holds the SQLCipher case files. The team edits **one** case at
+the same time instead of exchanging change bundles at a daily meeting.
+
+> **This is the `server` branch.** [`main`](../../tree/main) is the offline Tauri
+> desktop product. Both shells compile the same investigation core: `src-tauri/`
+> is unmodified here, and the server includes its five core modules by path. The
+> browser UI on this branch talks HTTP, so the desktop *bundle* is not a
+> supported output — see [docs/SERVER.md](docs/SERVER.md).
+
+There are still no user accounts. The case database password is the credential,
+and the expert name beside it is self-declared attribution.
+
+```bash
+npm install && npm run build
+npm run server-build -- --release
+./dfir-server --cases ./cases --web ./dist
+```
 
 ## Documentation
 
+- [Running the case server](docs/SERVER.md)
 - [Documentation index](docs/README.md)
 - [Investigator user guide](docs/USER_GUIDE.md)
 - [Running, development, and Windows/Linux/macOS release builds](docs/RUNNING_AND_BUILDING.md)
@@ -33,21 +51,18 @@ Lean, offline desktop workbench for documenting a network investigation. The app
 
 ## Expert collaboration model
 
-There are no user accounts, identity proof, roles, or per-expert permissions. Each physical `.db` file has one shared database password that must unlock it when opened. After unlock, an expert enters a self-declared name; that name, session ID, timestamp, commit message, and optional assignment scope are stored with every local change.
+There are no user accounts, identity proof, roles, or per-expert permissions. Each case `.db` on the server has one shared database password. Unlocking a case with that password *is* the login; the expert then enters a self-declared name, and that name, session ID, timestamp, commit message, and optional assignment scope are stored with every change.
 
 Scope can name a department, room, DMS/DMZ, or other assignment and can select network zones. It filters and labels the workspace but never prevents an expert from editing outside the scope.
 
-The recommended daily workflow is:
+The daily workflow is:
 
-1. The lead distributes identical copies of the agreed master `.db` file.
-2. Each expert enters their name, optionally selects focus zones, and works independently.
-3. Each expert saves a change bundle from **Expert Merge**. It contains commits since the shared baseline, not a blind full-case overwrite.
-4. At the meeting, the lead loads one or more bundles. Loading only creates previews.
-5. The team reviews clean edits, auto-mergeable edits, deletes, and same-field conflicts. For a conflict, choose the master or incoming value per field, or leave the entity unselected.
-6. Applying selected edits runs as one SQLite transaction and adds a merge commit with both history parents. Other loaded previews are recalculated against the new master.
-7. After all accepted changes are applied, mark the current head as the next shared baseline and redistribute that database.
+1. The lead puts the case `.db` in the server's case directory (or creates it from the browser when `--allow-create` is on).
+2. Each expert opens the server in a browser, picks the case, enters the case password and their name, and optionally selects focus zones.
+3. Everyone edits the same case. Each write is committed with its author, and every other open browser refreshes within about five seconds.
+4. Writes serialize per case, so two experts editing the same record is last-write-wins with both edits attributed in the audit history.
 
-Unknown baselines and different case IDs are not silently merged. Repeated bundles are detected. A full JSON snapshot remains available for backup and legacy transfer; legacy imports keep UUID skip-without-overwrite behavior and return per-entity inserted/skipped counts.
+**Case Transfer** keeps the way back in for an expert who worked offline: upload their change bundle, review clean edits, auto-mergeable edits, deletes, and same-field conflicts, then apply the selection as one SQLite transaction with a merge commit. Unknown baselines and different case IDs are not silently merged, and repeated bundles are detected. Full JSON snapshots remain available for backup and legacy transfer; add-only imports keep UUID skip-without-overwrite behavior and return per-entity inserted/skipped counts.
 
 ## Portable export protection
 
@@ -64,10 +79,10 @@ The database password and export password are separate controls. Changing one ne
 
 ## Local data and safety
 
-- A case is one SQLCipher-encrypted SQLite file at the location selected in the native Save dialog.
-- Creating and opening a case requires its database-file password. The password is never retained in application state or bound to an expert name.
-- **Dashboard → Database file security** changes the password for only the open physical copy. **Lock / Close Case** drops the database connection and requires the password on the next open.
-- A legacy plaintext `.db` can be converted to a newly selected encrypted copy; the source is left unchanged.
+- A case is one SQLCipher-encrypted SQLite file in the server's `--cases` directory.
+- Unlocking a case requires its database-file password. The password is never retained in server state, hashed, or bound to an expert name; SQLCipher deriving a working key *is* the check.
+- **Dashboard → Database file security** changes the password for that case and signs every other expert on it out. **End Session** drops your token; the case connection closes once the last expert leaves.
+- A legacy plaintext `.db` is converted with the desktop build; drop the encrypted result into the case directory.
 - Every connection enables foreign keys and a five-second busy timeout.
 - Opening a case validates required tables and the single case record, runs `PRAGMA user_version` migrations, repairs legacy orphan references, backfills primary interfaces, and runs integrity and foreign-key checks.
 - Multi-table edits and imports are transactional.
@@ -78,57 +93,55 @@ The database password and export password are separate controls. Changing one ne
 ## Architecture
 
 ```text
-React 19 + TypeScript + Vite
+Browser: React 19 + TypeScript + Vite
   ├─ Cytoscape.js topology
   ├─ Vis Timeline
-  └─ Tauri invoke (in-process IPC)
-        └─ Rust commands
-             └─ rusqlite + bundled SQLCipher/OpenSSL
-                  ├─ investigation tables
-                  └─ append-only commit/change history
+  └─ src/lib/api.ts  →  POST /api/cmd/{command}   (Bearer token)
+        ↓ HTTPS (rustls; --insecure for development)
+     server/ — axum
+        ├─ static dist/ + SPA fallback + strict CSP
+        ├─ sessions: token → { case, expert }
+        ├─ cases:    id → { connection, revision }
+        └─ rusqlite + bundled SQLCipher/OpenSSL
+             ├─ investigation tables
+             └─ append-only commit/change history
 ```
 
-Rust native file access is used only after a user selects a case, import, or export path. The unused frontend filesystem plugin and broad filesystem capabilities have been removed. Tauri uses a local-only CSP.
+The four core Rust modules are compiled straight out of `src-tauri/src/`, unmodified, so the server and the desktop app cannot drift apart. The server reads and writes only inside its case directory, and serves the UI with the same local-only CSP the desktop app uses.
 
 ## Quick start from source
 
 - Node.js 20 or newer.
-- Rust stable. Windows releases use the MSVC host; Linux and macOS use their native stable host.
-- Platform WebView/build prerequisites: WebView2 on Windows, WebKitGTK development packages on Ubuntu/Debian, and Xcode Command Line Tools on macOS.
+- Rust stable. Windows uses the MSVC host; Linux and macOS use their native stable host.
 - Strawberry Perl on Windows only, build-time only, required to compile the vendored OpenSSL used by SQLCipher.
 
-Install dependencies, then start the complete desktop application:
+Install dependencies, build the UI, then start the server:
 
 ```bash
 npm install
-npm run tauri-dev
+npm run build
+npm run server-dev        # cargo run -- --cases ./cases --allow-create --insecure
 ```
 
-`npm run dev` starts only the Vite frontend; native case files and Tauri commands require `npm run tauri-dev`. See [RUNNING_AND_BUILDING.md](docs/RUNNING_AND_BUILDING.md) for standalone/installer startup, prerequisites, build outputs, and troubleshooting.
+`npm run dev` starts the Vite dev server and proxies `/api` to the running case server, so both can run side by side. See [docs/SERVER.md](docs/SERVER.md) for flags, TLS, and deployment.
 
 ## Development and release gates
 
 ```powershell
-npm run dev
 npm run lint
 npm run build
 npm test
+npm run server-test
 
-cd src-tauri
-cargo test
-cd ..
-
-npm run tauri-dev
-npm run tauri-build:windows
+# The shared investigation core must still compile for the desktop shell.
+cargo +stable-x86_64-pc-windows-msvc check --manifest-path src-tauri\Cargo.toml
 ```
 
-On Windows machines whose default Rust host is GNU, run Rust checks with `cargo +stable-x86_64-pc-windows-msvc test --manifest-path src-tauri\Cargo.toml` or set the MSVC host as the default first.
-
-Windows output is written to `src-tauri/target/release/bundle/nsis/`. Linux x86_64 builds use `npm run tauri-build:linux` on Ubuntu/Debian. macOS builds use `npm run tauri-build:mac-intel`, `npm run tauri-build:mac-apple`, or `npm run tauri-build:mac-universal` on macOS. See [RUNNING_AND_BUILDING.md](docs/RUNNING_AND_BUILDING.md) for platform prerequisites and artifact paths, and [INPUT_FORMATS.md](docs/INPUT_FORMATS.md) for the complete plain/encrypted snapshot, expert-bundle, and structured partial-import contracts.
+`npm run server-*` selects the MSVC host of the toolchain pinned in `rust-toolchain.toml` and puts Strawberry Perl on `PATH`, which the vendored SQLCipher/OpenSSL build needs on Windows. See [INPUT_FORMATS.md](docs/INPUT_FORMATS.md) for the complete plain/encrypted snapshot, expert-bundle, and structured partial-import contracts.
 
 ## Deferred work
 
-The lean MVP is manual DFIR documentation and visualization. These are intentionally not implemented: FastAPI or another HTTP backend, PostgreSQL/Redis, identity authentication/RBAC, live collaboration, tasks, automated log ingestion/parsing, YARA, STIX/OpenIOC export, attack-path algorithms, standardized PDF reporting, database-password recovery, and cryptographic identity signatures.
+These are intentionally not implemented: PostgreSQL/Redis, identity authentication/RBAC beyond the case password, per-field locking or operational-transform live editing, tasks, automated log ingestion/parsing, YARA, STIX/OpenIOC export, attack-path algorithms, standardized PDF reporting, database-password recovery, and cryptographic identity signatures.
 
 The files in `docs/archive/` (`dfir_network_investigation_platform.md`, `encryption_analysis.md`, and the design diagrams) are archived design research only and are not descriptions of the current application.
 

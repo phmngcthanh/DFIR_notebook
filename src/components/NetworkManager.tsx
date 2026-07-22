@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '@/lib/api';
 import { Cable, Network as NetworkIcon, Pencil, Plus, Search, Shield, Trash2, Wifi } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';

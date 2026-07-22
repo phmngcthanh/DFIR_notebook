@@ -4,8 +4,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ExportImport from '@/components/ExportImport';
 import type { MergePreview } from '@/types';
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
+const { invokeMock, pickTextFileMock, downloadTextMock } = vi.hoisted(() => ({
+  invokeMock: vi.fn(),
+  pickTextFileMock: vi.fn(),
+  downloadTextMock: vi.fn(),
+}));
+vi.mock('@/lib/api', () => ({
+  invoke: invokeMock,
+  pickTextFile: pickTextFileMock,
+  downloadText: downloadTextMock,
+}));
 
 const preview: MergePreview = {
   bundle_id: 'bundle-1', case_id: 'case-1', base_commit_id: 'base', head_commit_id: 'head', exported_by: 'Bob', exported_at: '2025-01-02T00:00:00Z', common_base: true,
@@ -15,12 +23,14 @@ const preview: MergePreview = {
   ],
 };
 
-describe('expert merge review', () => {
+describe('offline expert bundle review', () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    pickTextFileMock.mockReset();
+    downloadTextMock.mockReset();
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'list_case_history') return { success: true, data: [] };
-      if (command === 'load_change_bundle_from_file') return { success: true, data: preview };
+      if (command === 'load_change_bundle_text') return { success: true, data: preview };
       if (command === 'apply_pending_change_bundle') return { success: true, data: { applied: 1, skipped: 1, merge_commit_id: 'merge-1' } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -28,9 +38,13 @@ describe('expert merge review', () => {
 
   it('selects clean edits and leaves conflicts for the team to decide', async () => {
     const user = userEvent.setup(); const onImport = vi.fn();
+    pickTextFileMock.mockResolvedValue({ name: 'changes-Bob.json', text: '{"bundle":true}' });
     render(<ExportImport refreshTrigger={0} onImport={onImport} />);
     await user.click(screen.getByRole('button', { name: 'Load for review' }));
     await screen.findByText(/2 entity changes/);
+
+    // The browser reads the file; only its text reaches the server.
+    expect(invokeMock).toHaveBeenCalledWith('load_change_bundle_text', { contents: '{"bundle":true}', password: null });
 
     const checkboxes = screen.getAllByRole('checkbox').filter((element) => !element.closest('label'));
     expect(checkboxes[0]).toBeChecked();
@@ -47,18 +61,20 @@ describe('expert merge review', () => {
     expect(onImport).toHaveBeenCalled();
   });
 
-  it('passes a confirmed portable password only for encrypted exports', async () => {
+  it('passes a confirmed portable password only for encrypted snapshot downloads', async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'list_case_history') return { success: true, data: [] };
-      if (command === 'save_change_bundle_to_file') return { success: true, data: 'changes-Alice.dfirx' };
+      if (command === 'export_case_json') return { success: true, data: '{"dfirx":true}' };
       throw new Error(`Unexpected command: ${command}`);
     });
     const user = userEvent.setup();
     render(<ExportImport refreshTrigger={0} onImport={vi.fn()} />);
-    await user.click(screen.getByRole('checkbox', { name: 'Encrypt new snapshots and change bundles' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Encrypt downloaded snapshots' }));
     await user.type(screen.getByLabelText('Export password'), 'portable-secret');
     await user.type(screen.getByLabelText('Confirm password'), 'portable-secret');
-    await user.click(screen.getByRole('button', { name: 'Save change bundle' }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('save_change_bundle_to_file', { password: 'portable-secret' }));
+    await user.click(screen.getByRole('button', { name: 'Download snapshot' }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('export_case_json', { password: 'portable-secret' }));
+    expect(downloadTextMock).toHaveBeenCalledWith('case-backup.dfirx', '{"dfirx":true}');
   });
 });

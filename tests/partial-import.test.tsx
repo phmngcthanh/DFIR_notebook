@@ -5,7 +5,7 @@ import PartialImportPanel from '@/components/PartialImportPanel';
 import type { PartialImportPreview } from '@/types';
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
+vi.mock('@/lib/api', () => ({ invoke: invokeMock, downloadText: vi.fn(), pickTextFile: vi.fn() }));
 
 const preview: PartialImportPreview = {
   preview_id: 'preview-1', case_id: 'case-1', source: 'Expert extraction', source_kind: 'partial', warnings: [],

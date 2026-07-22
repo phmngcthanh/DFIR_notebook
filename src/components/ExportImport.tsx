@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { downloadText, invoke, pickTextFile } from '@/lib/api';
 import {
-  AlertTriangle, CheckCircle2, Clock3, Database, Download, GitCompare,
-  FileOutput, History, LockKeyhole, Network, RefreshCw, Trash2, Upload, Users,
+  AlertTriangle, CheckCircle2, Clock3, Database, GitCompare,
+  FileOutput, History, LockKeyhole, Network, RefreshCw, Trash2, Upload,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -55,61 +55,63 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
     });
   };
 
+  // The browser reads the file the expert picked and posts its text; the server
+  // never sees a filesystem path.
   const loadBundle = async () => {
     setBusy(true);
     try {
-      const response = await invoke<ApiResponse<MergePreview>>('load_change_bundle_from_file', { password: importPassword || null });
+      const file = await pickTextFile('.json,.dfirx');
+      if (!file) return;
+      const response = await invoke<ApiResponse<MergePreview>>('load_change_bundle_text', { contents: file.text, password: importPassword || null });
       if (!response.success || !response.data) throw new Error(response.error || 'Could not load change bundle');
       addPreview(response.data);
       setImportPassword('');
       toast.success(`Loaded changes from ${response.data.exported_by}`);
-    } catch (reason) { if (!String(reason).includes('cancelled')) toast.error(String(reason)); }
+    } catch (reason) { toast.error(String(reason)); }
     finally { setBusy(false); }
   };
 
-  const nativeAction = async (command: 'save_export_to_file' | 'save_change_bundle_to_file', success: string) => {
+  // The server returns the text and the browser downloads it, which is the web
+  // half of the desktop save dialog.
+  const saveSnapshot = async () => {
     setBusy(true);
     try {
       const password = selectedExportPassword(encryptExports, exportPassword, exportPasswordConfirmation);
-      const response = await invoke<ApiResponse<string>>(command, { password });
-      if (!response.success) throw new Error(response.error || 'File save failed');
+      const response = await invoke<ApiResponse<string>>('export_case_json', { password });
+      if (!response.success || response.data === undefined) throw new Error(response.error || 'Export failed');
+      downloadText(password ? 'case-backup.dfirx' : 'case-backup.json', response.data);
       setExportPassword(''); setExportPasswordConfirmation('');
-      toast.success(success);
-    } catch (reason) { if (!String(reason).includes('cancelled')) toast.error(String(reason)); }
+      toast.success('Case snapshot downloaded');
+    } catch (reason) { toast.error(String(reason)); }
     finally { setBusy(false); }
   };
 
   const loadLegacySnapshot = async () => {
     setBusy(true);
     try {
-      const response = await invoke<ApiResponse<ImportSummary>>('load_import_from_file', { password: importPassword || null });
+      const file = await pickTextFile('.json,.dfirx');
+      if (!file) return;
+      const response = await invoke<ApiResponse<ImportSummary>>('import_case_json', { jsonData: file.text, password: importPassword || null });
       if (!response.success || !response.data) throw new Error(response.error || 'Snapshot import failed');
       setImportPassword('');
       setImportSummary(response.data); onImport(); await loadHistory();
-      toast.success('Legacy snapshot imported');
-    } catch (reason) { if (!String(reason).includes('cancelled')) toast.error(String(reason)); }
+      toast.success('Snapshot imported');
+    } catch (reason) { toast.error(String(reason)); }
     finally { setBusy(false); }
   };
 
   const saveTextReport = async () => {
     setBusy(true);
     try {
-      const response = await invoke<ApiResponse<string>>('save_export_as_text', { password: importPassword || null });
-      if (!response.success) throw new Error(response.error || 'Could not render export as text');
+      const file = await pickTextFile('.json,.dfirx');
+      if (!file) return;
+      const response = await invoke<ApiResponse<string>>('render_export_report', { contents: file.text, password: importPassword || null });
+      if (!response.success || response.data === undefined) throw new Error(response.error || 'Could not render export as text');
+      downloadText('dfir-export-report.txt', response.data);
       setImportPassword('');
-      toast.success('Plain-text report saved');
-    } catch (reason) { if (!String(reason).includes('cancelled')) toast.error(String(reason)); }
-    finally { setBusy(false); }
-  };
-
-  const markBaseline = async () => {
-    if (!confirm('Mark the current history head as the shared starting point? Do this on the agreed master copy immediately before redistributing it to experts.')) return;
-    try {
-      const response = await invoke<ApiResponse<string>>('mark_current_shared_baseline');
-      if (!response.success) throw new Error(response.error || 'Could not mark baseline');
-      toast.success('Shared baseline marked');
-      await loadHistory();
+      toast.success('Plain-text report downloaded');
     } catch (reason) { toast.error(String(reason)); }
+    finally { setBusy(false); }
   };
 
   const chooseField = (preview: MergePreview, change: MergePreviewChange, field: FieldDiff, side: 'local' | 'incoming') => {
@@ -191,14 +193,14 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
   return (
     <div className="space-y-6 p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><GitCompare className="text-cyan-600" />Expert Merge</h2>
-          <p className="mt-1 max-w-3xl text-sm text-slate-500">Review attributed changes against the shared case baseline. Scope is advisory; every accepted edit remains visible in history.</p></div>
+        <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><GitCompare className="text-cyan-600" />Case Transfer</h2>
+          <p className="mt-1 max-w-3xl text-sm text-slate-500">Everyone on this server edits the same case, so routine work needs no merging. Use this page to take a backup out, bring an offline expert's bundle in, and read the audit history.</p></div>
         <Badge variant="outline">{pendingCount} pending changes</Badge>
       </div>
 
       <Card className="border-slate-200"><CardHeader><CardTitle className="flex items-center gap-2 text-base"><LockKeyhole size={18} />Portable-file protection</CardTitle></CardHeader><CardContent className="grid gap-5 lg:grid-cols-2">
         <div className="space-y-3"><div><p className="text-sm font-medium text-slate-800">New exports</p><p className="text-xs text-slate-500">Plain JSON stays readable by other tools. Encrypted `.dfirx` files keep the exact JSON payload inside a portable password envelope.</p></div>
-          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={encryptExports} onChange={(event) => setEncryptExports(event.target.checked)} />Encrypt new snapshots and change bundles</label>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={encryptExports} onChange={(event) => setEncryptExports(event.target.checked)} />Encrypt downloaded snapshots</label>
           {encryptExports && <div className="grid gap-3 sm:grid-cols-2"><PasswordField label="Export password" value={exportPassword} onChange={setExportPassword} /><PasswordField label="Confirm password" value={exportPasswordConfirmation} onChange={setExportPasswordConfirmation} /></div>}
           <p className="text-xs text-slate-500">Minimum 6 characters. This password is independent of the session expert name and is never stored.</p>
         </div>
@@ -210,20 +212,14 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
 
       <PartialImportPanel disabled={busy} onApplied={() => { onImport(); void loadHistory(); }} />
 
-      <div className="grid gap-4 lg:grid-cols-3 xl:grid-cols-5">
-        <ActionCard icon={<Download />} title="Export my changes" description="Save a plain JSON or encrypted portable change bundle since the shared baseline." action="Save change bundle" disabled={busy} onClick={() => void nativeAction('save_change_bundle_to_file', 'Change bundle saved')} />
-        <ActionCard icon={<Upload />} title="Review expert bundle" description="Load a plain or encrypted teammate bundle without changing the case." action="Load for review" disabled={busy} onClick={() => void loadBundle()} />
-        <ActionCard icon={<Database />} title="Backup snapshot" description="Save the full case as interoperable JSON or an encrypted portable export." action="Save snapshot" disabled={busy} onClick={() => void nativeAction('save_export_to_file', 'Case snapshot saved')} />
-        <ActionCard icon={<Database />} title="Encrypted/add-only snapshot" description="Legacy password-aware path: add missing UUIDs only. For selective sections or overwrites, use Plain structured partial import above." action="Import add-only" disabled={busy} onClick={() => void loadLegacySnapshot()} />
-        <ActionCard icon={<FileOutput />} title="Text parser" description="Read a snapshot or change bundle and save a display-only plain-text report. The case is not changed." action="Create text report" disabled={busy} onClick={() => void saveTextReport()} />
+      <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4">
+        <ActionCard icon={<Database />} title="Backup snapshot" description="Download the full case as interoperable JSON or an encrypted portable export." action="Download snapshot" disabled={busy} onClick={() => void saveSnapshot()} />
+        <ActionCard icon={<Upload />} title="Review expert bundle" description="Upload a plain or encrypted bundle from an expert who worked offline. Loading only creates a preview." action="Load for review" disabled={busy} onClick={() => void loadBundle()} />
+        <ActionCard icon={<Database />} title="Add-only snapshot import" description="Password-aware path: add missing UUIDs only. For selective sections or overwrites, use Plain structured partial import above." action="Import add-only" disabled={busy} onClick={() => void loadLegacySnapshot()} />
+        <ActionCard icon={<FileOutput />} title="Text parser" description="Read a snapshot or change bundle and download a display-only plain-text report. The case is not changed." action="Create text report" disabled={busy} onClick={() => void saveTextReport()} />
       </div>
 
       {importSummary && <ImportSummaryPanel summary={importSummary} onClose={() => setImportSummary(null)} />}
-
-      <Card className="border-cyan-200 bg-cyan-50/40"><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
-        <div><p className="font-medium text-slate-800">Shared baseline</p><p className="text-xs text-slate-600">After the team accepts all daily edits, mark the master copy and redistribute that same database for the next work period.</p></div>
-        <Button variant="outline" onClick={() => void markBaseline()}><Users size={15} className="mr-2" />Mark current head</Button>
-      </CardContent></Card>
 
       {previews.map((preview) => <BundleReview key={preview.bundle_id} preview={preview} selected={selected} resolutions={resolutions} resolvedFields={resolvedFields}
         busy={busy} setSelected={setSelected} chooseField={chooseField} setEntityPolicy={(entityType, policy) => setExpertSectionPolicy(preview, entityType, policy)} onApply={() => void applyPreview(preview)} onDiscard={() => void discard(preview)} />)}
