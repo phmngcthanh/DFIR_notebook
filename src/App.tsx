@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
   Clock, Download, FileText, GitGraph, LayoutDashboard,
   Info, LockKeyhole, Network, Server, ShieldAlert, SquareKanban, UserRound, Users,
@@ -11,8 +11,8 @@ import ExpertSetup from '@/components/ExpertSetup';
 import { Toaster } from '@/components/ui/sonner';
 import { branding } from '@/config/branding';
 import {
-  getServerState, getToken, invoke, logout, SESSION_EXPIRED_EVENT, setToken,
-  type SessionPayload,
+  getObservedRevision, getServerState, getToken, invoke, logout, noteRevision,
+  resetRevision, SESSION_EXPIRED_EVENT, setToken, type SessionPayload,
 } from '@/lib/api';
 import './App.css';
 
@@ -51,16 +51,15 @@ function App() {
   const [showExpertSetup, setShowExpertSetup] = useState(false);
   const [restoring, setRestoring] = useState(() => Boolean(getToken()));
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const revision = useRef<number | null>(null);
 
   const endSession = useCallback(() => {
     setToken(null);
+    resetRevision();
     setCurrentCase(null);
     setCurrentExpert(null);
     setActiveExperts([]);
     setCurrentView('dashboard');
     setShowExpertSetup(false);
-    revision.current = null;
   }, []);
 
   // A token survives a page reload, so pick the session back up from the server
@@ -108,11 +107,15 @@ function App() {
         const state = await getServerState();
         if (cancelled) return;
         setActiveExperts(state.activeExperts);
-        if (revision.current !== null && revision.current !== state.revision) {
+        // Only a revision *beyond* what this browser has already observed — via
+        // its own writes' response headers or a prior poll — means a teammate
+        // edited. Our own writes never trip this.
+        const known = getObservedRevision();
+        if (known >= 0 && state.revision > known) {
           setRefreshTrigger((value) => value + 1);
           toast.info('The case was updated by another expert');
         }
-        revision.current = state.revision;
+        noteRevision(state.revision);
       } catch {
         // A dropped poll is not worth interrupting the investigator over, and an
         // expired session already surfaces through SESSION_EXPIRED_EVENT.
@@ -127,9 +130,9 @@ function App() {
   }, [currentCase]);
 
   const handleSession = (session: SessionPayload) => {
+    // unlock/create already seeded the observed revision in the api layer.
     setCurrentCase(session.case ?? null);
     setCurrentExpert(session.expert);
-    revision.current = session.revision;
     setCurrentView('dashboard');
     setRefreshTrigger((value) => value + 1);
   };

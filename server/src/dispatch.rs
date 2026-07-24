@@ -16,6 +16,8 @@ use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
+use axum::http::{HeaderMap, HeaderValue};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -57,7 +59,7 @@ pub async fn dispatch(
     session: SessionContext,
     Path(command): Path<String>,
     body: Bytes,
-) -> Json<Value> {
+) -> impl IntoResponse {
     let args = if body.is_empty() {
         Ok(json!({}))
     } else {
@@ -66,10 +68,19 @@ pub async fn dispatch(
     };
 
     let outcome = args.and_then(|args| run(&state, &session, &command, args));
-    Json(match outcome {
+    let payload = Json(match outcome {
         Ok(data) => json!({ "success": true, "data": data, "error": Value::Null }),
         Err(error) => json!({ "success": false, "data": Value::Null, "error": error }),
-    })
+    });
+
+    // Every response reports the case revision *after* this call, so a browser
+    // recognizes the bump its own write caused and does not mistake it for a
+    // teammate's edit when the next poll comes around.
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(&session.case.revision().to_string()) {
+        headers.insert("x-case-revision", value);
+    }
+    (headers, payload)
 }
 
 pub(crate) fn run(

@@ -60,6 +60,31 @@ export function setToken(token: string | null): void {
   else sessionStorage.removeItem(TOKEN_KEY);
 }
 
+/**
+ * Highest case revision this browser has already seen — through the header on
+ * its own command responses, through unlock, and through each poll. The poll
+ * only announces a teammate's edit when the server has moved *past* this value,
+ * so a browser never mistakes the bump from its own write for someone else's.
+ * `-1` means "no baseline yet" (fresh load), which seeds silently.
+ */
+let observedRevision = -1;
+
+export function getObservedRevision(): number {
+  return observedRevision;
+}
+
+/** Advance the baseline; never moves backwards (writes and polls may race). */
+export function noteRevision(revision: number): void {
+  if (Number.isFinite(revision) && (observedRevision < 0 || revision > observedRevision)) {
+    observedRevision = revision;
+  }
+}
+
+/** Set the baseline for a new session, or clear it (`-1`) on logout. */
+export function resetRevision(revision = -1): void {
+  observedRevision = revision;
+}
+
 async function request<T>(path: string, body: unknown, authenticated: boolean): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (authenticated) {
@@ -84,6 +109,8 @@ async function request<T>(path: string, body: unknown, authenticated: boolean): 
   if (!response.ok) {
     throw new Error(`The case server returned ${response.status}`);
   }
+  const revision = response.headers.get('x-case-revision');
+  if (revision) noteRevision(Number(revision));
   return (await response.json()) as T;
 }
 
@@ -107,6 +134,7 @@ export async function unlockCase(input: UnlockRequest): Promise<SessionPayload> 
   const payload = await request<ApiResponse<SessionPayload>>('/api/auth/unlock', input, false);
   if (!payload.success || !payload.data) throw new Error(payload.error || 'Could not unlock the case');
   setToken(payload.data.token);
+  resetRevision(payload.data.revision);
   return payload.data;
 }
 
@@ -114,6 +142,7 @@ export async function createCase(input: CreateCaseRequest): Promise<SessionPaylo
   const payload = await request<ApiResponse<SessionPayload>>('/api/cases', input, false);
   if (!payload.success || !payload.data) throw new Error(payload.error || 'Could not create the case');
   setToken(payload.data.token);
+  resetRevision(payload.data.revision);
   return payload.data;
 }
 
@@ -122,6 +151,7 @@ export async function logout(): Promise<void> {
     if (getToken()) await request<ApiResponse<boolean>>('/api/auth/logout', {}, true);
   } finally {
     setToken(null);
+    resetRevision();
   }
 }
 
