@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { invoke } from '@/lib/api';
-import { Pencil, Plus, Search, ShieldAlert, Trash2 } from 'lucide-react';
+import { downloadText, invoke } from '@/lib/api';
+import { Download, Pencil, Plus, Search, ShieldAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -63,8 +63,24 @@ export default function IocManager({ refreshTrigger }: Props) {
       && (!term || [ioc.value, ioc.description, ioc.ioc_type].some((value) => value.toLowerCase().includes(term))));
   }, [iocs, search, typeFilter, threatFilter]);
 
+  // Push the currently visible indicators outward. CSV for SIEM/EDR/firewall
+  // imports; STIX 2.1 for a threat-intel platform. The server formats the set
+  // of ids we send, so "filter, then export" gives the analyst exactly the
+  // indicators they chose.
+  const exportIocs = async (format: 'csv' | 'stix') => {
+    if (filtered.length === 0) { toast.error('No IOCs to export'); return; }
+    try {
+      const command = format === 'csv' ? 'export_iocs_csv' : 'export_iocs_stix';
+      const response = await invoke<ApiResponse<string>>(command, { ids: filtered.map((ioc) => ioc.id) });
+      if (!response.success || response.data === undefined) throw new Error(response.error || 'Export failed');
+      const date = new Date().toISOString().slice(0, 10);
+      downloadText(format === 'csv' ? `iocs-${date}.csv` : `iocs-${date}.stix.json`, response.data);
+      toast.success(`Exported ${filtered.length} IOC${filtered.length === 1 ? '' : 's'} as ${format.toUpperCase()}`);
+    } catch (reason) { toast.error(String(reason)); }
+  };
+
   return <div className="space-y-4 p-6">
-    <div className="flex items-center justify-between"><div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><ShieldAlert className="text-cyan-600" />Indicators of Compromise</h2><p className="text-sm text-slate-500">Search, validate, and version IOC findings</p></div><Button onClick={() => { reset(); setShowForm(true); }} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add IOC</Button></div>
+    <div className="flex items-center justify-between"><div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><ShieldAlert className="text-cyan-600" />Indicators of Compromise</h2><p className="text-sm text-slate-500">Search, validate, and version IOC findings</p></div><div className="flex gap-2"><Button variant="outline" disabled={filtered.length === 0} onClick={() => void exportIocs('csv')} title="Download the visible IOCs as CSV"><Download size={16} className="mr-2" />Export CSV</Button><Button variant="outline" disabled={filtered.length === 0} onClick={() => void exportIocs('stix')} title="Download the visible IOCs as a STIX 2.1 bundle"><Download size={16} className="mr-2" />Export STIX</Button><Button onClick={() => { reset(); setShowForm(true); }} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add IOC</Button></div></div>
     <Card><CardContent className="flex flex-wrap gap-3 p-3"><div className="relative min-w-64 flex-1"><Search size={15} className="absolute left-3 top-2.5 text-slate-400" /><Input className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search value, type, or description…" /></div><Filter value={typeFilter} onChange={setTypeFilter} values={['all','IP','Hash','Domain','URL','Email','Registry','Mutex']} /><Filter value={threatFilter} onChange={setThreatFilter} values={['all','low','medium','high','critical']} /></CardContent></Card>
     {showForm && <IocForm form={form} setForm={setForm} editing={Boolean(editingId)} onSave={() => void save()} onCancel={reset} />}
     <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Type</TableHead><TableHead>Value</TableHead><TableHead>Threat</TableHead><TableHead>Description</TableHead><TableHead>First seen</TableHead><TableHead>Last seen</TableHead><TableHead /></TableRow></TableHeader><TableBody>

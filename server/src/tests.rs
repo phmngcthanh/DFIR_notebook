@@ -186,6 +186,53 @@ fn a_write_through_the_dispatcher_bumps_the_revision_every_browser_polls() {
 }
 
 #[test]
+fn iocs_export_to_csv_and_stix_through_the_dispatcher() {
+    let server = TempServer::new(true);
+    let payload = create(&server.state, "correct-horse-battery").unwrap();
+    let context = session(&server.state, &payload);
+
+    for (ty, value, threat) in [
+        ("IP", "10.0.0.9", "high"),
+        ("Domain", "evil.example", "critical"),
+    ] {
+        run(
+            &server.state,
+            &context,
+            "create_new_ioc",
+            json!({ "iocType": ty, "value": value, "description": "", "threatLevel": threat }),
+        )
+        .unwrap();
+    }
+    // Exporting is read-only — it must not bump the revision pollers watch.
+    let before = context.case.revision();
+
+    let csv = run(&server.state, &context, "export_iocs_csv", json!({})).unwrap();
+    let csv = csv.as_str().unwrap();
+    assert!(csv.starts_with("id,type,value,threat_level"));
+    assert!(csv.contains("10.0.0.9") && csv.contains("evil.example"));
+
+    let stix = run(&server.state, &context, "export_iocs_stix", json!({})).unwrap();
+    let bundle: serde_json::Value = serde_json::from_str(stix.as_str().unwrap()).unwrap();
+    assert_eq!(bundle["type"], "bundle");
+    assert_eq!(bundle["objects"].as_array().unwrap().len(), 2);
+
+    assert_eq!(context.case.revision(), before, "exports are read-only");
+
+    // The optional id filter limits the export to a subset.
+    let list = run(&server.state, &context, "list_iocs", json!({})).unwrap();
+    let one_id = list[0]["id"].as_str().unwrap().to_string();
+    let subset = run(
+        &server.state,
+        &context,
+        "export_iocs_stix",
+        json!({ "ids": [one_id] }),
+    )
+    .unwrap();
+    let subset: serde_json::Value = serde_json::from_str(subset.as_str().unwrap()).unwrap();
+    assert_eq!(subset["objects"].as_array().unwrap().len(), 1);
+}
+
+#[test]
 fn unknown_commands_are_reported_rather_than_ignored() {
     let server = TempServer::new(true);
     let payload = create(&server.state, "correct-horse-battery").unwrap();

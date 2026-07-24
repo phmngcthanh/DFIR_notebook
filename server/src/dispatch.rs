@@ -38,7 +38,7 @@ use crate::db::{
     set_primary_interface, update_asset, update_asset_suspicious, update_case, update_clock_profile,
     update_firewall, update_firewall_interface, update_firewall_nat_rule, update_ioc,
     update_network, update_network_connection, update_network_interface, update_note,
-    update_timeline_event, ExportData, TopologyNodePosition,
+    update_timeline_event, ExportData, Ioc, TopologyNodePosition,
 };
 use crate::history::{
     apply_bundle, get_history, parse_change_bundle, preview_bundle, ActorIdentity, MergeDecision,
@@ -407,6 +407,19 @@ pub(crate) fn run(
         "list_iocs" => read_cmd!(NoParams, |conn, _p| get_iocs(conn)),
         "remove_ioc" => write_cmd!(IdParams, |conn, actor, p| delete_ioc(conn, actor, &p.id)
             .map(|_| true)),
+        // Read-only exports for pushing indicators into a SIEM/EDR/TIP. The
+        // browser downloads the returned text. Optional `ids` limits the export
+        // to the analyst's currently filtered view.
+        "export_iocs_csv" => {
+            let p: IocExportParams = from_args(args)?;
+            let iocs = filter_iocs(case.with_conn(|conn| get_iocs(conn))?, &p.ids);
+            to_json(crate::ioc_export::iocs_to_csv(&iocs))
+        }
+        "export_iocs_stix" => {
+            let p: IocExportParams = from_args(args)?;
+            let iocs = filter_iocs(case.with_conn(|conn| get_iocs(conn))?, &p.ids);
+            to_json(crate::ioc_export::iocs_to_stix(&iocs)?)
+        }
 
         // ---- firewalls -----------------------------------------------------
         "create_new_firewall" => write_cmd!(FirewallParams, |conn, actor, p| create_firewall(
@@ -731,6 +744,19 @@ fn pending_partial(
         .ok_or_else(|| "Pending partial import was not found".to_string())
 }
 
+/// Narrow the IOC list to a caller-supplied id set (the analyst's filtered
+/// view); `None` exports the whole case. IOC lists are small, so a linear
+/// membership check is fine.
+fn filter_iocs(iocs: Vec<Ioc>, ids: &Option<Vec<String>>) -> Vec<Ioc> {
+    match ids {
+        Some(ids) => iocs
+            .into_iter()
+            .filter(|ioc| ids.iter().any(|id| id == &ioc.id))
+            .collect(),
+        None => iocs,
+    }
+}
+
 fn from_args<T: DeserializeOwned>(args: Value) -> Result<T, String> {
     serde_json::from_value(args).map_err(|error| format!("Invalid arguments: {error}"))
 }
@@ -936,6 +962,7 @@ params! {
         #[serde(default)] first_seen: Option<String>,
         #[serde(default)] last_seen: Option<String>,
     }
+    struct IocExportParams { #[serde(default)] ids: Option<Vec<String>> }
 
     struct FirewallParams {
         #[serde(default)] network_id: Option<String>,

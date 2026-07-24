@@ -36,6 +36,7 @@ mod secure_db;
 mod auth;
 mod cases;
 mod dispatch;
+mod ioc_export;
 mod state;
 #[cfg(test)]
 mod tests;
