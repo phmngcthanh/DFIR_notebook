@@ -176,7 +176,19 @@ Use **IOCs** for indicators such as IP addresses, hashes, domains, and URLs. Rec
 
 Use **Notes** for findings, hypotheses, evidence references, decisions, and handover information. Notes support a safe Markdown subset. Raw HTML is displayed as text rather than executed.
 
-### Step 8: Use the dashboard as the coverage board
+### Step 8: Rebuild the intrusion in the Investigation Graph
+
+Open **Investigation**. It starts from the same networks, assets, and firewalls as Topology, then adds the attacker's story:
+
+- **Record IOC sightings.** Select an entity and use *IOC sighting* to link an existing IOC to that asset, network, or firewall with an optional time, location (file path, registry key, log source), and note. When the target is an asset, an explicit checkbox can raise its compromise status to suspected or infected in the same step — the graph, asset list, and IOC list all update from the same record, and a status is never silently downgraded.
+- **Draw attack edges.** Use *Draw attack edge* and click source then target, or *Add attack edge* for an external origin such as "Internet". Each edge records a title, movement type (initial access, lateral movement, and so on), confidence, optional MITRE tactic/technique, an optional occurrence time or linked timeline event, and linked IOCs. Edges are numbered in pathway order (step number first, then time).
+- **Replay the intrusion.** The playback slider highlights the pathway up to any step so the sequence of compromise can be walked through during a briefing.
+- **Curate the picture.** Hide individual nodes or whole networks, filter to suspected/infected entities, entities with sightings, or a minimum IOC threat level, and toggle topology links or attack edges. The *Hidden* panel restores anything hidden by hand. Nodes that anchor a drawn attack edge stay visible through filters unless hidden explicitly.
+- **Save views.** Name the current combination of visibility, filters, layout, positions, and camera, and reload it later. Saved views are shared presentation state: they travel with snapshots but stay out of evidence history and expert bundles.
+
+Sightings and attack edges are evidence: they are attributed in history, merge like other entities, and appear in exports and text reports. Deleting an IOC removes its sightings and unlinks it from edges; deleting an asset or firewall removes the sightings and edges that referenced it; a network with sightings or edges refuses deletion until they are removed.
+
+### Step 9: Use the dashboard as the coverage board
 
 The **Dashboard** shows full-case counts, including:
 

@@ -26,6 +26,7 @@ describe('IocManager export', () => {
   it('exports the visible IOCs as CSV via a download', async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'list_iocs') return { success: true, data: [ioc({ id: 'ioc-1' }), ioc({ id: 'ioc-2', value: '10.0.0.6' })] };
+      if (command === 'get_infection_summary') return { success: true, data: { entities: [], iocs: [] } };
       if (command === 'export_iocs_csv') return { success: true, data: 'id,type,value,threat_level,description,first_seen,last_seen,created_at\r\n' };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -43,6 +44,7 @@ describe('IocManager export', () => {
   it('does not call the server when there are no IOCs to export', async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'list_iocs') return { success: true, data: [] };
+      if (command === 'get_infection_summary') return { success: true, data: { entities: [], iocs: [] } };
       throw new Error(`Unexpected command: ${command}`);
     });
     render(<IocManager refreshTrigger={0} />);

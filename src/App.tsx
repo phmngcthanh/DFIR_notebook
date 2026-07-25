@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
   Clock, Download, FileText, GitGraph, LayoutDashboard,
-  Info, LockKeyhole, Network, Server, ShieldAlert, SquareKanban, UserRound, Users,
+  Info, LockKeyhole, Network, Route, Server, ShieldAlert, SquareKanban, UserRound, Users,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -20,6 +20,7 @@ const Dashboard = lazy(() => import('@/components/Dashboard'));
 const NetworkManager = lazy(() => import('@/components/NetworkManager'));
 const AssetManager = lazy(() => import('@/components/AssetManager'));
 const NetworkTopology = lazy(() => import('@/components/NetworkTopology'));
+const InvestigationGraph = lazy(() => import('@/components/InvestigationGraph'));
 const TimelineView = lazy(() => import('@/components/TimelineView'));
 const IocManager = lazy(() => import('@/components/IocManager'));
 const NoteManager = lazy(() => import('@/components/NoteManager'));
@@ -32,6 +33,7 @@ const NAV_ITEMS: { view: View; label: string; icon: React.ReactNode }[] = [
   { view: 'networks', label: 'Networks', icon: <Network size={18} /> },
   { view: 'assets', label: 'Assets', icon: <Server size={18} /> },
   { view: 'topology', label: 'Topology', icon: <GitGraph size={18} /> },
+  { view: 'investigation', label: 'Investigation', icon: <Route size={18} /> },
   { view: 'timeline', label: 'Timeline', icon: <Clock size={18} /> },
   { view: 'iocs', label: 'IOCs', icon: <ShieldAlert size={18} /> },
   { view: 'notes', label: 'Notes', icon: <FileText size={18} /> },
@@ -225,6 +227,7 @@ function App() {
               {currentView === 'networks' && <NetworkManager refreshTrigger={refreshTrigger} />}
               {currentView === 'assets' && <AssetManager refreshTrigger={refreshTrigger} expert={currentExpert} />}
               {currentView === 'topology' && <NetworkTopology refreshTrigger={refreshTrigger} />}
+              {currentView === 'investigation' && <InvestigationGraph refreshTrigger={refreshTrigger} />}
               {currentView === 'timeline' && <TimelineView refreshTrigger={refreshTrigger} />}
               {currentView === 'iocs' && <IocManager refreshTrigger={refreshTrigger} />}
               {currentView === 'notes' && <NoteManager refreshTrigger={refreshTrigger} />}

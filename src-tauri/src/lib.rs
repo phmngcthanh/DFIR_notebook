@@ -906,6 +906,191 @@ fn remove_ioc(state: State<DbState>, id: String) -> Response<bool> {
 }
 
 #[tauri::command]
+fn list_ioc_sightings(
+    state: State<DbState>,
+    ioc_id: Option<String>,
+    entity_kind: Option<String>,
+    entity_id: Option<String>,
+) -> Response<Vec<IocSighting>> {
+    with_conn(&state, |conn| {
+        get_ioc_sightings(
+            conn,
+            ioc_id.as_deref(),
+            entity_kind.as_deref(),
+            entity_id.as_deref(),
+        )
+    })
+}
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn create_new_ioc_sighting(
+    state: State<DbState>,
+    ioc_id: String,
+    entity_kind: String,
+    entity_id: String,
+    sighted_at: Option<String>,
+    location: String,
+    note: String,
+    set_compromise_status: Option<String>,
+) -> Response<IocSighting> {
+    with_actor_conn(&state, |conn, actor| {
+        create_ioc_sighting(
+            conn,
+            actor,
+            &ioc_id,
+            &entity_kind,
+            &entity_id,
+            sighted_at.as_deref(),
+            &location,
+            &note,
+            set_compromise_status.as_deref(),
+        )
+    })
+}
+#[tauri::command]
+fn update_existing_ioc_sighting(
+    state: State<DbState>,
+    id: String,
+    sighted_at: Option<String>,
+    location: String,
+    note: String,
+) -> Response<IocSighting> {
+    with_actor_conn(&state, |conn, actor| {
+        update_ioc_sighting(conn, actor, &id, sighted_at.as_deref(), &location, &note)
+    })
+}
+#[tauri::command]
+fn remove_ioc_sighting(state: State<DbState>, id: String) -> Response<bool> {
+    with_actor_conn(&state, |conn, actor| {
+        delete_ioc_sighting(conn, actor, &id).map(|_| true)
+    })
+}
+#[tauri::command]
+fn get_infection_summary(state: State<DbState>) -> Response<InfectionSummary> {
+    with_conn(&state, |conn| db::get_infection_summary(conn))
+}
+
+#[tauri::command]
+fn list_attack_edges(state: State<DbState>) -> Response<Vec<AttackEdge>> {
+    with_conn(&state, |conn| get_attack_edges(conn))
+}
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn create_new_attack_edge(
+    state: State<DbState>,
+    source_kind: String,
+    source_id: String,
+    target_kind: String,
+    target_id: String,
+    title: String,
+    description: String,
+    edge_type: String,
+    confidence: String,
+    mitre_tactic: Option<String>,
+    mitre_technique: Option<String>,
+    occurred_at: Option<String>,
+    timeline_event_id: Option<String>,
+    sequence: Option<i64>,
+    ioc_ids: Vec<String>,
+) -> Response<AttackEdge> {
+    with_actor_conn(&state, |conn, actor| {
+        create_attack_edge(
+            conn,
+            actor,
+            &source_kind,
+            &source_id,
+            &target_kind,
+            &target_id,
+            &title,
+            &description,
+            &edge_type,
+            &confidence,
+            mitre_tactic.as_deref(),
+            mitre_technique.as_deref(),
+            occurred_at.as_deref(),
+            timeline_event_id.as_deref(),
+            sequence,
+            ioc_ids,
+        )
+    })
+}
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn update_existing_attack_edge(
+    state: State<DbState>,
+    id: String,
+    source_kind: String,
+    source_id: String,
+    target_kind: String,
+    target_id: String,
+    title: String,
+    description: String,
+    edge_type: String,
+    confidence: String,
+    mitre_tactic: Option<String>,
+    mitre_technique: Option<String>,
+    occurred_at: Option<String>,
+    timeline_event_id: Option<String>,
+    sequence: i64,
+    ioc_ids: Vec<String>,
+) -> Response<AttackEdge> {
+    with_actor_conn(&state, |conn, actor| {
+        update_attack_edge(
+            conn,
+            actor,
+            &id,
+            &source_kind,
+            &source_id,
+            &target_kind,
+            &target_id,
+            &title,
+            &description,
+            &edge_type,
+            &confidence,
+            mitre_tactic.as_deref(),
+            mitre_technique.as_deref(),
+            occurred_at.as_deref(),
+            timeline_event_id.as_deref(),
+            sequence,
+            ioc_ids,
+        )
+    })
+}
+#[tauri::command]
+fn remove_attack_edge(state: State<DbState>, id: String) -> Response<bool> {
+    with_actor_conn(&state, |conn, actor| {
+        delete_attack_edge(conn, actor, &id).map(|_| true)
+    })
+}
+
+#[tauri::command]
+fn list_investigation_views(state: State<DbState>) -> Response<Vec<InvestigationViewSummary>> {
+    with_conn(&state, |conn| get_investigation_views(conn))
+}
+#[tauri::command]
+fn get_investigation_view(state: State<DbState>, id: String) -> Response<InvestigationView> {
+    with_conn(&state, |conn| db::get_investigation_view(conn, &id))
+}
+#[tauri::command]
+fn save_investigation_view(
+    state: State<DbState>,
+    id: Option<String>,
+    name: String,
+    description: String,
+    view_state: serde_json::Value,
+) -> Response<InvestigationView> {
+    with_conn(&state, |conn| {
+        db::save_investigation_view(conn, id.as_deref(), &name, &description, &view_state)
+    })
+}
+#[tauri::command]
+fn remove_investigation_view(state: State<DbState>, id: String) -> Response<bool> {
+    with_conn(&state, |conn| {
+        delete_investigation_view(conn, &id).map(|_| true)
+    })
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn create_new_firewall(
     state: State<DbState>,
@@ -1751,6 +1936,19 @@ pub fn run() {
             update_existing_ioc,
             list_iocs,
             remove_ioc,
+            list_ioc_sightings,
+            create_new_ioc_sighting,
+            update_existing_ioc_sighting,
+            remove_ioc_sighting,
+            get_infection_summary,
+            list_attack_edges,
+            create_new_attack_edge,
+            update_existing_attack_edge,
+            remove_attack_edge,
+            list_investigation_views,
+            get_investigation_view,
+            save_investigation_view,
+            remove_investigation_view,
             create_new_firewall,
             update_existing_firewall,
             list_firewalls,

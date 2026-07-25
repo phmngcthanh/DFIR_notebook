@@ -146,6 +146,8 @@ fn normalized_entity_type(value: &str) -> AppResult<String> {
         }
         "timeline_event" | "timeline_events" | "timeline" | "event" | "events" => "timeline_event",
         "ioc" | "iocs" | "indicator" | "indicators" => "ioc",
+        "ioc_sighting" | "ioc_sightings" | "sighting" | "sightings" => "ioc_sighting",
+        "attack_edge" | "attack_edges" | "attack_path" | "attack_paths" => "attack_edge",
         "note" | "notes" => "note",
         _ => return Err(format!("Unsupported entity type '{value}'")),
     };
@@ -161,6 +163,7 @@ fn entity_rank(entity_type: &str) -> usize {
         "firewall_interface" => 4,
         "firewall_nat_rule" | "network_connection" => 5,
         "timeline_event" | "ioc" | "note" => 6,
+        "ioc_sighting" | "attack_edge" => 7,
         _ => 9,
     }
 }
@@ -196,6 +199,8 @@ fn snapshot_changes(data: ExportData) -> Vec<PartialImportChange> {
     add_values!("network_connection", data.network_connections);
     add_values!("timeline_event", data.timeline_events);
     add_values!("ioc", data.iocs);
+    add_values!("ioc_sighting", data.ioc_sightings);
+    add_values!("attack_edge", data.attack_edges);
     add_values!("note", data.notes);
     changes
 }
@@ -291,6 +296,12 @@ fn new_entity(entity_type: &str, id: &str, now: &str) -> AppResult<Map<String, V
         }
         "ioc" => {
             json!({"id":id,"ioc_type":"IP","value":"","description":"","threat_level":"medium","first_seen":null,"last_seen":null,"created_at":now})
+        }
+        "ioc_sighting" => {
+            json!({"id":id,"ioc_id":"","ioc_value":null,"ioc_type":null,"threat_level":null,"entity_kind":"asset","entity_id":"","entity_name":null,"sighted_at":null,"location":"","note":"","created_at":now})
+        }
+        "attack_edge" => {
+            json!({"id":id,"source_kind":"external","source_id":"","source_name":null,"target_kind":"asset","target_id":"","target_name":null,"title":"","description":"","edge_type":"other","confidence":"suspected","mitre_tactic":null,"mitre_technique":null,"occurred_at":null,"timeline_event_id":null,"timeline_event_time":null,"sequence":0,"ioc_ids":[],"created_at":now})
         }
         "note" => json!({"id":id,"title":"","content":"","created_at":now,"updated_at":now}),
         _ => {
@@ -981,6 +992,8 @@ pub fn partial_import_template(conn: &Connection) -> AppResult<String> {
         "network_connections": compact(to_values(serde_json::to_value(export.network_connections).map_err(|e|e.to_string())?), &["source_network_id","target_network_id","connection_type"]),
         "timeline_events": compact(to_values(serde_json::to_value(export.timeline_events).map_err(|e|e.to_string())?), &["timestamp","description"]),
         "iocs": compact(to_values(serde_json::to_value(export.iocs).map_err(|e|e.to_string())?), &["ioc_type","value"]),
+        "ioc_sightings": compact(to_values(serde_json::to_value(export.ioc_sightings).map_err(|e|e.to_string())?), &["ioc_id","entity_kind","entity_id"]),
+        "attack_edges": compact(to_values(serde_json::to_value(export.attack_edges).map_err(|e|e.to_string())?), &["title","source_kind","source_id","target_kind","target_id"]),
         "notes": compact(to_values(serde_json::to_value(export.notes).map_err(|e|e.to_string())?), &["title"]),
     });
     let template = json!({
@@ -993,7 +1006,7 @@ pub fn partial_import_template(conn: &Connection) -> AppResult<String> {
             "operations": ["create", "update", "upsert"],
             "safety": "Deletion is not supported. update requires target_id. create may include a UUID in values.id; use explicit UUIDs when newly created records reference one another.",
             "selection": "The app validates and previews every record. The investigator chooses Skip, Add only, or Use incoming before confirmation.",
-            "entity_types": ["case","network","asset","network_interface","clock_profile","firewall","firewall_interface","firewall_nat_rule","network_connection","timeline_event","ioc","note"],
+            "entity_types": ["case","network","asset","network_interface","clock_profile","firewall","firewall_interface","firewall_nat_rule","network_connection","timeline_event","ioc","ioc_sighting","attack_edge","note"],
             "field_notes": {
                 "network": "name, subnet, network_type, description, vlan_id",
                 "asset": "network_id, name, ip_address, mac_address, asset_type, os, user_name, compromise_status, investigation_status, properties, scan_results",
@@ -1005,6 +1018,8 @@ pub fn partial_import_template(conn: &Connection) -> AppResult<String> {
                 "network_connection": "source_network_id, target_network_id, connection_type, description, device_name",
                 "timeline_event": "asset_id, optional raw_timestamp + raw_timezone, optional correct_timestamp_raw + correct_timezone, or clock_profile_id, event_type, description, severity, source, mitre_tactic, mitre_technique. Both times may be omitted and added later.",
                 "ioc": "ioc_type, value, description, threat_level, first_seen, last_seen",
+                "ioc_sighting": "ioc_id, entity_kind (asset/network/firewall), entity_id, sighted_at, location, note",
+                "attack_edge": "source_kind (asset/network/firewall/external), source_id (entity UUID, or free label for external), target_kind, target_id, title, description, edge_type (initial_access/lateral_movement/privilege_escalation/persistence/c2/exfiltration/other), confidence (confirmed/probable/suspected), mitre_tactic, mitre_technique, occurred_at, timeline_event_id, sequence, ioc_ids (array of IOC UUIDs)",
                 "note": "title, content",
                 "case": "name, description, client_name, status, metadata. Session expert names provide attribution; legacy investigator metadata is not editable."
             }

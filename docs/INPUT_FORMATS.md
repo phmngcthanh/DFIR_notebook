@@ -94,6 +94,8 @@ Fields listed as required are required when creating a record. Updates may conta
 | `network_connection` | `source_network_id`, `target_network_id`, `connection_type` | `description`, `device_name`; source and target must differ |
 | `timeline_event` | `raw_timestamp` or `timestamp`, `description` | `raw_timezone`, `clock_profile_id`, `asset_id`, `event_type`, `severity` (`info`, `low`, `medium`, `high`, `critical`), `source`, `mitre_tactic`, `mitre_technique` |
 | `ioc` | `ioc_type`, `value` | `description`, `threat_level` (`low`, `medium`, `high`, `critical`), `first_seen`, `last_seen`; types: `IP`, `Hash`, `Domain`, `URL`, `Email`, `Registry`, `Mutex` |
+| `ioc_sighting` | `ioc_id`, `entity_kind` (`asset`, `network`, `firewall`), `entity_id` | `sighted_at`, `location`, `note`; the IOC and target entity must exist |
+| `attack_edge` | `source_kind` (`asset`, `network`, `firewall`, `external`), `source_id`, `target_kind` (`asset`, `network`, `firewall`), `target_id`, `title` | `description`, `edge_type` (`initial_access`, `lateral_movement`, `privilege_escalation`, `persistence`, `c2`, `exfiltration`, `other`), `confidence` (`confirmed`, `probable`, `suspected`), `mitre_tactic`, `mitre_technique`, `occurred_at`, `timeline_event_id`, `sequence`, `ioc_ids` (array of existing IOC UUIDs); for `external` sources `source_id` is a free origin label; source and target must differ |
 | `note` | `title` | `content` (safe Markdown when displayed) |
 
 Entity aliases accepted by the parser include common singular/plural forms, `nic` for `network_interface`, `firewall_nic` for `firewall_interface`, and `nat` for `firewall_nat_rule`; canonical generators should use the names in the table.
@@ -253,9 +255,14 @@ A plain snapshot is formatted UTF-8 JSON with this root structure:
   "firewall_nat_rules": [],
   "timeline_events": [],
   "iocs": [],
+  "ioc_sightings": [],
+  "attack_edges": [],
+  "investigation_views": [],
   "notes": []
 }
 ```
+
+`ioc_sightings` and `attack_edges` are evidence entities and take part in history, expert bundles, and partial import. `investigation_views` are named saved Investigation Graph views (presentation state): imported by snapshot for convenience but excluded from history, expert bundles, and partial import. Snapshots written before these arrays existed remain valid; each missing array defaults to empty.
 
 Snapshot import requires the same `case_info.id`, inserts missing UUIDs, skips existing UUIDs, and never overwrites open-case metadata. A plain snapshot can also be loaded into the partial-import reviewer; there it is converted to reviewed upserts so the operator can explicitly select incoming updates.
 

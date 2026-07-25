@@ -232,6 +232,109 @@ pub struct NetworkConnection {
     pub device_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IocSighting {
+    pub id: String,
+    pub ioc_id: String,
+    #[serde(default)]
+    pub ioc_value: Option<String>,
+    #[serde(default)]
+    pub ioc_type: Option<String>,
+    #[serde(default)]
+    pub threat_level: Option<String>,
+    pub entity_kind: String,
+    pub entity_id: String,
+    #[serde(default)]
+    pub entity_name: Option<String>,
+    pub sighted_at: Option<String>,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub note: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttackEdge {
+    pub id: String,
+    pub source_kind: String,
+    pub source_id: String,
+    #[serde(default)]
+    pub source_name: Option<String>,
+    pub target_kind: String,
+    pub target_id: String,
+    #[serde(default)]
+    pub target_name: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_edge_type")]
+    pub edge_type: String,
+    #[serde(default = "default_confidence")]
+    pub confidence: String,
+    pub mitre_tactic: Option<String>,
+    pub mitre_technique: Option<String>,
+    pub occurred_at: Option<String>,
+    pub timeline_event_id: Option<String>,
+    #[serde(default)]
+    pub timeline_event_time: Option<String>,
+    #[serde(default)]
+    pub sequence: i64,
+    #[serde(default)]
+    pub ioc_ids: Vec<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvestigationView {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub state: Value,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvestigationViewSummary {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InfectionEntitySummary {
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub entity_name: String,
+    pub sighting_count: i64,
+    pub max_threat_level: String,
+    pub ioc_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InfectionIocEntityRef {
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub entity_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InfectionIocSummary {
+    pub ioc_id: String,
+    pub entity_count: i64,
+    pub entities: Vec<InfectionIocEntityRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InfectionSummary {
+    pub entities: Vec<InfectionEntitySummary>,
+    pub iocs: Vec<InfectionIocSummary>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TopologyNodePosition {
     pub id: String,
@@ -289,10 +392,24 @@ pub struct ExportData {
     pub firewall_nat_rules: Vec<FirewallNatRule>,
     #[serde(default)]
     pub network_connections: Vec<NetworkConnection>,
+    #[serde(default)]
+    pub ioc_sightings: Vec<IocSighting>,
+    #[serde(default)]
+    pub attack_edges: Vec<AttackEdge>,
+    #[serde(default)]
+    pub investigation_views: Vec<InvestigationView>,
 }
 
 fn default_format_version() -> u32 {
     1
+}
+
+fn default_edge_type() -> String {
+    "other".to_string()
+}
+
+fn default_confidence() -> String {
+    "suspected".to_string()
 }
 
 fn default_true() -> bool {
@@ -479,6 +596,44 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             pan_y REAL NOT NULL,
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS ioc_sightings (
+            id TEXT PRIMARY KEY,
+            ioc_id TEXT NOT NULL REFERENCES iocs(id) ON DELETE CASCADE,
+            asset_id TEXT REFERENCES assets(id) ON DELETE CASCADE,
+            network_id TEXT REFERENCES networks(id) ON DELETE CASCADE,
+            firewall_id TEXT REFERENCES firewalls(id) ON DELETE CASCADE,
+            sighted_at TEXT,
+            location TEXT NOT NULL DEFAULT '',
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            CHECK ((asset_id IS NOT NULL) + (network_id IS NOT NULL) + (firewall_id IS NOT NULL) = 1)
+        );
+        CREATE TABLE IF NOT EXISTS attack_edges (
+            id TEXT PRIMARY KEY,
+            source_kind TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            target_kind TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            edge_type TEXT NOT NULL DEFAULT 'other',
+            confidence TEXT NOT NULL DEFAULT 'suspected',
+            mitre_tactic TEXT,
+            mitre_technique TEXT,
+            occurred_at TEXT,
+            timeline_event_id TEXT REFERENCES timeline_events(id) ON DELETE SET NULL,
+            sequence INTEGER NOT NULL DEFAULT 0,
+            ioc_ids TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS investigation_views (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            state_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS history_commits (
             id TEXT PRIMARY KEY,
             case_id TEXT NOT NULL,
@@ -537,7 +692,12 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_connections_target ON network_connections(target_network_id);
         CREATE INDEX IF NOT EXISTS idx_history_changes_entity ON history_changes(entity_type, entity_id);
         CREATE INDEX IF NOT EXISTS idx_history_changes_commit ON history_changes(commit_id);
-        PRAGMA user_version = 6;",
+        CREATE INDEX IF NOT EXISTS idx_ioc_sightings_ioc ON ioc_sightings(ioc_id);
+        CREATE INDEX IF NOT EXISTS idx_ioc_sightings_asset ON ioc_sightings(asset_id);
+        CREATE INDEX IF NOT EXISTS idx_attack_edges_source ON attack_edges(source_kind, source_id);
+        CREATE INDEX IF NOT EXISTS idx_attack_edges_target ON attack_edges(target_kind, target_id);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_investigation_views_name ON investigation_views(LOWER(name));
+        PRAGMA user_version = 7;",
     )
     .map_err(|e| e.to_string())
 }
@@ -780,6 +940,31 @@ fn repair_legacy_references(conn: &mut Connection) -> AppResult<()> {
     tx.execute(
         "DELETE FROM network_connections WHERE source_network_id NOT IN (SELECT id FROM networks)
          OR target_network_id NOT IN (SELECT id FROM networks)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM ioc_sightings WHERE ioc_id NOT IN (SELECT id FROM iocs)
+         OR (asset_id IS NOT NULL AND asset_id NOT IN (SELECT id FROM assets))
+         OR (network_id IS NOT NULL AND network_id NOT IN (SELECT id FROM networks))
+         OR (firewall_id IS NOT NULL AND firewall_id NOT IN (SELECT id FROM firewalls))",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM attack_edges
+         WHERE (source_kind='asset' AND source_id NOT IN (SELECT id FROM assets))
+         OR (source_kind='network' AND source_id NOT IN (SELECT id FROM networks))
+         OR (source_kind='firewall' AND source_id NOT IN (SELECT id FROM firewalls))
+         OR (target_kind='asset' AND target_id NOT IN (SELECT id FROM assets))
+         OR (target_kind='network' AND target_id NOT IN (SELECT id FROM networks))
+         OR (target_kind='firewall' AND target_id NOT IN (SELECT id FROM firewalls))",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE attack_edges SET timeline_event_id=NULL WHERE timeline_event_id IS NOT NULL
+         AND timeline_event_id NOT IN (SELECT id FROM timeline_events)",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -1396,6 +1581,203 @@ pub fn get_network_connections(conn: &Connection) -> AppResult<Vec<NetworkConnec
             target_network_id: row.get(3)?, target_network_name: row.get(4)?, connection_type: row.get(5)?,
             description: row.get(6)?, device_name: row.get(7)? })
     })
+}
+
+const SIGHTING_SELECT: &str = "SELECT s.id,s.ioc_id,i.value,i.ioc_type,i.threat_level,
+        CASE WHEN s.asset_id IS NOT NULL THEN 'asset'
+             WHEN s.network_id IS NOT NULL THEN 'network' ELSE 'firewall' END,
+        COALESCE(s.asset_id,s.network_id,s.firewall_id),
+        COALESCE(a.name,n.name,f.name),
+        s.sighted_at,s.location,s.note,s.created_at
+    FROM ioc_sightings s
+    JOIN iocs i ON i.id=s.ioc_id
+    LEFT JOIN assets a ON a.id=s.asset_id
+    LEFT JOIN networks n ON n.id=s.network_id
+    LEFT JOIN firewalls f ON f.id=s.firewall_id";
+
+fn map_sighting(row: &rusqlite::Row<'_>) -> rusqlite::Result<IocSighting> {
+    Ok(IocSighting {
+        id: row.get(0)?,
+        ioc_id: row.get(1)?,
+        ioc_value: row.get(2)?,
+        ioc_type: row.get(3)?,
+        threat_level: row.get(4)?,
+        entity_kind: row.get(5)?,
+        entity_id: row.get(6)?,
+        entity_name: row.get(7)?,
+        sighted_at: row.get(8)?,
+        location: row.get(9)?,
+        note: row.get(10)?,
+        created_at: row.get(11)?,
+    })
+}
+
+pub fn get_ioc_sightings(
+    conn: &Connection,
+    ioc_id: Option<&str>,
+    entity_kind: Option<&str>,
+    entity_id: Option<&str>,
+) -> AppResult<Vec<IocSighting>> {
+    if let Some(kind) = entity_kind {
+        validate_enum("entity kind", kind, SIGHTING_ENTITY_KINDS)?;
+    }
+    let sql = format!(
+        "{SIGHTING_SELECT} ORDER BY s.sighted_at IS NULL, s.sighted_at, s.created_at"
+    );
+    let rows = query_vec(conn, &sql, [], map_sighting)?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| ioc_id.map(|id| row.ioc_id == id).unwrap_or(true))
+        .filter(|row| entity_kind.map(|kind| row.entity_kind == kind).unwrap_or(true))
+        .filter(|row| entity_id.map(|id| row.entity_id == id).unwrap_or(true))
+        .collect())
+}
+
+pub fn get_infection_summary(conn: &Connection) -> AppResult<InfectionSummary> {
+    let sightings = get_ioc_sightings(conn, None, None, None)?;
+    let mut entities: Vec<InfectionEntitySummary> = Vec::new();
+    let mut iocs: Vec<InfectionIocSummary> = Vec::new();
+    for sighting in &sightings {
+        let entity_name = sighting.entity_name.clone().unwrap_or_default();
+        let threat = sighting.threat_level.as_deref().unwrap_or("");
+        match entities
+            .iter_mut()
+            .find(|e| e.entity_kind == sighting.entity_kind && e.entity_id == sighting.entity_id)
+        {
+            Some(entry) => {
+                entry.sighting_count += 1;
+                if threat_rank(threat) > threat_rank(&entry.max_threat_level) {
+                    entry.max_threat_level = threat.to_string();
+                }
+                if !entry.ioc_ids.contains(&sighting.ioc_id) {
+                    entry.ioc_ids.push(sighting.ioc_id.clone());
+                }
+            }
+            None => entities.push(InfectionEntitySummary {
+                entity_kind: sighting.entity_kind.clone(),
+                entity_id: sighting.entity_id.clone(),
+                entity_name: entity_name.clone(),
+                sighting_count: 1,
+                max_threat_level: threat.to_string(),
+                ioc_ids: vec![sighting.ioc_id.clone()],
+            }),
+        }
+        match iocs.iter_mut().find(|i| i.ioc_id == sighting.ioc_id) {
+            Some(entry) => {
+                if !entry
+                    .entities
+                    .iter()
+                    .any(|e| e.entity_kind == sighting.entity_kind && e.entity_id == sighting.entity_id)
+                {
+                    entry.entity_count += 1;
+                    entry.entities.push(InfectionIocEntityRef {
+                        entity_kind: sighting.entity_kind.clone(),
+                        entity_id: sighting.entity_id.clone(),
+                        entity_name,
+                    });
+                }
+            }
+            None => iocs.push(InfectionIocSummary {
+                ioc_id: sighting.ioc_id.clone(),
+                entity_count: 1,
+                entities: vec![InfectionIocEntityRef {
+                    entity_kind: sighting.entity_kind.clone(),
+                    entity_id: sighting.entity_id.clone(),
+                    entity_name,
+                }],
+            }),
+        }
+    }
+    Ok(InfectionSummary { entities, iocs })
+}
+
+const ATTACK_EDGE_SELECT: &str = "SELECT e.id,e.source_kind,e.source_id,
+        CASE e.source_kind WHEN 'asset' THEN sa.name WHEN 'network' THEN sn.name
+             WHEN 'firewall' THEN sf.name ELSE e.source_id END,
+        e.target_kind,e.target_id,
+        CASE e.target_kind WHEN 'asset' THEN ta.name WHEN 'network' THEN tn.name ELSE tf.name END,
+        e.title,e.description,e.edge_type,e.confidence,e.mitre_tactic,e.mitre_technique,
+        e.occurred_at,e.timeline_event_id,te.timestamp,e.sequence,e.ioc_ids,e.created_at
+    FROM attack_edges e
+    LEFT JOIN assets sa ON sa.id=e.source_id AND e.source_kind='asset'
+    LEFT JOIN networks sn ON sn.id=e.source_id AND e.source_kind='network'
+    LEFT JOIN firewalls sf ON sf.id=e.source_id AND e.source_kind='firewall'
+    LEFT JOIN assets ta ON ta.id=e.target_id AND e.target_kind='asset'
+    LEFT JOIN networks tn ON tn.id=e.target_id AND e.target_kind='network'
+    LEFT JOIN firewalls tf ON tf.id=e.target_id AND e.target_kind='firewall'
+    LEFT JOIN timeline_events te ON te.id=e.timeline_event_id";
+
+fn map_attack_edge(row: &rusqlite::Row<'_>) -> rusqlite::Result<AttackEdge> {
+    let ioc_ids: String = row.get(17)?;
+    Ok(AttackEdge {
+        id: row.get(0)?,
+        source_kind: row.get(1)?,
+        source_id: row.get(2)?,
+        source_name: row.get(3)?,
+        target_kind: row.get(4)?,
+        target_id: row.get(5)?,
+        target_name: row.get(6)?,
+        title: row.get(7)?,
+        description: row.get(8)?,
+        edge_type: row.get(9)?,
+        confidence: row.get(10)?,
+        mitre_tactic: row.get(11)?,
+        mitre_technique: row.get(12)?,
+        occurred_at: row.get(13)?,
+        timeline_event_id: row.get(14)?,
+        timeline_event_time: row.get(15)?,
+        sequence: row.get(16)?,
+        ioc_ids: serde_json::from_str(&ioc_ids).unwrap_or_default(),
+        created_at: row.get(18)?,
+    })
+}
+
+pub fn get_attack_edges(conn: &Connection) -> AppResult<Vec<AttackEdge>> {
+    let sql = format!(
+        "{ATTACK_EDGE_SELECT} ORDER BY e.sequence, e.occurred_at IS NULL, e.occurred_at, e.created_at"
+    );
+    query_vec(conn, &sql, [], map_attack_edge)
+}
+
+fn map_investigation_view(row: &rusqlite::Row<'_>) -> rusqlite::Result<InvestigationView> {
+    let state_json: String = row.get(3)?;
+    Ok(InvestigationView {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        state: serde_json::from_str(&state_json).unwrap_or(Value::Null),
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+    })
+}
+
+pub fn get_investigation_views(conn: &Connection) -> AppResult<Vec<InvestigationViewSummary>> {
+    query_vec(
+        conn,
+        "SELECT id,name,description,created_at,updated_at FROM investigation_views ORDER BY LOWER(name)",
+        [],
+        |row| {
+            Ok(InvestigationViewSummary {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        },
+    )
+}
+
+pub fn get_investigation_view(conn: &Connection, id: &str) -> AppResult<InvestigationView> {
+    require_existing(
+        get_row_optional(
+            conn,
+            "SELECT id,name,description,state_json,created_at,updated_at FROM investigation_views WHERE id=?1",
+            id,
+            map_investigation_view,
+        )?,
+        "Investigation view",
+    )
 }
 
 fn query_vec<P, F, T>(conn: &Connection, sql: &str, params: P, mapper: F) -> AppResult<Vec<T>>
@@ -2015,6 +2397,190 @@ fn validate_connection_model(value: &NetworkConnection) -> AppResult<()> {
     }
 }
 
+const SIGHTING_ENTITY_KINDS: &[&str] = &["asset", "network", "firewall"];
+const ATTACK_EDGE_TYPES: &[&str] = &[
+    "initial_access",
+    "lateral_movement",
+    "privilege_escalation",
+    "persistence",
+    "c2",
+    "exfiltration",
+    "other",
+];
+const ATTACK_EDGE_CONFIDENCE: &[&str] = &["confirmed", "probable", "suspected"];
+
+fn compromise_rank(status: &str) -> i32 {
+    match status {
+        "infected" => 2,
+        "suspected" => 1,
+        _ => 0,
+    }
+}
+
+fn threat_rank(level: &str) -> i32 {
+    match level {
+        "critical" => 4,
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0,
+    }
+}
+
+fn entity_kind_table(kind: &str) -> AppResult<&'static str> {
+    match kind {
+        "asset" => Ok("assets"),
+        "network" => Ok("networks"),
+        "firewall" => Ok("firewalls"),
+        _ => Err(format!("Invalid entity kind: {kind}")),
+    }
+}
+
+fn verify_graph_entity_ref(conn: &Connection, kind: &str, id: &str) -> AppResult<()> {
+    if !exists(conn, entity_kind_table(kind)?, id)? {
+        return Err(format!("Referenced {kind} was not found"));
+    }
+    Ok(())
+}
+
+fn validate_sighting_model(value: &IocSighting) -> AppResult<()> {
+    validate_enum("entity kind", &value.entity_kind, SIGHTING_ENTITY_KINDS)?;
+    validate_required("Sighting entity", &value.entity_id)?;
+    validate_required("Sighting IOC", &value.ioc_id)?;
+    if let Some(sighted_at) = value.sighted_at.as_deref() {
+        validate_timestamp("Sighted at", sighted_at)?;
+    }
+    Ok(())
+}
+
+fn validate_attack_edge_model(value: &AttackEdge) -> AppResult<()> {
+    validate_required("Attack edge title", &value.title)?;
+    validate_enum(
+        "source kind",
+        &value.source_kind,
+        &["asset", "network", "firewall", "external"],
+    )?;
+    validate_enum("target kind", &value.target_kind, SIGHTING_ENTITY_KINDS)?;
+    validate_enum("edge type", &value.edge_type, ATTACK_EDGE_TYPES)?;
+    validate_enum("confidence", &value.confidence, ATTACK_EDGE_CONFIDENCE)?;
+    if value.source_kind == "external" {
+        let label = value.source_id.trim();
+        if label.is_empty() {
+            return Err("External origins need a non-empty label".into());
+        }
+        if label.chars().count() > 120 {
+            return Err("External origin labels are limited to 120 characters".into());
+        }
+    }
+    if value.source_kind == value.target_kind && value.source_id == value.target_id {
+        return Err("An attack edge must connect two different entities".into());
+    }
+    if value.sequence < 0 {
+        return Err("Attack edge sequence cannot be negative".into());
+    }
+    if let Some(occurred_at) = value.occurred_at.as_deref() {
+        validate_timestamp("Occurred at", occurred_at)?;
+    }
+    Ok(())
+}
+
+fn verify_attack_edge_refs(conn: &Connection, value: &AttackEdge) -> AppResult<()> {
+    if value.source_kind != "external" {
+        verify_graph_entity_ref(conn, &value.source_kind, &value.source_id)?;
+    }
+    verify_graph_entity_ref(conn, &value.target_kind, &value.target_id)?;
+    if let Some(event_id) = value.timeline_event_id.as_deref() {
+        if !exists(conn, "timeline_events", event_id)? {
+            return Err("Linked timeline event was not found".into());
+        }
+    }
+    for ioc_id in &value.ioc_ids {
+        if !exists(conn, "iocs", ioc_id)? {
+            return Err(format!("Linked IOC {ioc_id} was not found"));
+        }
+    }
+    Ok(())
+}
+
+const INVESTIGATION_VIEW_STATE_VERSION: i64 = 1;
+
+fn validate_investigation_view_state(state: &Value) -> AppResult<()> {
+    let object = state
+        .as_object()
+        .ok_or_else(|| "Invalid view state: it must be a JSON object".to_string())?;
+    if object.get("version").and_then(Value::as_i64) != Some(INVESTIGATION_VIEW_STATE_VERSION) {
+        return Err(format!(
+            "Invalid view state: version must be {INVESTIGATION_VIEW_STATE_VERSION}"
+        ));
+    }
+    if let Some(layout) = object.get("layout").and_then(Value::as_str) {
+        validate_topology_layout(layout)?;
+    } else {
+        return Err("Invalid view state: layout is required".into());
+    }
+    for field in ["zoom", "pan_x", "pan_y"] {
+        let number = object
+            .get(field)
+            .and_then(Value::as_f64)
+            .ok_or_else(|| format!("Invalid view state: {field} must be a number"))?;
+        if !number.is_finite() {
+            return Err(format!("Invalid view state: {field} must be finite"));
+        }
+    }
+    for field in ["hidden_network_ids", "hidden_node_ids"] {
+        if let Some(value) = object.get(field) {
+            let items = value
+                .as_array()
+                .ok_or_else(|| format!("Invalid view state: {field} must be an array"))?;
+            if items.iter().any(|item| !item.is_string()) {
+                return Err(format!("Invalid view state: {field} must contain strings"));
+            }
+        }
+    }
+    if let Some(positions) = object.get("positions") {
+        let items = positions
+            .as_array()
+            .ok_or_else(|| "Invalid view state: positions must be an array".to_string())?;
+        for item in items {
+            let entry = item
+                .as_object()
+                .filter(|entry| entry.get("id").map(Value::is_string).unwrap_or(false));
+            let valid = entry
+                .map(|entry| {
+                    ["x", "y"].iter().all(|axis| {
+                        entry
+                            .get(*axis)
+                            .and_then(Value::as_f64)
+                            .map(f64::is_finite)
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if !valid {
+                return Err(
+                    "Invalid view state: each position needs an id and finite x/y".into(),
+                );
+            }
+        }
+    }
+    for field in ["filters", "display"] {
+        if let Some(value) = object.get(field) {
+            if !value.is_object() {
+                return Err(format!("Invalid view state: {field} must be an object"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_investigation_view_model(value: &InvestigationView) -> AppResult<()> {
+    validate_required("View name", &value.name)?;
+    if value.name.trim().chars().count() > 120 {
+        return Err("View names are limited to 120 characters".into());
+    }
+    validate_investigation_view_state(&value.state)
+}
+
 fn validate_export_data(data: &ExportData) -> AppResult<()> {
     for value in &data.networks {
         validate_network_model(value)?;
@@ -2048,6 +2614,15 @@ fn validate_export_data(data: &ExportData) -> AppResult<()> {
     }
     for value in &data.network_connections {
         validate_connection_model(value)?;
+    }
+    for value in &data.ioc_sightings {
+        validate_sighting_model(value)?;
+    }
+    for value in &data.attack_edges {
+        validate_attack_edge_model(value)?;
+    }
+    for value in &data.investigation_views {
+        validate_investigation_view_model(value)?;
     }
     Ok(())
 }
@@ -2132,6 +2707,10 @@ pub fn get_entity_json(conn: &Connection, entity_type: &str, id: &str) -> AppRes
              FROM network_connections c JOIN networks s ON s.id=c.source_network_id JOIN networks t ON t.id=c.target_network_id WHERE c.id=?1", id, |row| {
             Ok(NetworkConnection { id: row.get(0)?, source_network_id: row.get(1)?, source_network_name: row.get(2)?, target_network_id: row.get(3)?, target_network_name: row.get(4)?, connection_type: row.get(5)?, description: row.get(6)?, device_name: row.get(7)? })
         })?.map(|v| to_value(&v)).transpose(),
+        "ioc_sighting" => get_row_optional(conn, &format!("{SIGHTING_SELECT} WHERE s.id=?1"), id, map_sighting)?
+            .map(|v| to_value(&v)).transpose(),
+        "attack_edge" => get_row_optional(conn, &format!("{ATTACK_EDGE_SELECT} WHERE e.id=?1"), id, map_attack_edge)?
+            .map(|v| to_value(&v)).transpose(),
         _ => Err(format!("Unsupported entity type: {entity_type}")),
     }
 }
@@ -2306,6 +2885,8 @@ pub fn delete_network(conn: &mut Connection, actor: &ActorIdentity, id: &str) ->
         ("firewall interfaces", "SELECT COUNT(*) FROM firewall_interfaces WHERE network_id=?1"),
         ("firewalls", "SELECT COUNT(*) FROM firewalls WHERE network_id=?1"),
         ("connections", "SELECT COUNT(*) FROM network_connections WHERE source_network_id=?1 OR target_network_id=?1"),
+        ("IOC sightings", "SELECT COUNT(*) FROM ioc_sightings WHERE network_id=?1"),
+        ("attack edges", "SELECT COUNT(*) FROM attack_edges WHERE (source_kind='network' AND source_id=?1) OR (target_kind='network' AND target_id=?1)"),
     ];
     let mut used = Vec::new();
     for (label, sql) in dependencies {
@@ -2687,8 +3268,41 @@ pub fn delete_asset(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> A
         .into_iter()
         .filter(|e| e.asset_id.as_deref() == Some(id))
         .collect();
+    let sightings = get_ioc_sightings(conn, None, Some("asset"), Some(id))?;
+    let attack_edges: Vec<AttackEdge> = get_attack_edges(conn)?
+        .into_iter()
+        .filter(|edge| {
+            (edge.source_kind == "asset" && edge.source_id == id)
+                || (edge.target_kind == "asset" && edge.target_id == id)
+        })
+        .collect();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let mut changes = Vec::new();
+    for sighting in sightings {
+        tx.execute(
+            "DELETE FROM ioc_sightings WHERE id=?1",
+            params![sighting.id],
+        )
+        .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "ioc_sighting",
+            &sighting.id,
+            "delete",
+            Some(to_value(&sighting)?),
+            None,
+        ));
+    }
+    for edge in attack_edges {
+        tx.execute("DELETE FROM attack_edges WHERE id=?1", params![edge.id])
+            .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "attack_edge",
+            &edge.id,
+            "delete",
+            Some(to_value(&edge)?),
+            None,
+        ));
+    }
     for event in events {
         let before = event.clone();
         let after = TimelineEvent {
@@ -3588,7 +4202,29 @@ pub fn delete_timeline_event(
         get_entity_json(conn, "timeline_event", id)?,
         "Timeline event",
     )?;
+    let linked_edges: Vec<AttackEdge> = get_attack_edges(conn)?
+        .into_iter()
+        .filter(|edge| edge.timeline_event_id.as_deref() == Some(id))
+        .collect();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut changes = Vec::new();
+    for edge in linked_edges {
+        let mut after = edge.clone();
+        after.timeline_event_id = None;
+        after.timeline_event_time = None;
+        tx.execute(
+            "UPDATE attack_edges SET timeline_event_id=NULL WHERE id=?1",
+            params![edge.id],
+        )
+        .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "attack_edge",
+            &edge.id,
+            "update",
+            Some(to_value(&edge)?),
+            Some(to_value(&after)?),
+        ));
+    }
     if tx
         .execute("DELETE FROM timeline_events WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?
@@ -3596,19 +4232,14 @@ pub fn delete_timeline_event(
     {
         return Err("Timeline event was not found".into());
     }
-    record_commit_tx(
-        &tx,
-        actor,
-        "Deleted timeline event",
-        vec![single_change(
-            "timeline_event",
-            id,
-            "delete",
-            Some(before),
-            None,
-        )],
-        &[],
-    )?;
+    changes.push(single_change(
+        "timeline_event",
+        id,
+        "delete",
+        Some(before),
+        None,
+    ));
+    record_commit_tx(&tx, actor, "Deleted timeline event", changes, &[])?;
     tx.commit().map_err(|e| e.to_string())
 }
 
@@ -3843,7 +4474,46 @@ pub fn update_ioc(
 
 pub fn delete_ioc(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> AppResult<()> {
     let before = require_existing(get_entity_json(conn, "ioc", id)?, "IOC")?;
+    let sightings = get_ioc_sightings(conn, Some(id), None, None)?;
+    let linked_edges: Vec<AttackEdge> = get_attack_edges(conn)?
+        .into_iter()
+        .filter(|edge| edge.ioc_ids.iter().any(|linked| linked == id))
+        .collect();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut changes = Vec::new();
+    for sighting in sightings {
+        tx.execute(
+            "DELETE FROM ioc_sightings WHERE id=?1",
+            params![sighting.id],
+        )
+        .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "ioc_sighting",
+            &sighting.id,
+            "delete",
+            Some(to_value(&sighting)?),
+            None,
+        ));
+    }
+    for edge in linked_edges {
+        let mut after = edge.clone();
+        after.ioc_ids.retain(|linked| linked != id);
+        tx.execute(
+            "UPDATE attack_edges SET ioc_ids=?1 WHERE id=?2",
+            params![
+                serde_json::to_string(&after.ioc_ids).map_err(|e| e.to_string())?,
+                after.id
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "attack_edge",
+            &edge.id,
+            "update",
+            Some(to_value(&edge)?),
+            Some(to_value(&after)?),
+        ));
+    }
     if tx
         .execute("DELETE FROM iocs WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?
@@ -3851,14 +4521,502 @@ pub fn delete_ioc(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> App
     {
         return Err("IOC was not found".into());
     }
+    changes.push(single_change("ioc", id, "delete", Some(before), None));
+    record_commit_tx(&tx, actor, "Deleted IOC", changes, &[])?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+pub fn create_ioc_sighting(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    ioc_id: &str,
+    entity_kind: &str,
+    entity_id: &str,
+    sighted_at: Option<&str>,
+    location: &str,
+    note: &str,
+    set_compromise_status: Option<&str>,
+) -> AppResult<IocSighting> {
+    validate_enum("entity kind", entity_kind, SIGHTING_ENTITY_KINDS)?;
+    if !exists(conn, "iocs", ioc_id)? {
+        return Err("Referenced IOC was not found".into());
+    }
+    verify_graph_entity_ref(conn, entity_kind, entity_id)?;
+    let sighted_at = sighted_at
+        .map(|value| normalize_timestamp("Sighted at", value))
+        .transpose()?;
+    if let Some(status) = set_compromise_status {
+        validate_enum("compromise status", status, &["suspected", "infected"])?;
+        if entity_kind != "asset" {
+            return Err("Compromise status can only be raised on assets".into());
+        }
+    }
+    let id = Uuid::new_v4().to_string();
+    let created_at = Utc::now().to_rfc3339();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO ioc_sightings(id,ioc_id,asset_id,network_id,firewall_id,sighted_at,location,note,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            id,
+            ioc_id,
+            (entity_kind == "asset").then_some(entity_id),
+            (entity_kind == "network").then_some(entity_id),
+            (entity_kind == "firewall").then_some(entity_id),
+            sighted_at,
+            location.trim(),
+            note.trim(),
+            created_at
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let item: IocSighting = serde_json::from_value(require_existing(
+        get_entity_json(&tx, "ioc_sighting", &id)?,
+        "IOC sighting",
+    )?)
+    .map_err(|e| e.to_string())?;
+    let mut changes = vec![single_change(
+        "ioc_sighting",
+        &id,
+        "create",
+        None,
+        Some(to_value(&item)?),
+    )];
+    let mut message = "Recorded IOC sighting".to_string();
+    if let Some(status) = set_compromise_status {
+        let asset_value = require_existing(get_entity_json(&tx, "asset", entity_id)?, "Asset")?;
+        let asset: Asset = serde_json::from_value(asset_value).map_err(|e| e.to_string())?;
+        if compromise_rank(status) > compromise_rank(&asset.compromise_status) {
+            let after = Asset {
+                compromise_status: status.to_string(),
+                suspicious: true,
+                ..asset.clone()
+            };
+            tx.execute(
+                "UPDATE assets SET compromise_status=?1,suspicious=1 WHERE id=?2",
+                params![status, entity_id],
+            )
+            .map_err(|e| e.to_string())?;
+            changes.push(single_change(
+                "asset",
+                entity_id,
+                "update",
+                Some(to_value(&asset)?),
+                Some(to_value(&after)?),
+            ));
+            message = format!("Recorded IOC sighting; escalated asset to {status}");
+        }
+    }
+    record_commit_tx(&tx, actor, &message, changes, &[])?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(item)
+}
+
+pub fn update_ioc_sighting(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    id: &str,
+    sighted_at: Option<&str>,
+    location: &str,
+    note: &str,
+) -> AppResult<IocSighting> {
+    let before_value = require_existing(get_entity_json(conn, "ioc_sighting", id)?, "IOC sighting")?;
+    let before: IocSighting = serde_json::from_value(before_value).map_err(|e| e.to_string())?;
+    let sighted_at = sighted_at
+        .map(|value| normalize_timestamp("Sighted at", value))
+        .transpose()?;
+    let after = IocSighting {
+        sighted_at,
+        location: location.trim().into(),
+        note: note.trim().into(),
+        ..before.clone()
+    };
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    if tx
+        .execute(
+            "UPDATE ioc_sightings SET sighted_at=?1,location=?2,note=?3 WHERE id=?4",
+            params![after.sighted_at, after.location, after.note, id],
+        )
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("IOC sighting was not found".into());
+    }
     record_commit_tx(
         &tx,
         actor,
-        "Deleted IOC",
-        vec![single_change("ioc", id, "delete", Some(before), None)],
+        "Updated IOC sighting",
+        vec![single_change(
+            "ioc_sighting",
+            id,
+            "update",
+            Some(to_value(&before)?),
+            Some(to_value(&after)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(after)
+}
+
+pub fn delete_ioc_sighting(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> AppResult<()> {
+    let before = require_existing(get_entity_json(conn, "ioc_sighting", id)?, "IOC sighting")?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    if tx
+        .execute("DELETE FROM ioc_sightings WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("IOC sighting was not found".into());
+    }
+    record_commit_tx(
+        &tx,
+        actor,
+        "Deleted IOC sighting",
+        vec![single_change(
+            "ioc_sighting",
+            id,
+            "delete",
+            Some(before),
+            None,
+        )],
         &[],
     )?;
     tx.commit().map_err(|e| e.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_attack_edge(
+    conn: &Connection,
+    id: String,
+    source_kind: &str,
+    source_id: &str,
+    target_kind: &str,
+    target_id: &str,
+    title: &str,
+    description: &str,
+    edge_type: &str,
+    confidence: &str,
+    mitre_tactic: Option<&str>,
+    mitre_technique: Option<&str>,
+    occurred_at: Option<&str>,
+    timeline_event_id: Option<&str>,
+    sequence: Option<i64>,
+    ioc_ids: Vec<String>,
+    created_at: String,
+) -> AppResult<AttackEdge> {
+    let occurred_at = occurred_at
+        .map(|value| normalize_timestamp("Occurred at", value))
+        .transpose()?;
+    let mut deduped: Vec<String> = Vec::new();
+    for ioc_id in ioc_ids {
+        if !deduped.contains(&ioc_id) {
+            deduped.push(ioc_id);
+        }
+    }
+    let sequence = match sequence {
+        Some(value) => value,
+        None => conn
+            .query_row(
+                "SELECT COALESCE(MAX(sequence),0)+1 FROM attack_edges",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?,
+    };
+    let edge = AttackEdge {
+        id,
+        source_kind: source_kind.into(),
+        source_id: if source_kind == "external" {
+            source_id.trim().into()
+        } else {
+            source_id.into()
+        },
+        source_name: None,
+        target_kind: target_kind.into(),
+        target_id: target_id.into(),
+        target_name: None,
+        title: title.trim().into(),
+        description: description.trim().into(),
+        edge_type: edge_type.into(),
+        confidence: confidence.into(),
+        mitre_tactic: cleaned(mitre_tactic),
+        mitre_technique: cleaned(mitre_technique),
+        occurred_at,
+        timeline_event_id: cleaned(timeline_event_id),
+        timeline_event_time: None,
+        sequence,
+        ioc_ids: deduped,
+        created_at,
+    };
+    validate_attack_edge_model(&edge)?;
+    verify_attack_edge_refs(conn, &edge)?;
+    Ok(edge)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_attack_edge(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    source_kind: &str,
+    source_id: &str,
+    target_kind: &str,
+    target_id: &str,
+    title: &str,
+    description: &str,
+    edge_type: &str,
+    confidence: &str,
+    mitre_tactic: Option<&str>,
+    mitre_technique: Option<&str>,
+    occurred_at: Option<&str>,
+    timeline_event_id: Option<&str>,
+    sequence: Option<i64>,
+    ioc_ids: Vec<String>,
+) -> AppResult<AttackEdge> {
+    let edge = build_attack_edge(
+        conn,
+        Uuid::new_v4().to_string(),
+        source_kind,
+        source_id,
+        target_kind,
+        target_id,
+        title,
+        description,
+        edge_type,
+        confidence,
+        mitre_tactic,
+        mitre_technique,
+        occurred_at,
+        timeline_event_id,
+        sequence,
+        ioc_ids,
+        Utc::now().to_rfc3339(),
+    )?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO attack_edges(id,source_kind,source_id,target_kind,target_id,title,description,edge_type,confidence,mitre_tactic,mitre_technique,occurred_at,timeline_event_id,sequence,ioc_ids,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+        params![
+            edge.id,
+            edge.source_kind,
+            edge.source_id,
+            edge.target_kind,
+            edge.target_id,
+            edge.title,
+            edge.description,
+            edge.edge_type,
+            edge.confidence,
+            edge.mitre_tactic,
+            edge.mitre_technique,
+            edge.occurred_at,
+            edge.timeline_event_id,
+            edge.sequence,
+            serde_json::to_string(&edge.ioc_ids).map_err(|e| e.to_string())?,
+            edge.created_at
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    let item: AttackEdge = serde_json::from_value(require_existing(
+        get_entity_json(&tx, "attack_edge", &edge.id)?,
+        "Attack edge",
+    )?)
+    .map_err(|e| e.to_string())?;
+    record_commit_tx(
+        &tx,
+        actor,
+        "Recorded attack edge",
+        vec![single_change(
+            "attack_edge",
+            &edge.id,
+            "create",
+            None,
+            Some(to_value(&item)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(item)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_attack_edge(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    id: &str,
+    source_kind: &str,
+    source_id: &str,
+    target_kind: &str,
+    target_id: &str,
+    title: &str,
+    description: &str,
+    edge_type: &str,
+    confidence: &str,
+    mitre_tactic: Option<&str>,
+    mitre_technique: Option<&str>,
+    occurred_at: Option<&str>,
+    timeline_event_id: Option<&str>,
+    sequence: i64,
+    ioc_ids: Vec<String>,
+) -> AppResult<AttackEdge> {
+    let before_value = require_existing(get_entity_json(conn, "attack_edge", id)?, "Attack edge")?;
+    let before: AttackEdge = serde_json::from_value(before_value).map_err(|e| e.to_string())?;
+    let edge = build_attack_edge(
+        conn,
+        id.to_string(),
+        source_kind,
+        source_id,
+        target_kind,
+        target_id,
+        title,
+        description,
+        edge_type,
+        confidence,
+        mitre_tactic,
+        mitre_technique,
+        occurred_at,
+        timeline_event_id,
+        Some(sequence),
+        ioc_ids,
+        before.created_at.clone(),
+    )?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    if tx
+        .execute(
+            "UPDATE attack_edges SET source_kind=?1,source_id=?2,target_kind=?3,target_id=?4,title=?5,description=?6,edge_type=?7,confidence=?8,mitre_tactic=?9,mitre_technique=?10,occurred_at=?11,timeline_event_id=?12,sequence=?13,ioc_ids=?14 WHERE id=?15",
+            params![
+                edge.source_kind,
+                edge.source_id,
+                edge.target_kind,
+                edge.target_id,
+                edge.title,
+                edge.description,
+                edge.edge_type,
+                edge.confidence,
+                edge.mitre_tactic,
+                edge.mitre_technique,
+                edge.occurred_at,
+                edge.timeline_event_id,
+                edge.sequence,
+                serde_json::to_string(&edge.ioc_ids).map_err(|e| e.to_string())?,
+                id
+            ],
+        )
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("Attack edge was not found".into());
+    }
+    let item: AttackEdge = serde_json::from_value(require_existing(
+        get_entity_json(&tx, "attack_edge", id)?,
+        "Attack edge",
+    )?)
+    .map_err(|e| e.to_string())?;
+    record_commit_tx(
+        &tx,
+        actor,
+        "Updated attack edge",
+        vec![single_change(
+            "attack_edge",
+            id,
+            "update",
+            Some(to_value(&before)?),
+            Some(to_value(&item)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(item)
+}
+
+pub fn delete_attack_edge(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> AppResult<()> {
+    let before = require_existing(get_entity_json(conn, "attack_edge", id)?, "Attack edge")?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    if tx
+        .execute("DELETE FROM attack_edges WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("Attack edge was not found".into());
+    }
+    record_commit_tx(
+        &tx,
+        actor,
+        "Deleted attack edge",
+        vec![single_change("attack_edge", id, "delete", Some(before), None)],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+pub fn save_investigation_view(
+    conn: &mut Connection,
+    id: Option<&str>,
+    name: &str,
+    description: &str,
+    state: &Value,
+) -> AppResult<InvestigationView> {
+    let now = Utc::now().to_rfc3339();
+    let item = InvestigationView {
+        id: id.map(String::from).unwrap_or_else(|| Uuid::new_v4().to_string()),
+        name: name.trim().into(),
+        description: description.trim().into(),
+        state: state.clone(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    validate_investigation_view_model(&item)?;
+    let duplicate: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM investigation_views WHERE LOWER(name)=LOWER(?1) AND id<>?2",
+            params![item.name, item.id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if duplicate > 0 {
+        return Err(format!(
+            "An investigation view named \"{}\" already exists",
+            item.name
+        ));
+    }
+    let state_json = serde_json::to_string(&item.state).map_err(|e| e.to_string())?;
+    if let Some(id) = id {
+        let updated = conn
+            .execute(
+                "UPDATE investigation_views SET name=?1,description=?2,state_json=?3,updated_at=?4 WHERE id=?5",
+                params![item.name, item.description, state_json, item.updated_at, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if updated == 0 {
+            return Err("Investigation view was not found".into());
+        }
+        get_investigation_view(conn, id)
+    } else {
+        conn.execute(
+            "INSERT INTO investigation_views(id,name,description,state_json,created_at,updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                item.id,
+                item.name,
+                item.description,
+                state_json,
+                item.created_at,
+                item.updated_at
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(item)
+    }
+}
+
+pub fn delete_investigation_view(conn: &Connection, id: &str) -> AppResult<()> {
+    if conn
+        .execute("DELETE FROM investigation_views WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("Investigation view was not found".into());
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4000,7 +5158,41 @@ pub fn delete_firewall(conn: &mut Connection, actor: &ActorIdentity, id: &str) -
     let before = require_existing(get_entity_json(conn, "firewall", id)?, "Firewall")?;
     let interfaces = get_firewall_interfaces(conn, Some(id))?;
     let nat_rules = get_firewall_nat_rules(conn, Some(id))?;
+    let sightings = get_ioc_sightings(conn, None, Some("firewall"), Some(id))?;
+    let attack_edges: Vec<AttackEdge> = get_attack_edges(conn)?
+        .into_iter()
+        .filter(|edge| {
+            (edge.source_kind == "firewall" && edge.source_id == id)
+                || (edge.target_kind == "firewall" && edge.target_id == id)
+        })
+        .collect();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut changes = Vec::new();
+    for sighting in &sightings {
+        tx.execute(
+            "DELETE FROM ioc_sightings WHERE id=?1",
+            params![sighting.id],
+        )
+        .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "ioc_sighting",
+            &sighting.id,
+            "delete",
+            Some(to_value(sighting)?),
+            None,
+        ));
+    }
+    for edge in &attack_edges {
+        tx.execute("DELETE FROM attack_edges WHERE id=?1", params![edge.id])
+            .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "attack_edge",
+            &edge.id,
+            "delete",
+            Some(to_value(edge)?),
+            None,
+        ));
+    }
     if tx
         .execute("DELETE FROM firewalls WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?
@@ -4008,7 +5200,6 @@ pub fn delete_firewall(conn: &mut Connection, actor: &ActorIdentity, id: &str) -
     {
         return Err("Firewall was not found".into());
     }
-    let mut changes = Vec::new();
     for item in interfaces {
         changes.push(single_change(
             "firewall_interface",
@@ -4659,6 +5850,15 @@ pub fn export_case_data(conn: &Connection) -> AppResult<ExportData> {
         firewall_interfaces: get_firewall_interfaces(conn, None)?,
         firewall_nat_rules: get_firewall_nat_rules(conn, None)?,
         network_connections: get_network_connections(conn)?,
+        ioc_sightings: get_ioc_sightings(conn, None, None, None)?,
+        attack_edges: get_attack_edges(conn)?,
+        investigation_views: {
+            let mut views = Vec::new();
+            for summary in get_investigation_views(conn)? {
+                views.push(get_investigation_view(conn, &summary.id)?);
+            }
+            views
+        },
     })
 }
 
@@ -4764,6 +5964,32 @@ pub fn import_case_data(
             .map(|value| normalize_timestamp("Last seen", value))
             .transpose()?;
         insert_item!("iocs","ioc",&v.id,"INSERT OR IGNORE INTO iocs(id,ioc_type,value,description,threat_level,first_seen,last_seen,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![v.id,v.ioc_type,v.value,v.description,v.threat_level,v.first_seen,v.last_seen,v.created_at],&v);
+    }
+    for original in &data.ioc_sightings {
+        let mut v = original.clone();
+        v.sighted_at = v
+            .sighted_at
+            .as_deref()
+            .map(|value| normalize_timestamp("Sighted at", value))
+            .transpose()?;
+        insert_item!("ioc_sightings","ioc_sighting",&v.id,"INSERT OR IGNORE INTO ioc_sightings(id,ioc_id,asset_id,network_id,firewall_id,sighted_at,location,note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![v.id,v.ioc_id,(v.entity_kind=="asset").then_some(&v.entity_id),(v.entity_kind=="network").then_some(&v.entity_id),(v.entity_kind=="firewall").then_some(&v.entity_id),v.sighted_at,v.location,v.note,v.created_at],&v);
+    }
+    for original in &data.attack_edges {
+        let mut v = original.clone();
+        v.occurred_at = v
+            .occurred_at
+            .as_deref()
+            .map(|value| normalize_timestamp("Occurred at", value))
+            .transpose()?;
+        let ioc_ids = serde_json::to_string(&v.ioc_ids).map_err(|e| e.to_string())?;
+        insert_item!("attack_edges","attack_edge",&v.id,"INSERT OR IGNORE INTO attack_edges(id,source_kind,source_id,target_kind,target_id,title,description,edge_type,confidence,mitre_tactic,mitre_technique,occurred_at,timeline_event_id,sequence,ioc_ids,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",params![v.id,v.source_kind,v.source_id,v.target_kind,v.target_id,v.title,v.description,v.edge_type,v.confidence,v.mitre_tactic,v.mitre_technique,v.occurred_at,v.timeline_event_id,v.sequence,ioc_ids,v.created_at],&v);
+    }
+    // Investigation views are presentation state: imported for convenience but
+    // deliberately excluded from evidence history.
+    for v in &data.investigation_views {
+        let state_json = serde_json::to_string(&v.state).map_err(|e| e.to_string())?;
+        let count = tx.execute("INSERT OR IGNORE INTO investigation_views(id,name,description,state_json,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6)",params![v.id,v.name,v.description,state_json,v.created_at,v.updated_at]).map_err(|e|e.to_string())?;
+        summary_increment(&mut summary, "investigation_views", count > 0);
     }
     if !changes.is_empty() {
         record_commit_tx(&tx, actor, "Imported legacy case snapshot", changes, &[])?;
@@ -4886,6 +6112,34 @@ pub fn upsert_entity_json(tx: &Transaction<'_>, entity_type: &str, value: &Value
             validate_connection_model(&v)?;
             tx.execute("INSERT INTO network_connections(id,source_network_id,target_network_id,connection_type,description,device_name) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET source_network_id=excluded.source_network_id,target_network_id=excluded.target_network_id,connection_type=excluded.connection_type,description=excluded.description,device_name=excluded.device_name",params![v.id,v.source_network_id,v.target_network_id,v.connection_type,v.description,v.device_name]).map_err(|e|e.to_string())?;
         }
+        "ioc_sighting" => {
+            let mut v: IocSighting =
+                serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            validate_sighting_model(&v)?;
+            if !exists(tx, "iocs", &v.ioc_id)? {
+                return Err("Referenced IOC was not found".into());
+            }
+            verify_graph_entity_ref(tx, &v.entity_kind, &v.entity_id)?;
+            v.sighted_at = v
+                .sighted_at
+                .as_deref()
+                .map(|item| normalize_timestamp("Sighted at", item))
+                .transpose()?;
+            tx.execute("INSERT INTO ioc_sightings(id,ioc_id,asset_id,network_id,firewall_id,sighted_at,location,note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET ioc_id=excluded.ioc_id,asset_id=excluded.asset_id,network_id=excluded.network_id,firewall_id=excluded.firewall_id,sighted_at=excluded.sighted_at,location=excluded.location,note=excluded.note",params![v.id,v.ioc_id,(v.entity_kind=="asset").then_some(&v.entity_id),(v.entity_kind=="network").then_some(&v.entity_id),(v.entity_kind=="firewall").then_some(&v.entity_id),v.sighted_at,v.location,v.note,v.created_at]).map_err(|e|e.to_string())?;
+        }
+        "attack_edge" => {
+            let mut v: AttackEdge =
+                serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            validate_attack_edge_model(&v)?;
+            verify_attack_edge_refs(tx, &v)?;
+            v.occurred_at = v
+                .occurred_at
+                .as_deref()
+                .map(|item| normalize_timestamp("Occurred at", item))
+                .transpose()?;
+            let ioc_ids = serde_json::to_string(&v.ioc_ids).map_err(|e| e.to_string())?;
+            tx.execute("INSERT INTO attack_edges(id,source_kind,source_id,target_kind,target_id,title,description,edge_type,confidence,mitre_tactic,mitre_technique,occurred_at,timeline_event_id,sequence,ioc_ids,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(id) DO UPDATE SET source_kind=excluded.source_kind,source_id=excluded.source_id,target_kind=excluded.target_kind,target_id=excluded.target_id,title=excluded.title,description=excluded.description,edge_type=excluded.edge_type,confidence=excluded.confidence,mitre_tactic=excluded.mitre_tactic,mitre_technique=excluded.mitre_technique,occurred_at=excluded.occurred_at,timeline_event_id=excluded.timeline_event_id,sequence=excluded.sequence,ioc_ids=excluded.ioc_ids",params![v.id,v.source_kind,v.source_id,v.target_kind,v.target_id,v.title,v.description,v.edge_type,v.confidence,v.mitre_tactic,v.mitre_technique,v.occurred_at,v.timeline_event_id,v.sequence,ioc_ids,v.created_at]).map_err(|e|e.to_string())?;
+        }
         _ => return Err(format!("Unsupported entity type: {entity_type}")),
     }
     Ok(())
@@ -4977,6 +6231,8 @@ pub fn delete_entity_direct(tx: &Transaction<'_>, entity_type: &str, id: &str) -
         "firewall_interface" => "firewall_interfaces",
         "firewall_nat_rule" => "firewall_nat_rules",
         "network_connection" => "network_connections",
+        "ioc_sighting" => "ioc_sightings",
+        "attack_edge" => "attack_edges",
         _ => return Err(format!("Unsupported deletion type: {entity_type}")),
     };
     tx.execute(&format!("DELETE FROM {table} WHERE id=?1"), params![id])
@@ -5058,8 +6314,12 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            6
+            7
         );
+        // The v7 investigation tables exist after migrating a legacy case.
+        for table in ["ioc_sightings", "attack_edges", "investigation_views"] {
+            assert!(table_exists(&conn, table).unwrap(), "{table} missing");
+        }
     }
 
     #[test]
@@ -5507,5 +6767,373 @@ mod tests {
         assert!(parsed.network_interfaces.is_empty());
         assert_eq!(parsed.assets[0].compromise_status, "unknown");
         assert_eq!(parsed.assets[0].investigation_status, "not_started");
+        assert!(parsed.ioc_sightings.is_empty());
+        assert!(parsed.attack_edges.is_empty());
+        assert!(parsed.investigation_views.is_empty());
+    }
+
+    fn add_asset(conn: &mut Connection, actor: &ActorIdentity, network: &str, name: &str) -> Asset {
+        create_asset(
+            conn,
+            actor,
+            Some(network),
+            name,
+            "10.0.0.9",
+            None,
+            "workstation",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn add_ioc(conn: &mut Connection, actor: &ActorIdentity, value: &str) -> Ioc {
+        create_ioc(conn, actor, "IP", value, "", "high", None, None).unwrap()
+    }
+
+    #[test]
+    fn sighting_creation_syncs_infection_state_and_never_downgrades() {
+        let (mut conn, _, actor) = fresh_case();
+        let network = add_network(&mut conn, &actor, "Office", "10.0.0.0/24");
+        let asset = add_asset(&mut conn, &actor, &network.id, "PC-1");
+        let ioc = add_ioc(&mut conn, &actor, "203.0.113.7");
+
+        let sighting = create_ioc_sighting(
+            &mut conn,
+            &actor,
+            &ioc.id,
+            "asset",
+            &asset.id,
+            Some("2026-07-20T02:14:00Z"),
+            "C:\\Windows\\Temp\\payload.exe",
+            "Found during triage",
+            Some("infected"),
+        )
+        .unwrap();
+        assert_eq!(sighting.entity_kind, "asset");
+        assert_eq!(sighting.ioc_value.as_deref(), Some("203.0.113.7"));
+        assert_eq!(sighting.entity_name.as_deref(), Some("PC-1"));
+
+        let updated = get_assets(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == asset.id)
+            .unwrap();
+        assert_eq!(updated.compromise_status, "infected");
+        assert!(updated.suspicious);
+        // One commit carries both the sighting create and the asset escalation.
+        let history = get_history(&conn, 1).unwrap();
+        assert_eq!(history[0].changes.len(), 2);
+
+        // A later 'suspected' sighting must not downgrade the infected asset.
+        let second = add_ioc(&mut conn, &actor, "203.0.113.8");
+        create_ioc_sighting(
+            &mut conn,
+            &actor,
+            &second.id,
+            "asset",
+            &asset.id,
+            None,
+            "",
+            "",
+            Some("suspected"),
+        )
+        .unwrap();
+        let still_infected = get_assets(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == asset.id)
+            .unwrap();
+        assert_eq!(still_infected.compromise_status, "infected");
+
+        let summary = get_infection_summary(&conn).unwrap();
+        let entry = summary
+            .entities
+            .iter()
+            .find(|item| item.entity_id == asset.id)
+            .unwrap();
+        assert_eq!(entry.sighting_count, 2);
+        assert_eq!(entry.max_threat_level, "high");
+        assert_eq!(entry.ioc_ids.len(), 2);
+        assert_eq!(summary.iocs.len(), 2);
+
+        assert!(create_ioc_sighting(
+            &mut conn,
+            &actor,
+            &ioc.id,
+            "network",
+            &network.id,
+            None,
+            "",
+            "",
+            Some("infected"),
+        )
+        .unwrap_err()
+        .contains("only be raised on assets"));
+        assert!(create_ioc_sighting(
+            &mut conn, &actor, &ioc.id, "asset", "missing", None, "", "", None,
+        )
+        .unwrap_err()
+        .contains("not found"));
+    }
+
+    #[test]
+    fn deleting_ioc_or_entity_cascades_sightings_with_history() {
+        let (mut conn, _, actor) = fresh_case();
+        let network = add_network(&mut conn, &actor, "Office", "10.0.0.0/24");
+        let asset = add_asset(&mut conn, &actor, &network.id, "PC-1");
+        let ioc = add_ioc(&mut conn, &actor, "203.0.113.7");
+        let sighting = create_ioc_sighting(
+            &mut conn, &actor, &ioc.id, "asset", &asset.id, None, "", "", None,
+        )
+        .unwrap();
+
+        delete_ioc(&mut conn, &actor, &ioc.id).unwrap();
+        assert!(get_ioc_sightings(&conn, None, None, None).unwrap().is_empty());
+        let history = get_history(&conn, 1).unwrap();
+        assert!(history[0]
+            .changes
+            .iter()
+            .any(|change| change.entity_type == "ioc_sighting"
+                && change.entity_id == sighting.id
+                && change.operation == "delete"));
+
+        // Entity deletion also removes its sightings.
+        let second = add_ioc(&mut conn, &actor, "203.0.113.9");
+        create_ioc_sighting(
+            &mut conn, &actor, &second.id, "asset", &asset.id, None, "", "", None,
+        )
+        .unwrap();
+        delete_asset(&mut conn, &actor, &asset.id).unwrap();
+        assert!(get_ioc_sightings(&conn, None, None, None).unwrap().is_empty());
+
+        // A network with a sighting refuses deletion, listing the dependency.
+        create_ioc_sighting(
+            &mut conn, &actor, &second.id, "network", &network.id, None, "", "", None,
+        )
+        .unwrap();
+        assert!(delete_network(&mut conn, &actor, &network.id)
+            .unwrap_err()
+            .contains("IOC sightings"));
+    }
+
+    #[test]
+    fn attack_edges_validate_order_and_ripple_on_deletes() {
+        let (mut conn, _, actor) = fresh_case();
+        let network = add_network(&mut conn, &actor, "Office", "10.0.0.0/24");
+        let web = add_asset(&mut conn, &actor, &network.id, "WEB-01");
+        let dc = add_asset(&mut conn, &actor, &network.id, "DC-01");
+        let ioc = add_ioc(&mut conn, &actor, "203.0.113.7");
+        let event = create_timeline_event(
+            &mut conn,
+            &actor,
+            Some(&web.id),
+            Some("2026-07-20T02:14:00Z"),
+            Some("UTC"),
+            None,
+            None,
+            None,
+            "initial_access",
+            "First RDP success",
+            "high",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let first = create_attack_edge(
+            &mut conn,
+            &actor,
+            "external",
+            "Internet",
+            "asset",
+            &web.id,
+            "Initial access via exposed RDP",
+            "",
+            "initial_access",
+            "confirmed",
+            Some("TA0001"),
+            Some("T1110.001"),
+            Some("2026-07-20T02:14:00Z"),
+            Some(&event.id),
+            None,
+            vec![ioc.id.clone(), ioc.id.clone()],
+        )
+        .unwrap();
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.ioc_ids, vec![ioc.id.clone()]);
+        assert_eq!(first.source_name.as_deref(), Some("Internet"));
+        assert_eq!(first.target_name.as_deref(), Some("WEB-01"));
+        assert!(first.timeline_event_time.is_some());
+
+        let second = create_attack_edge(
+            &mut conn,
+            &actor,
+            "asset",
+            &web.id,
+            "asset",
+            &dc.id,
+            "Lateral movement to DC",
+            "",
+            "lateral_movement",
+            "probable",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(second.sequence, 2);
+        let ordered = get_attack_edges(&conn).unwrap();
+        assert_eq!(ordered[0].id, first.id);
+        assert_eq!(ordered[1].id, second.id);
+
+        // Validation failures.
+        assert!(create_attack_edge(
+            &mut conn, &actor, "asset", &web.id, "asset", &web.id, "Loop", "", "other",
+            "suspected", None, None, None, None, None, Vec::new(),
+        )
+        .unwrap_err()
+        .contains("two different entities"));
+        assert!(create_attack_edge(
+            &mut conn, &actor, "asset", "missing", "asset", &dc.id, "Bad", "", "other",
+            "suspected", None, None, None, None, None, Vec::new(),
+        )
+        .unwrap_err()
+        .contains("not found"));
+        assert!(create_attack_edge(
+            &mut conn, &actor, "external", "Internet", "asset", &dc.id, "Bad", "", "other",
+            "suspected", None, None, None, None, None, vec!["missing-ioc".into()],
+        )
+        .unwrap_err()
+        .contains("Linked IOC"));
+
+        // Timeline event deletion detaches, IOC deletion rewrites the link list.
+        delete_timeline_event(&mut conn, &actor, &event.id).unwrap();
+        let detached = get_attack_edges(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|edge| edge.id == first.id)
+            .unwrap();
+        assert_eq!(detached.timeline_event_id, None);
+        delete_ioc(&mut conn, &actor, &ioc.id).unwrap();
+        let unlinked = get_attack_edges(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|edge| edge.id == first.id)
+            .unwrap();
+        assert!(unlinked.ioc_ids.is_empty());
+
+        // Asset deletion removes the edges that touch it.
+        delete_asset(&mut conn, &actor, &web.id).unwrap();
+        assert!(get_attack_edges(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn investigation_views_are_named_validated_and_not_history_tracked() {
+        let (mut conn, _, _actor) = fresh_case();
+        let commits_before = get_history(&conn, 100).unwrap().len();
+        let state = serde_json::json!({
+            "version": 1,
+            "hidden_network_ids": [],
+            "hidden_node_ids": ["asset-x"],
+            "filters": {"compromise": ["infected"]},
+            "display": {"show_attack_edges": true},
+            "layout": "dagre",
+            "positions": [{"id": "asset-x", "x": 1.5, "y": 2.0}],
+            "zoom": 1.0,
+            "pan_x": 0.0,
+            "pan_y": 0.0
+        });
+        let view =
+            save_investigation_view(&mut conn, None, "Pathway", "For briefing", &state).unwrap();
+        assert_eq!(view.name, "Pathway");
+        assert!(save_investigation_view(&mut conn, None, "  pathway ", "", &state)
+            .unwrap_err()
+            .contains("already exists"));
+
+        let renamed =
+            save_investigation_view(&mut conn, Some(&view.id), "Pathway v2", "", &state).unwrap();
+        assert_eq!(renamed.name, "Pathway v2");
+        assert_eq!(get_investigation_views(&conn).unwrap().len(), 1);
+        let loaded = get_investigation_view(&conn, &view.id).unwrap();
+        assert_eq!(loaded.state["positions"][0]["x"], 1.5);
+
+        let bad_state = serde_json::json!({"version": 2, "layout": "dagre", "zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0});
+        assert!(save_investigation_view(&mut conn, None, "Bad", "", &bad_state)
+            .unwrap_err()
+            .contains("version"));
+
+        // Presentation state stays out of evidence history.
+        assert_eq!(get_history(&conn, 100).unwrap().len(), commits_before);
+        delete_investigation_view(&conn, &view.id).unwrap();
+        assert!(get_investigation_views(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn investigation_entities_round_trip_through_snapshot_export() {
+        let (mut source, case, source_actor) = fresh_case();
+        let network = add_network(&mut source, &source_actor, "Office", "10.0.0.0/24");
+        let asset = add_asset(&mut source, &source_actor, &network.id, "PC-1");
+        let ioc = add_ioc(&mut source, &source_actor, "203.0.113.7");
+        create_ioc_sighting(
+            &mut source, &source_actor, &ioc.id, "asset", &asset.id, None, "", "", None,
+        )
+        .unwrap();
+        create_attack_edge(
+            &mut source,
+            &source_actor,
+            "external",
+            "Internet",
+            "asset",
+            &asset.id,
+            "Initial access",
+            "",
+            "initial_access",
+            "confirmed",
+            None,
+            None,
+            None,
+            None,
+            None,
+            vec![ioc.id.clone()],
+        )
+        .unwrap();
+        let state = serde_json::json!({"version":1,"layout":"dagre","zoom":1.0,"pan_x":0.0,"pan_y":0.0});
+        save_investigation_view(&mut source, None, "Shared", "", &state).unwrap();
+        let data = export_case_data(&source).unwrap();
+        assert_eq!(data.ioc_sightings.len(), 1);
+        assert_eq!(data.attack_edges.len(), 1);
+        assert_eq!(data.investigation_views.len(), 1);
+
+        let mut target = Connection::open_in_memory().unwrap();
+        init_database(&target).unwrap();
+        target.execute("INSERT INTO cases(id,name,description,client_name,investigator,status,created_at,updated_at,metadata) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![case.id,case.name,case.description,case.client_name,case.investigator,case.status,case.created_at,case.updated_at,case.metadata]).unwrap();
+        initialize_history(&target).unwrap();
+        let target_actor = actor("Merger");
+        let summary = import_case_data(&mut target, &target_actor, &data).unwrap();
+        assert_eq!(summary.entities["ioc_sightings"].inserted, 1);
+        assert_eq!(summary.entities["attack_edges"].inserted, 1);
+        assert_eq!(summary.entities["investigation_views"].inserted, 1);
+        assert_eq!(get_ioc_sightings(&target, None, None, None).unwrap().len(), 1);
+        assert_eq!(get_attack_edges(&target).unwrap().len(), 1);
+        assert_eq!(get_investigation_views(&target).unwrap().len(), 1);
+        // Imported views stay out of history while evidence entities are recorded.
+        let history = get_history(&target, 1).unwrap();
+        assert!(history[0]
+            .changes
+            .iter()
+            .all(|change| change.entity_type != "investigation_view"));
+        assert!(history[0]
+            .changes
+            .iter()
+            .any(|change| change.entity_type == "attack_edge"));
     }
 }

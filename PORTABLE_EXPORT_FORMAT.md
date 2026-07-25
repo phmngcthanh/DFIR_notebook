@@ -6,7 +6,7 @@ This document specifies encrypted `.dfirx` files so independent tools can decryp
 
 An unencrypted export is formatted UTF-8 JSON using the application's existing structure:
 
-- A full snapshot contains `format_version`, `exported_at`, `case_info`, `networks`, `assets`, `network_interfaces`, `clock_profiles`, `timeline_events`, `notes`, `iocs`, `firewalls`, and `network_connections`.
+- A full snapshot contains `format_version`, `exported_at`, `case_info`, `networks`, `assets`, `network_interfaces`, `clock_profiles`, `timeline_events`, `notes`, `iocs`, `ioc_sightings`, `attack_edges`, `investigation_views`, `firewalls`, and `network_connections`. The `ioc_sightings` array links IOCs to one asset/network/firewall each (`entity_kind` + `entity_id`); `attack_edges` are analyst-drawn intrusion steps with `source_kind`/`source_id` (or a free `external` origin label), `target_kind`/`target_id`, MITRE context, `sequence`, and linked `ioc_ids`; `investigation_views` are named saved graph views (presentation state, excluded from history and expert merge bundles). Files written before these arrays existed parse unchanged — readers must default each missing array to empty and ignore unknown arrays.
 - An expert merge bundle contains `format: "dfir-investigator-changes"`, its version and case/baseline identifiers, exporter metadata, and `commits`.
 
 No encryption wrapper is added to a plain export.

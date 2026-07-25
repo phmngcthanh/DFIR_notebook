@@ -26,19 +26,23 @@ use zeroize::Zeroizing;
 
 use crate::auth::SessionContext;
 use crate::db::{
-    create_asset, create_clock_profile, create_firewall, create_firewall_interface,
-    create_firewall_nat_rule, create_ioc, create_network, create_network_connection,
-    create_network_interface, create_note, create_timeline_event, delete_asset,
-    delete_clock_profile, delete_firewall, delete_firewall_interface, delete_firewall_nat_rule,
-    delete_ioc, delete_network, delete_network_connection, delete_network_interface, delete_note,
-    delete_timeline_event, export_case_data, get_assets, get_assets_by_network, get_case,
-    get_clock_profiles, get_firewall_interfaces, get_firewall_nat_rules, get_firewalls, get_iocs,
-    get_network_connections, get_network_interfaces, get_networks, get_notes, get_timeline_events,
-    get_topology_view, import_case_data, parse_timestamp_preview, save_topology_view,
-    set_primary_interface, update_asset, update_asset_suspicious, update_case, update_clock_profile,
-    update_firewall, update_firewall_interface, update_firewall_nat_rule, update_ioc,
-    update_network, update_network_connection, update_network_interface, update_note,
-    update_timeline_event, ExportData, Ioc, TopologyNodePosition,
+    create_asset, create_attack_edge, create_clock_profile, create_firewall,
+    create_firewall_interface, create_firewall_nat_rule, create_ioc, create_ioc_sighting,
+    create_network, create_network_connection, create_network_interface, create_note,
+    create_timeline_event, delete_asset, delete_attack_edge, delete_clock_profile, delete_firewall,
+    delete_firewall_interface, delete_firewall_nat_rule, delete_investigation_view, delete_ioc,
+    delete_ioc_sighting, delete_network, delete_network_connection, delete_network_interface,
+    delete_note, delete_timeline_event, export_case_data, get_assets, get_assets_by_network,
+    get_attack_edges, get_case, get_clock_profiles, get_firewall_interfaces,
+    get_firewall_nat_rules, get_firewalls, get_infection_summary, get_investigation_view,
+    get_investigation_views, get_ioc_sightings, get_iocs, get_network_connections,
+    get_network_interfaces, get_networks, get_notes, get_timeline_events, get_topology_view,
+    import_case_data, parse_timestamp_preview, save_investigation_view, save_topology_view,
+    set_primary_interface, update_asset, update_asset_suspicious, update_attack_edge, update_case,
+    update_clock_profile, update_firewall, update_firewall_interface, update_firewall_nat_rule,
+    update_ioc, update_ioc_sighting, update_network, update_network_connection,
+    update_network_interface, update_note, update_timeline_event, ExportData, Ioc,
+    TopologyNodePosition,
 };
 use crate::history::{
     apply_bundle, get_history, parse_change_bundle, preview_bundle, ActorIdentity, MergeDecision,
@@ -419,6 +423,103 @@ pub(crate) fn run(
             let p: IocExportParams = from_args(args)?;
             let iocs = filter_iocs(case.with_conn(|conn| get_iocs(conn))?, &p.ids);
             to_json(crate::ioc_export::iocs_to_stix(&iocs)?)
+        }
+
+        // ---- IOC sightings and infection state -----------------------------
+        "list_ioc_sightings" => read_cmd!(SightingFilterParams, |conn, p| get_ioc_sightings(
+            conn,
+            p.ioc_id.as_deref(),
+            p.entity_kind.as_deref(),
+            p.entity_id.as_deref()
+        )),
+        "create_new_ioc_sighting" => write_cmd!(SightingParams, |conn, actor, p| {
+            create_ioc_sighting(
+                conn,
+                actor,
+                &p.ioc_id,
+                &p.entity_kind,
+                &p.entity_id,
+                p.sighted_at.as_deref(),
+                &p.location,
+                &p.note,
+                p.set_compromise_status.as_deref(),
+            )
+        }),
+        "update_existing_ioc_sighting" => write_cmd!(SightingUpdateParams, |conn, actor, p| {
+            update_ioc_sighting(conn, actor, &p.id, p.sighted_at.as_deref(), &p.location, &p.note)
+        }),
+        "remove_ioc_sighting" => write_cmd!(IdParams, |conn, actor, p| {
+            delete_ioc_sighting(conn, actor, &p.id).map(|_| true)
+        }),
+        "get_infection_summary" => read_cmd!(NoParams, |conn, _p| get_infection_summary(conn)),
+
+        // ---- attack pathway -------------------------------------------------
+        "list_attack_edges" => read_cmd!(NoParams, |conn, _p| get_attack_edges(conn)),
+        "create_new_attack_edge" => write_cmd!(AttackEdgeParams, |conn, actor, p| {
+            create_attack_edge(
+                conn,
+                actor,
+                &p.source_kind,
+                &p.source_id,
+                &p.target_kind,
+                &p.target_id,
+                &p.title,
+                &p.description,
+                &p.edge_type,
+                &p.confidence,
+                p.mitre_tactic.as_deref(),
+                p.mitre_technique.as_deref(),
+                p.occurred_at.as_deref(),
+                p.timeline_event_id.as_deref(),
+                p.sequence,
+                p.ioc_ids.clone(),
+            )
+        }),
+        "update_existing_attack_edge" => write_cmd!(AttackEdgeUpdateParams, |conn, actor, p| {
+            update_attack_edge(
+                conn,
+                actor,
+                &p.id,
+                &p.source_kind,
+                &p.source_id,
+                &p.target_kind,
+                &p.target_id,
+                &p.title,
+                &p.description,
+                &p.edge_type,
+                &p.confidence,
+                p.mitre_tactic.as_deref(),
+                p.mitre_technique.as_deref(),
+                p.occurred_at.as_deref(),
+                p.timeline_event_id.as_deref(),
+                p.sequence,
+                p.ioc_ids.clone(),
+            )
+        }),
+        "remove_attack_edge" => write_cmd!(IdParams, |conn, actor, p| {
+            delete_attack_edge(conn, actor, &p.id).map(|_| true)
+        }),
+
+        // ---- saved investigation views --------------------------------------
+        // Presentation state like saved topology layouts: not history-tracked,
+        // but still a write the other browsers should pick up.
+        "list_investigation_views" => read_cmd!(NoParams, |conn, _p| get_investigation_views(conn)),
+        "get_investigation_view" => {
+            read_cmd!(IdParams, |conn, p| get_investigation_view(conn, &p.id))
+        }
+        "save_investigation_view" => {
+            let p: ViewSaveParams = from_args(args)?;
+            let view = case.with_conn(|conn| {
+                save_investigation_view(conn, p.id.as_deref(), &p.name, &p.description, &p.view_state)
+            })?;
+            case.bump();
+            to_json(view)
+        }
+        "remove_investigation_view" => {
+            let p: IdParams = from_args(args)?;
+            case.with_conn(|conn| delete_investigation_view(conn, &p.id))?;
+            case.bump();
+            to_json(true)
         }
 
         // ---- firewalls -----------------------------------------------------
@@ -963,6 +1064,66 @@ params! {
         #[serde(default)] last_seen: Option<String>,
     }
     struct IocExportParams { #[serde(default)] ids: Option<Vec<String>> }
+
+    struct SightingFilterParams {
+        #[serde(default)] ioc_id: Option<String>,
+        #[serde(default)] entity_kind: Option<String>,
+        #[serde(default)] entity_id: Option<String>,
+    }
+    struct SightingParams {
+        ioc_id: String,
+        entity_kind: String,
+        entity_id: String,
+        #[serde(default)] sighted_at: Option<String>,
+        location: String,
+        note: String,
+        #[serde(default)] set_compromise_status: Option<String>,
+    }
+    struct SightingUpdateParams {
+        id: String,
+        #[serde(default)] sighted_at: Option<String>,
+        location: String,
+        note: String,
+    }
+    struct AttackEdgeParams {
+        source_kind: String,
+        source_id: String,
+        target_kind: String,
+        target_id: String,
+        title: String,
+        description: String,
+        edge_type: String,
+        confidence: String,
+        #[serde(default)] mitre_tactic: Option<String>,
+        #[serde(default)] mitre_technique: Option<String>,
+        #[serde(default)] occurred_at: Option<String>,
+        #[serde(default)] timeline_event_id: Option<String>,
+        #[serde(default)] sequence: Option<i64>,
+        #[serde(default)] ioc_ids: Vec<String>,
+    }
+    struct AttackEdgeUpdateParams {
+        id: String,
+        source_kind: String,
+        source_id: String,
+        target_kind: String,
+        target_id: String,
+        title: String,
+        description: String,
+        edge_type: String,
+        confidence: String,
+        #[serde(default)] mitre_tactic: Option<String>,
+        #[serde(default)] mitre_technique: Option<String>,
+        #[serde(default)] occurred_at: Option<String>,
+        #[serde(default)] timeline_event_id: Option<String>,
+        sequence: i64,
+        #[serde(default)] ioc_ids: Vec<String>,
+    }
+    struct ViewSaveParams {
+        #[serde(default)] id: Option<String>,
+        name: String,
+        description: String,
+        view_state: Value,
+    }
 
     struct FirewallParams {
         #[serde(default)] network_id: Option<String>,

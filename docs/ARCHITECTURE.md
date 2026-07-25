@@ -40,7 +40,7 @@ flowchart TB
     subgraph Desktop[Single Tauri desktop process]
         subgraph Frontend[React 19 + TypeScript]
             AppShell[App shell and view navigation]
-            Screens[Dashboard, Networks, Assets, Topology, Timeline, IOCs, Notes, Expert Merge]
+            Screens[Dashboard, Networks, Assets, Topology, Investigation Graph, Timeline, IOCs, Notes, Expert Merge]
             Graphs[Cytoscape topology and Vis timeline]
         end
 
@@ -118,7 +118,7 @@ PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 ```
 
-The current schema version is `PRAGMA user_version = 6`.
+The current schema version is `PRAGMA user_version = 7`.
 
 Topology presentation is stored in `topology_views`, independently for each layout mode. A saved view contains device and layout-anchor positions plus the Cytoscape pan/zoom camera. This state belongs to the physical case database but is intentionally excluded from evidence history and expert export/merge bundles.
 
@@ -152,6 +152,11 @@ erDiagram
     FIREWALL_INTERFACES o|--o{ FIREWALL_NAT_RULES : ingress_egress
     NETWORKS ||--o{ NETWORK_CONNECTIONS : source
     NETWORKS ||--o{ NETWORK_CONNECTIONS : target
+    IOCS ||--o{ IOC_SIGHTINGS : observed_as
+    ASSETS o|--o{ IOC_SIGHTINGS : sighted_on
+    NETWORKS o|--o{ IOC_SIGHTINGS : sighted_on
+    FIREWALLS o|--o{ IOC_SIGHTINGS : sighted_on
+    TIMELINE_EVENTS o|--o{ ATTACK_EDGES : anchors
     HISTORY_COMMITS ||--o{ HISTORY_CHANGES : contains
     HISTORY_COMMITS }o--o{ HISTORY_COMMITS : parent
 ```
@@ -171,8 +176,11 @@ erDiagram
 | `clock_profiles` | Reusable server clock correlations | raw server/reference values, independent timezones, normalized UTC values, millisecond offset |
 | `timeline_events` | Evidence chronology | optional asset, preserved raw time/zone, clock profile and copied offset, corrected UTC timestamp, precision, type, description, severity, source, MITRE |
 | `iocs` | Indicators of compromise | type, value, description, threat level, first/last seen |
+| `ioc_sightings` | IOC observed on a concrete entity | IOC reference plus exactly one of asset/network/firewall (CHECK-enforced), optional sighting time, location (path/registry/log source), note |
+| `attack_edges` | Analyst-drawn attacker movement | polymorphic source (asset/network/firewall or free-label external origin) and target, title, edge type, confidence, MITRE tactic/technique, optional occurrence time, optional timeline-event anchor (SET NULL on event delete), analyst sequence, linked IOC id list (JSON) |
 | `notes` | Versioned investigator notes | title, Markdown text, created/updated timestamps |
 | `topology_views` | Case-local topology presentation | layout mode, node positions, pan/zoom camera, updated timestamp |
+| `investigation_views` | Named saved Investigation Graph views | unique name, description, validated state JSON (hidden entities, filters, display toggles, layout, positions, camera); presentation state excluded from history and expert bundles but included in snapshots |
 
 ### 4.2 Primary-interface projection
 
@@ -336,6 +344,9 @@ clock_profiles[]
 timeline_events[]
 notes[]
 iocs[]
+ioc_sightings[]
+attack_edges[]
+investigation_views[]
 firewalls[]
 network_connections[]
 ```
@@ -472,7 +483,7 @@ The current architecture does not include:
 - automated endpoint discovery, evidence collection, log ingestion, or log parsing;
 - YARA execution;
 - STIX/OpenIOC or standardized PDF reporting;
-- attack-path computation;
+- automated attack-path computation (the Investigation Graph records analyst-drawn pathways only);
 - database-password recovery or organizational key escrow; or
 - cryptographic signing of expert identity or bundles.
 
