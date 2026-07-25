@@ -439,6 +439,19 @@ export interface PartialApplySummary {
   commit_id?: string;
 }
 
+export interface LocalCaseFile {
+  file_name: string;
+  size_bytes: number;
+  modified_at?: string;
+}
+
+export interface PlatformInfo {
+  platform: 'android' | 'desktop';
+  cases_dir: string;
+  exports_dir: string;
+  inbox_dir: string;
+}
+
 export interface ApiResponse<T> {
   success: boolean;
   data?: T;

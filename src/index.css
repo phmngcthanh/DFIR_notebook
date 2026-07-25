@@ -73,3 +73,30 @@
     @apply bg-background text-foreground;
   }
 }
+/* Touch-target layer for the Android tablet shell. Applied via the .touch-ui
+   root class in App.tsx (platform-gated, never width-gated), so the desktop
+   layout is unaffected. First pass at the 48dp Material guideline; per-
+   component refinements belong to the P3 adaptation phase. */
+@layer components {
+  .touch-ui button {
+    min-height: 2.75rem;
+  }
+  .touch-ui input:not([type='checkbox']):not([type='radio']),
+  .touch-ui select,
+  .touch-ui [role='combobox'] {
+    min-height: 2.75rem;
+  }
+  .touch-ui input[type='checkbox'],
+  .touch-ui input[type='radio'] {
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+  .touch-ui td,
+  .touch-ui th {
+    padding-top: 0.65rem;
+    padding-bottom: 0.65rem;
+  }
+  .touch-ui summary {
+    min-height: 2.75rem;
+  }
+}

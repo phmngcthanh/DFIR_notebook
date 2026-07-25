@@ -1,0 +1,11 @@
+{
+  "identifier": "mobile",
+  "description": "capabilities for the Android build: core plus file-open dialogs only (Android has no save dialog; exports use app-private storage)",
+  "platforms": ["android"],
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "dialog:allow-open"
+  ]
+}

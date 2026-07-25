@@ -9,6 +9,9 @@ import type { ApiResponse, Case, ExpertIdentity, View } from '@/types';
 import CaseSetup from '@/components/CaseSetup';
 import LocalCaseSetup from '@/components/LocalCaseSetup';
 import ExpertSetup from '@/components/ExpertSetup';
+import CasePicker from '@/components/mobile/CasePicker';
+import MobileShell from '@/components/mobile/MobileShell';
+import { useIsAndroid } from '@/hooks/use-platform';
 import { Toaster } from '@/components/ui/sonner';
 import { branding } from '@/config/branding';
 import {
@@ -47,6 +50,7 @@ const NAV_ITEMS: { view: View; label: string; icon: React.ReactNode }[] = [
 const POLL_INTERVAL_MS = 5000;
 
 function App() {
+  const android = useIsAndroid();
   const [currentCase, setCurrentCase] = useState<Case | null>(null);
   const [currentExpert, setCurrentExpert] = useState<ExpertIdentity | null>(null);
   const [activeExperts, setActiveExperts] = useState<string[]>([]);
@@ -217,6 +221,52 @@ function App() {
 
   const signedIn = Boolean(currentCase && currentExpert);
 
+  // One route table for every shell. The chrome around it differs — a sidebar on
+  // desktop and in the browser, a touch shell on Android — but which screen is
+  // shown, and what it is given, never does.
+  const viewContent = (
+    <Suspense fallback={<WorkspaceLoading />}>
+      {currentView === 'dashboard' && <Dashboard refreshTrigger={refreshTrigger} onCaseUpdated={() => void reloadCase()} />}
+      {currentView === 'networks' && <NetworkManager refreshTrigger={refreshTrigger} />}
+      {currentView === 'assets' && currentExpert && <AssetManager refreshTrigger={refreshTrigger} expert={currentExpert} />}
+      {currentView === 'topology' && <NetworkTopology refreshTrigger={refreshTrigger} />}
+      {currentView === 'investigation' && <InvestigationGraph refreshTrigger={refreshTrigger} />}
+      {currentView === 'timeline' && <TimelineView refreshTrigger={refreshTrigger} />}
+      {currentView === 'iocs' && <IocManager refreshTrigger={refreshTrigger} />}
+      {currentView === 'notes' && <NoteManager refreshTrigger={refreshTrigger} />}
+      {currentView === 'activity' && <ActivityBoard refreshTrigger={refreshTrigger} />}
+      {currentView === 'export' && <ExportImport refreshTrigger={refreshTrigger} onImport={() => setRefreshTrigger((value) => value + 1)} />}
+    </Suspense>
+  );
+
+  // Android keeps its own chrome: app-private case storage instead of a file
+  // dialog, and a touch shell instead of the sidebar.
+  if (android) {
+    return (
+      <div className="touch-ui h-screen bg-gray-50">
+        <Toaster position="top-right" />
+        {!currentCase && <CasePicker onComplete={() => void handleLocalCaseComplete()} />}
+        {currentCase && showExpertSetup && (
+          <ExpertSetup onComplete={handleExpertComplete} onCancel={currentExpert ? () => setShowExpertSetup(false) : undefined} />
+        )}
+        {currentCase && currentExpert && !showExpertSetup && (
+          <MobileShell
+            navItems={NAV_ITEMS}
+            currentView={currentView}
+            onNavigate={setCurrentView}
+            caseName={currentCase.name}
+            expertName={currentExpert.name}
+            scopeLabel={currentExpert.scope_label || 'All zones'}
+            onExpertClick={() => setShowExpertSetup(true)}
+            onLock={() => void closeLocalCase()}
+          >
+            {currentView === 'about' ? <Suspense fallback={<WorkspaceLoading />}><AboutPage /></Suspense> : viewContent}
+          </MobileShell>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen bg-gray-50">
       <Toaster position="top-right" />
@@ -304,20 +354,7 @@ function App() {
           <ExpertSetup onComplete={handleExpertComplete} onCancel={currentExpert ? () => setShowExpertSetup(false) : undefined} />
         )}
         {signedIn && currentExpert && currentView !== 'about' && !showExpertSetup && !showCaseSetup && (
-          <div className="h-full overflow-auto">
-            <Suspense fallback={<WorkspaceLoading />}>
-              {currentView === 'dashboard' && <Dashboard refreshTrigger={refreshTrigger} onCaseUpdated={() => void reloadCase()} />}
-              {currentView === 'networks' && <NetworkManager refreshTrigger={refreshTrigger} />}
-              {currentView === 'assets' && <AssetManager refreshTrigger={refreshTrigger} expert={currentExpert} />}
-              {currentView === 'topology' && <NetworkTopology refreshTrigger={refreshTrigger} />}
-              {currentView === 'investigation' && <InvestigationGraph refreshTrigger={refreshTrigger} />}
-              {currentView === 'timeline' && <TimelineView refreshTrigger={refreshTrigger} />}
-              {currentView === 'iocs' && <IocManager refreshTrigger={refreshTrigger} />}
-              {currentView === 'notes' && <NoteManager refreshTrigger={refreshTrigger} />}
-              {currentView === 'activity' && <ActivityBoard refreshTrigger={refreshTrigger} />}
-              {currentView === 'export' && <ExportImport refreshTrigger={refreshTrigger} onImport={() => setRefreshTrigger((value) => value + 1)} />}
-            </Suspense>
-          </div>
+          <div className="h-full overflow-auto">{viewContent}</div>
         )}
       </main>
     </div>
