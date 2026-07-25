@@ -32,11 +32,15 @@ mod portable_export;
 #[allow(dead_code)]
 #[path = "../../src-tauri/src/secure_db.rs"]
 mod secure_db;
+// IOC export is pure formatting over `db::Ioc`, so it lives with the core and
+// both shells expose the same two commands over it.
+#[allow(dead_code)]
+#[path = "../../src-tauri/src/ioc_export.rs"]
+mod ioc_export;
 
 mod auth;
 mod cases;
 mod dispatch;
-mod ioc_export;
 mod state;
 #[cfg(test)]
 mod tests;

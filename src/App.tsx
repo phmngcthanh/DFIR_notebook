@@ -1,18 +1,19 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
-  Clock, Download, FileText, GitGraph, LayoutDashboard,
-  Info, LockKeyhole, Network, Route, Server, ShieldAlert, SquareKanban, UserRound, Users,
+  Clock, Download, FileText, FolderOpen, GitGraph, LayoutDashboard,
+  Info, LockKeyhole, Network, Plus, Route, Server, ShieldAlert, SquareKanban, UserRound, Users,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import type { ApiResponse, Case, ExpertIdentity, View } from '@/types';
 import CaseSetup from '@/components/CaseSetup';
+import LocalCaseSetup from '@/components/LocalCaseSetup';
 import ExpertSetup from '@/components/ExpertSetup';
 import { Toaster } from '@/components/ui/sonner';
 import { branding } from '@/config/branding';
 import {
-  getObservedRevision, getServerState, getToken, invoke, logout, noteRevision,
-  resetRevision, SESSION_EXPIRED_EVENT, setToken, type SessionPayload,
+  getObservedRevision, getServerState, getToken, invoke, isDesktop, logout, noteRevision,
+  resetRevision, session, SESSION_EXPIRED_EVENT, setToken, type SessionPayload,
 } from '@/lib/api';
 import './App.css';
 
@@ -51,7 +52,9 @@ function App() {
   const [activeExperts, setActiveExperts] = useState<string[]>([]);
   const [currentView, setCurrentView] = useState<View>('dashboard');
   const [showExpertSetup, setShowExpertSetup] = useState(false);
-  const [restoring, setRestoring] = useState(() => Boolean(getToken()));
+  const [showCaseSetup, setShowCaseSetup] = useState(false);
+  const [caseSetupMode, setCaseSetupMode] = useState<'new' | 'open'>('new');
+  const [restoring, setRestoring] = useState(() => session.hasSessions && Boolean(getToken()));
   const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   const endSession = useCallback(() => {
@@ -62,12 +65,14 @@ function App() {
     setActiveExperts([]);
     setCurrentView('dashboard');
     setShowExpertSetup(false);
+    setShowCaseSetup(false);
   }, []);
 
-  // A token survives a page reload, so pick the session back up from the server
-  // instead of asking for the case password again.
+  // Desktop and mobile hold one case in process state: ask the backend what is
+  // open. The server shell instead restores a session from its bearer token, so
+  // a page reload does not re-prompt for the case password.
   useEffect(() => {
-    if (!getToken()) return;
+    if (session.hasSessions && !getToken()) return;
     let cancelled = false;
     void (async () => {
       try {
@@ -76,10 +81,14 @@ function App() {
           invoke<ApiResponse<ExpertIdentity | null>>('get_current_expert'),
         ]);
         if (cancelled) return;
-        setCurrentCase(caseResponse.success ? caseResponse.data ?? null : null);
-        setCurrentExpert(expertResponse.success ? expertResponse.data ?? null : null);
+        const loadedCase = caseResponse.success ? caseResponse.data ?? null : null;
+        const expert = expertResponse.success ? expertResponse.data ?? null : null;
+        setCurrentCase(loadedCase);
+        setCurrentExpert(expert);
+        // Offline shells collect the expert name after the case file unlocks.
+        if (isDesktop) setShowExpertSetup(Boolean(loadedCase && !expert));
       } catch {
-        if (!cancelled) endSession();
+        if (!cancelled && session.hasSessions) endSession();
       } finally {
         if (!cancelled) setRestoring(false);
       }
@@ -90,6 +99,7 @@ function App() {
   }, [endSession]);
 
   useEffect(() => {
+    if (!session.hasSessions) return;
     const handler = () => {
       endSession();
       toast.error('This session has expired. Unlock the case again');
@@ -102,7 +112,7 @@ function App() {
   // current is notice that the server's revision moved and re-fetch.
   // `refreshTrigger` is the signal every feature component already listens to.
   useEffect(() => {
-    if (!currentCase) return;
+    if (!session.hasLiveCollaboration || !currentCase) return;
     let cancelled = false;
     const poll = async () => {
       try {
@@ -131,12 +141,52 @@ function App() {
     };
   }, [currentCase]);
 
-  const handleSession = (session: SessionPayload) => {
-    // unlock/create already seeded the observed revision in the api layer.
-    setCurrentCase(session.case ?? null);
-    setCurrentExpert(session.expert);
+  // Server shell: unlock/create already seeded the observed revision in the api layer.
+  const handleSession = (payload: SessionPayload) => {
+    setCurrentCase(payload.case ?? null);
+    setCurrentExpert(payload.expert);
     setCurrentView('dashboard');
     setRefreshTrigger((value) => value + 1);
+  };
+
+  // Offline shells: the native case dialog finished, so re-read what is open.
+  const handleLocalCaseComplete = async () => {
+    setShowCaseSetup(false);
+    try {
+      const [caseResponse, expertResponse] = await Promise.all([
+        invoke<ApiResponse<Case | null>>('get_current_case_info'),
+        invoke<ApiResponse<ExpertIdentity | null>>('get_current_expert'),
+      ]);
+      const loadedCase = caseResponse.success ? caseResponse.data ?? null : null;
+      const expert = expertResponse.success ? expertResponse.data ?? null : null;
+      setCurrentCase(loadedCase);
+      setCurrentExpert(expert);
+      setShowExpertSetup(Boolean(loadedCase && !expert));
+    } catch (reason) {
+      toast.error(String(reason));
+    }
+    setRefreshTrigger((value) => value + 1);
+  };
+
+  const openLocalCaseSetup = (mode: 'new' | 'open') => {
+    setCaseSetupMode(mode);
+    setShowCaseSetup(true);
+    setShowExpertSetup(false);
+  };
+
+  const closeLocalCase = async () => {
+    try {
+      const response = await invoke<ApiResponse<boolean>>('close_current_case');
+      if (!response.success) throw new Error(response.error || 'Could not lock case');
+      setCurrentCase(null);
+      setCurrentExpert(null);
+      setCurrentView('dashboard');
+      setShowCaseSetup(false);
+      setShowExpertSetup(false);
+      toast.success('Case locked and closed');
+    } catch (reason) {
+      toast.error(String(reason));
+    }
   };
 
   const reloadCase = useCallback(async () => {
@@ -196,7 +246,7 @@ function App() {
                 </p>
               )}
             </div>
-          ) : <p className="text-xs text-slate-500">No case unlocked</p>}
+          ) : <p className="text-xs text-slate-500">{session.hasSessions ? 'No case unlocked' : 'No case loaded'}</p>}
         </div>
         <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-2">
           {NAV_ITEMS.map((item) => (
@@ -206,10 +256,26 @@ function App() {
             </button>
           ))}
         </nav>
-        {signedIn && (
-          <div className="border-t border-slate-700 p-3">
-            <Button size="sm" variant="outline" className="w-full border-amber-700 text-xs text-amber-300 hover:bg-amber-950/40" onClick={() => void closeSession()}>
-              <LockKeyhole size={14} className="mr-1" />End Session
+        {session.hasSessions ? (
+          signedIn && (
+            <div className="border-t border-slate-700 p-3">
+              <Button size="sm" variant="outline" className="w-full border-amber-700 text-xs text-amber-300 hover:bg-amber-950/40" onClick={() => void closeSession()}>
+                <LockKeyhole size={14} className="mr-1" />End Session
+              </Button>
+            </div>
+          )
+        ) : (
+          <div className="space-y-2 border-t border-slate-700 p-3">
+            {currentCase && (
+              <Button size="sm" variant="outline" className="w-full border-amber-700 text-xs text-amber-300 hover:bg-amber-950/40" onClick={() => void closeLocalCase()}>
+                <LockKeyhole size={14} className="mr-1" />Lock / Close Case
+              </Button>
+            )}
+            <Button size="sm" variant="outline" className="w-full border-cyan-600 text-xs text-cyan-400 hover:bg-cyan-900/30" onClick={() => openLocalCaseSetup('new')}>
+              <Plus size={14} className="mr-1" />New Case
+            </Button>
+            <Button size="sm" variant="outline" className="w-full border-slate-600 text-xs text-slate-300 hover:bg-slate-800" onClick={() => openLocalCaseSetup('open')}>
+              <FolderOpen size={14} className="mr-1" />Open Case
             </Button>
           </div>
         )}
@@ -217,10 +283,27 @@ function App() {
 
       <main className="flex-1 overflow-hidden">
         {restoring && <WorkspaceLoading />}
-        {!restoring && !signedIn && currentView !== 'about' && <CaseSetup onSession={handleSession} />}
-        {currentView === 'about' && <div className="h-full overflow-auto"><Suspense fallback={<WorkspaceLoading />}><AboutPage /></Suspense></div>}
-        {signedIn && showExpertSetup && currentView !== 'about' && <ExpertSetup onComplete={handleExpertComplete} onCancel={() => setShowExpertSetup(false)} />}
-        {signedIn && currentExpert && currentView !== 'about' && !showExpertSetup && (
+        {/* Server shell: the unlock screen IS the login. Offline shells show a
+            welcome until the investigator picks a case file through a dialog. */}
+        {session.hasSessions
+          ? !restoring && !signedIn && currentView !== 'about' && <CaseSetup onSession={handleSession} />
+          : !currentCase && !showCaseSetup && currentView !== 'about' && (
+              <div className="flex h-full items-center justify-center"><div className="text-center">
+                <GitGraph size={64} className="mx-auto mb-4 text-slate-300" />
+                <h2 className="mb-2 text-2xl font-bold text-slate-700">Welcome to {branding.productName}</h2>
+                <p className="mb-6 text-slate-500">Create a local encrypted case or open an existing one.</p>
+                <div className="flex justify-center gap-3">
+                  <Button onClick={() => openLocalCaseSetup('new')} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />New Case</Button>
+                  <Button onClick={() => openLocalCaseSetup('open')} variant="outline"><FolderOpen size={16} className="mr-2" />Open Case</Button>
+                </div>
+              </div></div>
+            )}
+        {!session.hasSessions && showCaseSetup && <LocalCaseSetup mode={caseSetupMode} onComplete={() => void handleLocalCaseComplete()} onCancel={() => setShowCaseSetup(false)} />}
+        {currentView === 'about' && !showCaseSetup && <div className="h-full overflow-auto"><Suspense fallback={<WorkspaceLoading />}><AboutPage /></Suspense></div>}
+        {currentCase && showExpertSetup && !showCaseSetup && currentView !== 'about' && (
+          <ExpertSetup onComplete={handleExpertComplete} onCancel={currentExpert ? () => setShowExpertSetup(false) : undefined} />
+        )}
+        {signedIn && currentExpert && currentView !== 'about' && !showExpertSetup && !showCaseSetup && (
           <div className="h-full overflow-auto">
             <Suspense fallback={<WorkspaceLoading />}>
               {currentView === 'dashboard' && <Dashboard refreshTrigger={refreshTrigger} onCaseUpdated={() => void reloadCase()} />}

@@ -9,10 +9,13 @@ const { invokeMock, pickTextFileMock, downloadTextMock } = vi.hoisted(() => ({
   pickTextFileMock: vi.fn(),
   downloadTextMock: vi.fn(),
 }));
+// These cases cover the server shell, where the case is shared and the
+// offline-only bundle-export and baseline actions are not offered.
 vi.mock('@/lib/api', () => ({
   invoke: invokeMock,
   pickTextFile: pickTextFileMock,
   downloadText: downloadTextMock,
+  session: { hasSessions: true, hasLiveCollaboration: true, hasLocalCaseFiles: false },
 }));
 
 const preview: MergePreview = {

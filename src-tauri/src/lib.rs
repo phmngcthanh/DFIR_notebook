@@ -1,5 +1,6 @@
 mod db;
 mod history;
+mod ioc_export;
 mod partial_import;
 mod portable_export;
 mod secure_db;
@@ -1638,6 +1639,62 @@ fn save_export_as_text(app_handle: tauri::AppHandle, password: Option<String>) -
     )
 }
 
+// The four commands below take text rather than opening a dialog, so the same
+// React code path serves both shells: the seam in `src/lib/api.ts` supplies the
+// file (native dialog here, file input in the browser) and these do the work.
+#[tauri::command]
+fn render_export_report(contents: String, password: Option<String>) -> Response<String> {
+    let password = protected_password(password);
+    let decoded = match decode_portable_text(&contents, password_ref(&password)) {
+        Ok(decoded) => decoded,
+        Err(error) => return Response::err(error),
+    };
+    match render_export_text(&decoded.plaintext) {
+        Ok(report) => Response::ok(report),
+        Err(error) => Response::err(error),
+    }
+}
+
+#[tauri::command]
+fn load_change_bundle_text(
+    state: State<DbState>,
+    contents: String,
+    password: Option<String>,
+) -> Response<MergePreview> {
+    let password = protected_password(password);
+    let decoded = match decode_portable_text(&contents, password_ref(&password)) {
+        Ok(decoded) => decoded,
+        Err(error) => return Response::err(error),
+    };
+    stage_change_bundle(&state, &decoded.plaintext)
+}
+
+#[tauri::command]
+fn export_iocs_csv(state: State<DbState>, ids: Option<Vec<String>>) -> Response<String> {
+    with_conn(&state, |conn| {
+        Ok(ioc_export::iocs_to_csv(&filter_iocs(get_iocs(conn)?, &ids)))
+    })
+}
+
+#[tauri::command]
+fn export_iocs_stix(state: State<DbState>, ids: Option<Vec<String>>) -> Response<String> {
+    with_conn(&state, |conn| {
+        ioc_export::iocs_to_stix(&filter_iocs(get_iocs(conn)?, &ids))
+    })
+}
+
+/// Narrow the IOC list to the analyst's currently filtered view; `None` exports
+/// the whole case.
+fn filter_iocs(iocs: Vec<Ioc>, ids: &Option<Vec<String>>) -> Vec<Ioc> {
+    match ids {
+        Some(ids) => iocs
+            .into_iter()
+            .filter(|ioc| ids.iter().any(|id| id == &ioc.id))
+            .collect(),
+        None => iocs,
+    }
+}
+
 #[tauri::command]
 fn mark_current_shared_baseline(state: State<DbState>) -> Response<String> {
     with_conn(&state, |conn| mark_shared_baseline(conn))
@@ -1714,11 +1771,17 @@ fn load_change_bundle_from_file(
         Ok(decoded) => decoded,
         Err(error) => return Response::err(error),
     };
-    let bundle = match parse_change_bundle(&decoded.plaintext) {
+    stage_change_bundle(&state, &decoded.plaintext)
+}
+
+/// Parse an already-decrypted bundle, preview it against the open case, and
+/// hold it in memory. Shared by the native-dialog and text-input entry points.
+fn stage_change_bundle(state: &State<DbState>, plaintext: &str) -> Response<MergePreview> {
+    let bundle = match parse_change_bundle(plaintext) {
         Ok(bundle) => bundle,
         Err(error) => return Response::err(error),
     };
-    let preview = match with_conn(&state, |conn| preview_bundle(conn, &bundle)) {
+    let preview = match with_conn(state, |conn| preview_bundle(conn, &bundle)) {
         Response {
             success: true,
             data: Some(preview),
@@ -1869,6 +1932,62 @@ fn pick_text_file(
     fs::read_to_string(path).map_err(|error| format!("Failed to read file: {error}"))
 }
 
+/// Platform seam for `downloadText()` in `src/lib/api.ts`. The browser writes a
+/// download; this opens the native save dialog with the same suggested name, so
+/// feature components never branch on which shell they are running in.
+#[tauri::command]
+fn save_text_download(
+    app_handle: tauri::AppHandle,
+    filename: String,
+    contents: String,
+) -> Response<String> {
+    let extension = filename.rsplit('.').next().unwrap_or("txt").to_string();
+    save_text_file(&app_handle, &filename, "DFIR file", &extension, &contents)
+}
+
+/// Platform seam for `pickTextFile()`. Returns `None` when the investigator
+/// cancels the dialog, matching the browser file input resolving to null.
+#[tauri::command]
+fn open_text_upload(app_handle: tauri::AppHandle) -> Response<Option<PickedTextFile>> {
+    match pick_named_text_file(&app_handle) {
+        Ok(value) => Response::ok(value),
+        Err(error) => Response::err(error),
+    }
+}
+
+#[derive(Serialize)]
+struct PickedTextFile {
+    name: String,
+    text: String,
+}
+
+fn pick_named_text_file(app_handle: &tauri::AppHandle) -> AppResult<Option<PickedTextFile>> {
+    let Some(selection) = app_handle
+        .dialog()
+        .file()
+        .add_filter("DFIR file", &["json", "dfirx", "txt"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = selected_path(selection)?;
+    let length = fs::metadata(&path)
+        .map_err(|error| format!("Failed to inspect file: {error}"))?
+        .len();
+    if length > MAX_PORTABLE_FILE_BYTES {
+        return Err(format!(
+            "Refusing to open a portable file larger than {} MiB",
+            MAX_PORTABLE_FILE_BYTES / 1024 / 1024
+        ));
+    }
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let text = fs::read_to_string(&path).map_err(|error| format!("Failed to read file: {error}"))?;
+    Ok(Some(PickedTextFile { name, text }))
+}
+
 fn sanitize_filename(name: &str) -> String {
     let value: String = name
         .chars()
@@ -1984,6 +2103,12 @@ pub fn run() {
             refresh_pending_change_bundle,
             apply_pending_change_bundle,
             discard_pending_change_bundle,
+            render_export_report,
+            load_change_bundle_text,
+            export_iocs_csv,
+            export_iocs_stix,
+            save_text_download,
+            open_text_upload,
             get_db_path,
         ])
         .run(tauri::generate_context!())

@@ -1,17 +1,40 @@
 /**
- * HTTP transport for the centralized case server.
+ * The one module in `src/` that knows which shell it is running in.
  *
- * `invoke` is a drop-in replacement for the Tauri `invoke` this project used as
- * a desktop app: same command names, same camelCase argument objects, same
- * `{ success, data, error }` envelope. Every feature component keeps its call
- * sites unchanged and only swaps the import.
+ * Every feature component imports `invoke` from here and never branches on
+ * platform itself. Two transports sit behind the same signature — Tauri IPC for
+ * the desktop and mobile builds, `POST /api/cmd/{name}` for the browser talking
+ * to the case server — with identical command names, camelCase argument
+ * objects, and `{ success, data, error }` envelopes.
+ *
+ * `downloadText` and `pickTextFile` are the file-capability half of the seam:
+ * a native dialog on Tauri, a blob download / file input in the browser.
  *
  * The session token lives in `sessionStorage`, so closing the tab ends the
  * session on that machine even if the server-side idle timeout has not elapsed.
  */
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import type { ApiResponse, Case, ExpertIdentity } from '@/types';
 
 const TOKEN_KEY = 'dfir-session-token';
+
+export type PlatformKind = 'desktop' | 'server';
+
+/**
+ * Tauri injects `__TAURI_INTERNALS__` into the webview before any app code
+ * runs, so this is settled at module load and never changes for the lifetime of
+ * the page. A plain browser — including `npm run dev` against the case server —
+ * falls through to the HTTP transport.
+ */
+function detectPlatform(): PlatformKind {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window ? 'desktop' : 'server';
+}
+
+export const platform: PlatformKind = detectPlatform();
+/** True in the Tauri desktop and Android shells: one local case, native dialogs. */
+export const isDesktop = platform === 'desktop';
+/** True in the browser shell: many cases, bearer tokens, revision polling. */
+export const isServer = platform === 'server';
 
 /** Fired when the server rejects our token so `App` can return to the login screen. */
 export const SESSION_EXPIRED_EVENT = 'dfir-session-expired';
@@ -115,10 +138,12 @@ async function request<T>(path: string, body: unknown, authenticated: boolean): 
 }
 
 /**
- * Call a case command. Returns the full `ApiResponse` envelope, exactly as the
- * desktop `invoke` did, so callers keep checking `response.success` themselves.
+ * Call a case command. Returns the full `ApiResponse` envelope on both shells,
+ * so callers keep checking `response.success` themselves and never learn which
+ * transport carried it.
  */
 export function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (isDesktop) return tauriInvoke<T>(command, args ?? {});
   return request<T>(`/api/cmd/${command}`, args ?? {}, true);
 }
 
@@ -129,6 +154,22 @@ export async function listCases(): Promise<CaseListing> {
   if (!payload.success || !payload.data) throw new Error(payload.error || 'Could not list cases');
   return payload.data;
 }
+
+/**
+ * Session capability, modelled explicitly rather than hidden behind a flag.
+ *
+ * The server shell holds many cases behind bearer tokens and a polled revision
+ * counter. The desktop and mobile shells hold exactly one case in process state
+ * and have no notion of a session at all — `hasSessions` is what `App.tsx`
+ * branches on, so neither shell carries the other's ceremony.
+ */
+export const session = {
+  hasSessions: isServer,
+  /** Only the server shell can show other experts working in the same case. */
+  hasLiveCollaboration: isServer,
+  /** Only Tauri shells can open a case file through a native dialog. */
+  hasLocalCaseFiles: isDesktop,
+} as const;
 
 export async function unlockCase(input: UnlockRequest): Promise<SessionPayload> {
   const payload = await request<ApiResponse<SessionPayload>>('/api/auth/unlock', input, false);
@@ -171,10 +212,23 @@ export async function getServerState(): Promise<ServerState> {
 }
 
 /**
- * Browser stand-in for the desktop save dialog: the server hands back the text
- * and the browser writes the file wherever it saves downloads.
+ * Write text out under a name the investigator chooses. On Tauri this opens the
+ * native save dialog; in the browser the server has already handed back the
+ * text and this writes it wherever downloads go.
  */
-export function downloadText(filename: string, contents: string): void {
+export async function downloadText(filename: string, contents: string): Promise<void> {
+  if (isDesktop) {
+    const response = await tauriInvoke<ApiResponse<string>>('save_text_download', { filename, contents });
+    // A cancelled dialog is a normal outcome, not an error worth surfacing.
+    if (!response.success && !String(response.error ?? '').toLowerCase().includes('cancel')) {
+      throw new Error(response.error || 'Could not save the file');
+    }
+    return;
+  }
+  browserDownload(filename, contents);
+}
+
+function browserDownload(filename: string, contents: string): void {
   const url = URL.createObjectURL(new Blob([contents], { type: 'application/octet-stream' }));
   const link = document.createElement('a');
   link.href = url;
@@ -185,8 +239,20 @@ export function downloadText(filename: string, contents: string): void {
   URL.revokeObjectURL(url);
 }
 
-/** Browser stand-in for the desktop open dialog. Resolves to null when cancelled. */
-export function pickTextFile(accept: string): Promise<{ name: string; text: string } | null> {
+/**
+ * Read a file the investigator picks. Native dialog on Tauri, file input in the
+ * browser. Resolves to null when the dialog is cancelled on either shell.
+ */
+export async function pickTextFile(accept: string): Promise<{ name: string; text: string } | null> {
+  if (isDesktop) {
+    const response = await tauriInvoke<ApiResponse<{ name: string; text: string } | null>>('open_text_upload');
+    if (!response.success) throw new Error(response.error || 'Could not read the selected file');
+    return response.data ?? null;
+  }
+  return browserPickFile(accept);
+}
+
+function browserPickFile(accept: string): Promise<{ name: string; text: string } | null> {
   return new Promise((resolve, reject) => {
     const input = document.createElement('input');
     input.type = 'file';
