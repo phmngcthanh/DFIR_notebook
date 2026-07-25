@@ -71,7 +71,11 @@ fn indicator(ioc: &Ioc) -> Value {
     // defensive fallback so a corrupt value can never panic the export.
     let created = parse_ts(&ioc.created_at)
         .unwrap_or_else(|| DateTime::from_timestamp(0, 0).expect("epoch is valid"));
-    let valid_from = ioc.first_seen.as_deref().and_then(parse_ts).unwrap_or(created);
+    let valid_from = ioc
+        .first_seen
+        .as_deref()
+        .and_then(parse_ts)
+        .unwrap_or(created);
     // STIX requires valid_until strictly after valid_from when present.
     let valid_until = ioc
         .last_seen
@@ -256,14 +260,17 @@ mod tests {
                 .to_string()
         };
         assert_eq!(pattern("IP: 10.0.0.9"), "[ipv4-addr:value = '10.0.0.9']");
-        assert_eq!(pattern("IP: 2001:db8::1"), "[ipv6-addr:value = '2001:db8::1']");
+        assert_eq!(
+            pattern("IP: 2001:db8::1"),
+            "[ipv6-addr:value = '2001:db8::1']"
+        );
         assert!(pattern("Hash: d41d8cd9").contains("file:hashes.'MD5'"));
         assert!(pattern("Hash: e3b0c442").contains("file:hashes.'SHA-256'"));
+        assert_eq!(pattern("Domain"), "[domain-name:value = 'evil.example']");
         assert_eq!(
-            pattern("Domain"),
-            "[domain-name:value = 'evil.example']"
+            pattern("Registry"),
+            "[windows-registry-key:key = 'HKLM\\\\Software\\\\Evil']"
         );
-        assert_eq!(pattern("Registry"), "[windows-registry-key:key = 'HKLM\\\\Software\\\\Evil']");
 
         // every indicator carries a Z-terminated STIX timestamp and stix pattern_type
         for object in objects {
@@ -277,9 +284,10 @@ mod tests {
 
     #[test]
     fn confidence_reflects_threat_level() {
-        let bundle: Value =
-            serde_json::from_str(&iocs_to_stix(&[ioc("i", "Domain", "e.example", "critical")]).unwrap())
-                .unwrap();
+        let bundle: Value = serde_json::from_str(
+            &iocs_to_stix(&[ioc("i", "Domain", "e.example", "critical")]).unwrap(),
+        )
+        .unwrap();
         assert_eq!(bundle["objects"][0]["confidence"], 95);
         assert_eq!(bundle["objects"][0]["x_dfir_threat_level"], "critical");
     }

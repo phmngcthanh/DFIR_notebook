@@ -58,7 +58,12 @@ fn create(state: &Arc<AppState>, password: &str) -> Result<SessionPayload, Strin
     )
 }
 
-fn unlock(state: &Arc<AppState>, case_id: &str, password: &str, expert: &str) -> Result<SessionPayload, String> {
+fn unlock(
+    state: &Arc<AppState>,
+    case_id: &str,
+    password: &str,
+    expert: &str,
+) -> Result<SessionPayload, String> {
     unlock_inner(
         state,
         peer(),
@@ -86,10 +91,25 @@ fn the_case_password_is_the_only_credential() {
     let created = create(&server.state, "correct-horse-battery").unwrap();
 
     // Any expert name is accepted — it is attribution, not identity.
-    assert!(unlock(&server.state, &created.case_id, "correct-horse-battery", "Someone Else").is_ok());
+    assert!(unlock(
+        &server.state,
+        &created.case_id,
+        "correct-horse-battery",
+        "Someone Else"
+    )
+    .is_ok());
     // The password alone decides.
-    let refused = unlock(&server.state, &created.case_id, "wrong-password", "Expert A").unwrap_err();
-    assert!(refused.contains("password is wrong") || refused.contains("unlock"), "{refused}");
+    let refused = unlock(
+        &server.state,
+        &created.case_id,
+        "wrong-password",
+        "Expert A",
+    )
+    .unwrap_err();
+    assert!(
+        refused.contains("password is wrong") || refused.contains("unlock"),
+        "{refused}"
+    );
 }
 
 #[test]
@@ -109,8 +129,17 @@ fn repeated_wrong_passwords_lock_the_address_out() {
     }
     // The sixth attempt never reaches SQLCipher, and even the right password is
     // refused while the lockout stands.
-    let blocked = unlock(&server.state, &created.case_id, "correct-horse-battery", "Expert A").unwrap_err();
-    assert!(blocked.contains("Too many failed unlock attempts"), "{blocked}");
+    let blocked = unlock(
+        &server.state,
+        &created.case_id,
+        "correct-horse-battery",
+        "Expert A",
+    )
+    .unwrap_err();
+    assert!(
+        blocked.contains("Too many failed unlock attempts"),
+        "{blocked}"
+    );
 }
 
 #[test]
@@ -129,7 +158,13 @@ fn case_identifiers_cannot_escape_the_case_directory() {
 fn the_case_closes_when_the_last_expert_leaves() {
     let server = TempServer::new(true);
     let alice = create(&server.state, "correct-horse-battery").unwrap();
-    let bob = unlock(&server.state, &alice.case_id, "correct-horse-battery", "Expert B").unwrap();
+    let bob = unlock(
+        &server.state,
+        &alice.case_id,
+        "correct-horse-battery",
+        "Expert B",
+    )
+    .unwrap();
 
     assert_eq!(
         server.state.active_experts(&alice.case_id),
@@ -137,10 +172,16 @@ fn the_case_closes_when_the_last_expert_leaves() {
     );
 
     server.state.end_session(&alice.token);
-    assert!(server.state.case(&alice.case_id).is_some(), "Bob is still working");
+    assert!(
+        server.state.case(&alice.case_id).is_some(),
+        "Bob is still working"
+    );
 
     server.state.end_session(&bob.token);
-    assert!(server.state.case(&alice.case_id).is_none(), "no sessions left");
+    assert!(
+        server.state.case(&alice.case_id).is_none(),
+        "no sessions left"
+    );
 }
 
 #[test]
@@ -164,7 +205,11 @@ fn a_write_through_the_dispatcher_bumps_the_revision_every_browser_polls() {
     )
     .unwrap();
     assert_eq!(created["name"], "Office LAN");
-    assert_eq!(context.case.revision(), 1, "writes must be visible to pollers");
+    assert_eq!(
+        context.case.revision(),
+        1,
+        "writes must be visible to pollers"
+    );
 
     let listed = run(&server.state, &context, "list_networks", json!({})).unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 1);
@@ -245,7 +290,13 @@ fn unknown_commands_are_reported_rather_than_ignored() {
 fn changing_the_password_signs_every_other_expert_out() {
     let server = TempServer::new(true);
     let alice = create(&server.state, "correct-horse-battery").unwrap();
-    let bob = unlock(&server.state, &alice.case_id, "correct-horse-battery", "Expert B").unwrap();
+    let bob = unlock(
+        &server.state,
+        &alice.case_id,
+        "correct-horse-battery",
+        "Expert B",
+    )
+    .unwrap();
     let context = session(&server.state, &alice);
 
     run(
@@ -261,7 +312,13 @@ fn changing_the_password_signs_every_other_expert_out() {
     assert!(server.state.touch_session(&alice.token).is_some());
 
     // And the file really is rekeyed.
-    assert!(unlock(&server.state, &alice.case_id, "correct-horse-battery", "Expert B").is_err());
+    assert!(unlock(
+        &server.state,
+        &alice.case_id,
+        "correct-horse-battery",
+        "Expert B"
+    )
+    .is_err());
 }
 
 #[test]
@@ -280,5 +337,11 @@ fn a_wrong_current_password_cannot_rekey_the_case() {
     assert!(!error.is_empty());
 
     // The original password still opens the case.
-    assert!(unlock(&server.state, &alice.case_id, "correct-horse-battery", "Expert B").is_ok());
+    assert!(unlock(
+        &server.state,
+        &alice.case_id,
+        "correct-horse-battery",
+        "Expert B"
+    )
+    .is_ok());
 }

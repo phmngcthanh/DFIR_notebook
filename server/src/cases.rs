@@ -11,7 +11,9 @@ use zeroize::Zeroizing;
 use crate::auth::SessionPayload;
 use crate::db::{create_case_record, get_case, init_database, validate_and_migrate_case};
 use crate::history::ActorIdentity;
-use crate::secure_db::{create_encrypted_connection, validate_database_password, verify_cipher_integrity};
+use crate::secure_db::{
+    create_encrypted_connection, validate_database_password, verify_cipher_integrity,
+};
 use crate::state::{case_id_from_name, AppState, Response};
 
 #[derive(Serialize)]

@@ -370,18 +370,11 @@ pub(crate) fn run(
 
         // ---- notes ---------------------------------------------------------
         "create_new_note" => write_cmd!(NoteParams, |conn, actor, p| create_note(
-            conn,
-            actor,
-            &p.title,
-            &p.content
+            conn, actor, &p.title, &p.content
         )),
         "list_notes" => read_cmd!(NoParams, |conn, _p| get_notes(conn)),
         "update_existing_note" => write_cmd!(NoteUpdateParams, |conn, actor, p| update_note(
-            conn,
-            actor,
-            &p.id,
-            &p.title,
-            &p.content
+            conn, actor, &p.id, &p.title, &p.content
         )),
         "remove_note" => write_cmd!(IdParams, |conn, actor, p| delete_note(conn, actor, &p.id)
             .map(|_| true)),
@@ -446,7 +439,14 @@ pub(crate) fn run(
             )
         }),
         "update_existing_ioc_sighting" => write_cmd!(SightingUpdateParams, |conn, actor, p| {
-            update_ioc_sighting(conn, actor, &p.id, p.sighted_at.as_deref(), &p.location, &p.note)
+            update_ioc_sighting(
+                conn,
+                actor,
+                &p.id,
+                p.sighted_at.as_deref(),
+                &p.location,
+                &p.note,
+            )
         }),
         "remove_ioc_sighting" => write_cmd!(IdParams, |conn, actor, p| {
             delete_ioc_sighting(conn, actor, &p.id).map(|_| true)
@@ -510,7 +510,13 @@ pub(crate) fn run(
         "save_investigation_view" => {
             let p: ViewSaveParams = from_args(args)?;
             let view = case.with_conn(|conn| {
-                save_investigation_view(conn, p.id.as_deref(), &p.name, &p.description, &p.view_state)
+                save_investigation_view(
+                    conn,
+                    p.id.as_deref(),
+                    &p.name,
+                    &p.description,
+                    &p.view_state,
+                )
             })?;
             case.bump();
             to_json(view)
@@ -807,9 +813,8 @@ pub(crate) fn run(
                 (pending.bundle.clone(), pending.preview.clone())
             };
             let actor = &session.actor;
-            let summary = case.with_conn(|conn| {
-                apply_bundle(conn, actor, &bundle, &preview, &p.decisions)
-            })?;
+            let summary =
+                case.with_conn(|conn| apply_bundle(conn, actor, &bundle, &preview, &p.decisions))?;
             if let Ok(mut guard) = case.pending_bundles.lock() {
                 guard.remove(&p.bundle_id);
             }

@@ -1621,14 +1621,17 @@ pub fn get_ioc_sightings(
     if let Some(kind) = entity_kind {
         validate_enum("entity kind", kind, SIGHTING_ENTITY_KINDS)?;
     }
-    let sql = format!(
-        "{SIGHTING_SELECT} ORDER BY s.sighted_at IS NULL, s.sighted_at, s.created_at"
-    );
+    let sql =
+        format!("{SIGHTING_SELECT} ORDER BY s.sighted_at IS NULL, s.sighted_at, s.created_at");
     let rows = query_vec(conn, &sql, [], map_sighting)?;
     Ok(rows
         .into_iter()
         .filter(|row| ioc_id.map(|id| row.ioc_id == id).unwrap_or(true))
-        .filter(|row| entity_kind.map(|kind| row.entity_kind == kind).unwrap_or(true))
+        .filter(|row| {
+            entity_kind
+                .map(|kind| row.entity_kind == kind)
+                .unwrap_or(true)
+        })
         .filter(|row| entity_id.map(|id| row.entity_id == id).unwrap_or(true))
         .collect())
 }
@@ -1664,11 +1667,9 @@ pub fn get_infection_summary(conn: &Connection) -> AppResult<InfectionSummary> {
         }
         match iocs.iter_mut().find(|i| i.ioc_id == sighting.ioc_id) {
             Some(entry) => {
-                if !entry
-                    .entities
-                    .iter()
-                    .any(|e| e.entity_kind == sighting.entity_kind && e.entity_id == sighting.entity_id)
-                {
+                if !entry.entities.iter().any(|e| {
+                    e.entity_kind == sighting.entity_kind && e.entity_id == sighting.entity_id
+                }) {
                     entry.entity_count += 1;
                     entry.entities.push(InfectionIocEntityRef {
                         entity_kind: sighting.entity_kind.clone(),
@@ -2557,9 +2558,7 @@ fn validate_investigation_view_state(state: &Value) -> AppResult<()> {
                 })
                 .unwrap_or(false);
             if !valid {
-                return Err(
-                    "Invalid view state: each position needs an id and finite x/y".into(),
-                );
+                return Err("Invalid view state: each position needs an id and finite x/y".into());
             }
         }
     }
@@ -4620,7 +4619,8 @@ pub fn update_ioc_sighting(
     location: &str,
     note: &str,
 ) -> AppResult<IocSighting> {
-    let before_value = require_existing(get_entity_json(conn, "ioc_sighting", id)?, "IOC sighting")?;
+    let before_value =
+        require_existing(get_entity_json(conn, "ioc_sighting", id)?, "IOC sighting")?;
     let before: IocSighting = serde_json::from_value(before_value).map_err(|e| e.to_string())?;
     let sighted_at = sighted_at
         .map(|value| normalize_timestamp("Sighted at", value))
@@ -4659,7 +4659,11 @@ pub fn update_ioc_sighting(
     Ok(after)
 }
 
-pub fn delete_ioc_sighting(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> AppResult<()> {
+pub fn delete_ioc_sighting(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    id: &str,
+) -> AppResult<()> {
     let before = require_existing(get_entity_json(conn, "ioc_sighting", id)?, "IOC sighting")?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     if tx
@@ -4942,7 +4946,13 @@ pub fn delete_attack_edge(conn: &mut Connection, actor: &ActorIdentity, id: &str
         &tx,
         actor,
         "Deleted attack edge",
-        vec![single_change("attack_edge", id, "delete", Some(before), None)],
+        vec![single_change(
+            "attack_edge",
+            id,
+            "delete",
+            Some(before),
+            None,
+        )],
         &[],
     )?;
     tx.commit().map_err(|e| e.to_string())
@@ -4957,7 +4967,9 @@ pub fn save_investigation_view(
 ) -> AppResult<InvestigationView> {
     let now = Utc::now().to_rfc3339();
     let item = InvestigationView {
-        id: id.map(String::from).unwrap_or_else(|| Uuid::new_v4().to_string()),
+        id: id
+            .map(String::from)
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         name: name.trim().into(),
         description: description.trim().into(),
         state: state.clone(),
@@ -6893,7 +6905,9 @@ mod tests {
         .unwrap();
 
         delete_ioc(&mut conn, &actor, &ioc.id).unwrap();
-        assert!(get_ioc_sightings(&conn, None, None, None).unwrap().is_empty());
+        assert!(get_ioc_sightings(&conn, None, None, None)
+            .unwrap()
+            .is_empty());
         let history = get_history(&conn, 1).unwrap();
         assert!(history[0]
             .changes
@@ -6909,11 +6923,21 @@ mod tests {
         )
         .unwrap();
         delete_asset(&mut conn, &actor, &asset.id).unwrap();
-        assert!(get_ioc_sightings(&conn, None, None, None).unwrap().is_empty());
+        assert!(get_ioc_sightings(&conn, None, None, None)
+            .unwrap()
+            .is_empty());
 
         // A network with a sighting refuses deletion, listing the dependency.
         create_ioc_sighting(
-            &mut conn, &actor, &second.id, "network", &network.id, None, "", "", None,
+            &mut conn,
+            &actor,
+            &second.id,
+            "network",
+            &network.id,
+            None,
+            "",
+            "",
+            None,
         )
         .unwrap();
         assert!(delete_network(&mut conn, &actor, &network.id)
@@ -6997,20 +7021,62 @@ mod tests {
 
         // Validation failures.
         assert!(create_attack_edge(
-            &mut conn, &actor, "asset", &web.id, "asset", &web.id, "Loop", "", "other",
-            "suspected", None, None, None, None, None, Vec::new(),
+            &mut conn,
+            &actor,
+            "asset",
+            &web.id,
+            "asset",
+            &web.id,
+            "Loop",
+            "",
+            "other",
+            "suspected",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
         )
         .unwrap_err()
         .contains("two different entities"));
         assert!(create_attack_edge(
-            &mut conn, &actor, "asset", "missing", "asset", &dc.id, "Bad", "", "other",
-            "suspected", None, None, None, None, None, Vec::new(),
+            &mut conn,
+            &actor,
+            "asset",
+            "missing",
+            "asset",
+            &dc.id,
+            "Bad",
+            "",
+            "other",
+            "suspected",
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
         )
         .unwrap_err()
         .contains("not found"));
         assert!(create_attack_edge(
-            &mut conn, &actor, "external", "Internet", "asset", &dc.id, "Bad", "", "other",
-            "suspected", None, None, None, None, None, vec!["missing-ioc".into()],
+            &mut conn,
+            &actor,
+            "external",
+            "Internet",
+            "asset",
+            &dc.id,
+            "Bad",
+            "",
+            "other",
+            "suspected",
+            None,
+            None,
+            None,
+            None,
+            None,
+            vec!["missing-ioc".into()],
         )
         .unwrap_err()
         .contains("Linked IOC"));
@@ -7055,9 +7121,11 @@ mod tests {
         let view =
             save_investigation_view(&mut conn, None, "Pathway", "For briefing", &state).unwrap();
         assert_eq!(view.name, "Pathway");
-        assert!(save_investigation_view(&mut conn, None, "  pathway ", "", &state)
-            .unwrap_err()
-            .contains("already exists"));
+        assert!(
+            save_investigation_view(&mut conn, None, "  pathway ", "", &state)
+                .unwrap_err()
+                .contains("already exists")
+        );
 
         let renamed =
             save_investigation_view(&mut conn, Some(&view.id), "Pathway v2", "", &state).unwrap();
@@ -7067,9 +7135,11 @@ mod tests {
         assert_eq!(loaded.state["positions"][0]["x"], 1.5);
 
         let bad_state = serde_json::json!({"version": 2, "layout": "dagre", "zoom": 1.0, "pan_x": 0.0, "pan_y": 0.0});
-        assert!(save_investigation_view(&mut conn, None, "Bad", "", &bad_state)
-            .unwrap_err()
-            .contains("version"));
+        assert!(
+            save_investigation_view(&mut conn, None, "Bad", "", &bad_state)
+                .unwrap_err()
+                .contains("version")
+        );
 
         // Presentation state stays out of evidence history.
         assert_eq!(get_history(&conn, 100).unwrap().len(), commits_before);
@@ -7084,7 +7154,15 @@ mod tests {
         let asset = add_asset(&mut source, &source_actor, &network.id, "PC-1");
         let ioc = add_ioc(&mut source, &source_actor, "203.0.113.7");
         create_ioc_sighting(
-            &mut source, &source_actor, &ioc.id, "asset", &asset.id, None, "", "", None,
+            &mut source,
+            &source_actor,
+            &ioc.id,
+            "asset",
+            &asset.id,
+            None,
+            "",
+            "",
+            None,
         )
         .unwrap();
         create_attack_edge(
@@ -7106,7 +7184,8 @@ mod tests {
             vec![ioc.id.clone()],
         )
         .unwrap();
-        let state = serde_json::json!({"version":1,"layout":"dagre","zoom":1.0,"pan_x":0.0,"pan_y":0.0});
+        let state =
+            serde_json::json!({"version":1,"layout":"dagre","zoom":1.0,"pan_x":0.0,"pan_y":0.0});
         save_investigation_view(&mut source, None, "Shared", "", &state).unwrap();
         let data = export_case_data(&source).unwrap();
         assert_eq!(data.ioc_sightings.len(), 1);
@@ -7122,7 +7201,10 @@ mod tests {
         assert_eq!(summary.entities["ioc_sightings"].inserted, 1);
         assert_eq!(summary.entities["attack_edges"].inserted, 1);
         assert_eq!(summary.entities["investigation_views"].inserted, 1);
-        assert_eq!(get_ioc_sightings(&target, None, None, None).unwrap().len(), 1);
+        assert_eq!(
+            get_ioc_sightings(&target, None, None, None).unwrap().len(),
+            1
+        );
         assert_eq!(get_attack_edges(&target).unwrap().len(), 1);
         assert_eq!(get_investigation_views(&target).unwrap().len(), 1);
         // Imported views stay out of history while evidence entities are recorded.

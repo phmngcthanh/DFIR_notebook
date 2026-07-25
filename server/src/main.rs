@@ -116,7 +116,10 @@ async fn main() {
     let cli = Cli::parse();
 
     if let Err(error) = std::fs::create_dir_all(&cli.cases) {
-        eprintln!("Could not create case directory {}: {error}", cli.cases.display());
+        eprintln!(
+            "Could not create case directory {}: {error}",
+            cli.cases.display()
+        );
         std::process::exit(1);
     }
     let cases_dir = match cli.cases.canonicalize() {
@@ -136,7 +139,10 @@ async fn main() {
     // `.layer` only wraps routes registered before it, so the session routes
     // keep the small limit and the command route gets the upload-sized one.
     let api = Router::new()
-        .route("/api/cases", get(cases::list_cases).post(cases::create_case))
+        .route(
+            "/api/cases",
+            get(cases::list_cases).post(cases::create_case),
+        )
         .route("/api/auth/unlock", post(auth::unlock))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/state", get(auth::server_state))
@@ -148,9 +154,8 @@ async fn main() {
         .with_state(state.clone());
 
     let index = cli.web.join("index.html");
-    let web = Router::new().fallback_service(
-        ServeDir::new(&cli.web).not_found_service(ServeFile::new(&index)),
-    );
+    let web = Router::new()
+        .fallback_service(ServeDir::new(&cli.web).not_found_service(ServeFile::new(&index)));
 
     let app = api
         .merge(web)
@@ -200,7 +205,11 @@ async fn main() {
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
     } else {
-        let config = match tls::load_or_generate(cli.tls_cert.as_deref(), cli.tls_key.as_deref(), &state.config.cases_dir) {
+        let config = match tls::load_or_generate(
+            cli.tls_cert.as_deref(),
+            cli.tls_key.as_deref(),
+            &state.config.cases_dir,
+        ) {
             Ok(config) => config,
             Err(error) => {
                 eprintln!("TLS setup failed: {error}");
