@@ -15,7 +15,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const manifest = path.join(repoRoot, 'server', 'Cargo.toml');
+const serverDir = path.join(repoRoot, 'server');
+const manifest = path.join(serverDir, 'Cargo.toml');
 const [subcommand = 'build', ...rest] = process.argv.slice(2);
 const env = { ...process.env };
 const args = [subcommand, '--manifest-path', manifest];
@@ -41,7 +42,15 @@ if (process.platform === 'win32') {
 
 args.push(...rest);
 
-const result = spawnSync('cargo', args, { env, stdio: 'inherit', shell: process.platform === 'win32' });
+// Cargo discovers .cargo/config.toml by walking up from its working directory,
+// not from --manifest-path. Run inside server/ so its shared target-dir setting
+// is honored instead of compiling SQLCipher/OpenSSL again in server/target.
+const result = spawnSync('cargo', args, {
+  cwd: serverDir,
+  env,
+  stdio: 'inherit',
+  shell: process.platform === 'win32',
+});
 if (result.error) {
   console.error(result.error.message);
   process.exit(1);
