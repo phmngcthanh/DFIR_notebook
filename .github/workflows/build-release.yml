@@ -1,0 +1,451 @@
+name: Build and release all platforms
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional tag. Empty generates v<app-version>.<commit-date>.<run-number>.
+        required: false
+        default: ''
+        type: string
+      android_profile:
+        description: Android APK profile. Release APKs are unsigned unless signing is configured.
+        required: true
+        default: debug
+        type: choice
+        options:
+          - debug
+          - release
+      draft_release:
+        description: Keep the GitHub Release as a draft instead of publishing it.
+        required: true
+        default: false
+        type: boolean
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: all-platform-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  RUST_VERSION: '1.97.1'
+  NDK_VERSION: '27.0.12077973'
+
+jobs:
+  prepare:
+    name: Resolve release request
+    runs-on: ubuntu-24.04
+    outputs:
+      should_run: ${{ steps.release.outputs.should_run }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      android_profile: ${{ steps.release.outputs.android_profile }}
+      draft_release: ${{ steps.release.outputs.draft_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check trigger and resolve release settings
+        id: release
+        shell: bash
+        env:
+          MANUAL_TAG: ${{ inputs.release_tag }}
+          MANUAL_ANDROID_PROFILE: ${{ inputs.android_profile }}
+          MANUAL_DRAFT: ${{ inputs.draft_release }}
+        run: |
+          set -euo pipefail
+
+          subject="$(git log -1 --pretty=%s)"
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" && "$subject" != *-v ]]; then
+            echo "Push ignored: the commit subject does not end in -v."
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version="$(node -p "require('./package.json').version")"
+          commit_date="$(git show -s --format=%cd --date=format:%Y%m%d "$GITHUB_SHA")"
+          tag="${MANUAL_TAG:-}"
+          if [[ -z "$tag" ]]; then
+            tag="v${version}.${commit_date}.${GITHUB_RUN_NUMBER}"
+          fi
+
+          if [[ ! "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+             ! git check-ref-format "refs/tags/$tag" >/dev/null; then
+            echo "::error::Invalid release tag: $tag"
+            exit 1
+          fi
+
+          android_profile="${MANUAL_ANDROID_PROFILE:-debug}"
+          if [[ "$android_profile" != "debug" && "$android_profile" != "release" ]]; then
+            echo "::error::Android profile must be debug or release."
+            exit 1
+          fi
+
+          draft_release="${MANUAL_DRAFT:-false}"
+          {
+            echo "should_run=true"
+            echo "release_tag=$tag"
+            echo "android_profile=$android_profile"
+            echo "draft_release=$draft_release"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Release tag: $tag"
+          echo "Android profile: $android_profile"
+          echo "Draft: $draft_release"
+
+  quality:
+    name: Test unified application
+    needs: prepare
+    if: needs.prepare.outputs.should_run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: quality-linux-x64
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm test
+      - run: npm run server-test
+
+      - name: Store tested browser frontend
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-web-dist
+          path: dist
+          if-no-files-found: error
+
+  desktop:
+    name: Desktop — ${{ matrix.name }}
+    needs:
+      - prepare
+      - quality
+    if: needs.prepare.outputs.should_run == 'true'
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-latest
+            slug: windows-x64
+            cache_key: desktop-windows-x64
+            rust_targets: x86_64-pc-windows-msvc
+            tauri_args: --target x86_64-pc-windows-msvc --bundles nsis
+          - name: Linux x64
+            runner: ubuntu-22.04
+            slug: linux-x64
+            cache_key: desktop-linux-x64
+            rust_targets: x86_64-unknown-linux-gnu
+            tauri_args: --bundles deb,appimage
+          - name: macOS universal
+            runner: macos-15
+            slug: macos-universal
+            cache_key: desktop-macos-universal
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            tauri_args: --target universal-apple-darwin --bundles app,dmg
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ matrix.cache_key }}
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            perl \
+            pkg-config
+
+      - name: Install Strawberry Perl
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          choco install strawberryperl --no-progress -y
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - run: npm ci
+
+      - name: Build and package desktop application
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUSTUP_TOOLCHAIN: ${{ env.RUST_VERSION }}
+        with:
+          args: ${{ matrix.tauri_args }}
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: release-desktop-${{ matrix.slug }}-[bundle]
+
+  android:
+    name: Android ARM64 APK
+    needs:
+      - prepare
+      - quality
+    if: needs.prepare.outputs.should_run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK and SDK
+        run: sdkmanager "ndk;$NDK_VERSION" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Shim NDK binutils names for OpenSSL
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolbin="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          for tool in ranlib ar strip; do
+            ln -sf "$toolbin/llvm-$tool" "$toolbin/aarch64-linux-android-$tool"
+          done
+          "$toolbin/aarch64-linux-android-ranlib" --version | head -1
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: android-arm64
+
+      - run: npm ci
+
+      - name: Initialize Android project
+        env:
+          NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+        run: npx tauri android init
+
+      - name: Build Android APK
+        shell: bash
+        env:
+          NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+          RANLIB: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib
+          AR: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
+          ANDROID_PROFILE: ${{ needs.prepare.outputs.android_profile }}
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_SDK_ROOT/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          if [[ "$ANDROID_PROFILE" == "debug" ]]; then
+            npx tauri android build --apk --target aarch64 --debug
+          else
+            npx tauri android build --apk --target aarch64
+          fi
+
+      - name: Stage Android release asset
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          ANDROID_PROFILE: ${{ needs.prepare.outputs.android_profile }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-output
+          apk="$(find src-tauri/gen/android/app/build/outputs/apk -type f -name '*.apk' | sort | head -1)"
+          test -n "$apk"
+          cp "$apk" "release-output/dfir-investigator-${RELEASE_TAG}-android-arm64-${ANDROID_PROFILE}.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-android-arm64-${{ needs.prepare.outputs.android_profile }}
+          path: release-output/*.apk
+          if-no-files-found: error
+
+  server:
+    name: Server — ${{ matrix.name }}
+    needs:
+      - prepare
+      - quality
+    if: needs.prepare.outputs.should_run == 'true'
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-latest
+            slug: windows-x64
+            cache_key: server-windows-x64
+          - name: Linux x64
+            runner: ubuntu-22.04
+            slug: linux-x64
+            cache_key: server-linux-x64
+          - name: macOS Intel
+            runner: macos-15-intel
+            slug: macos-x64
+            cache_key: server-macos-x64
+          - name: macOS Apple Silicon
+            runner: macos-15
+            slug: macos-arm64
+            cache_key: server-macos-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ matrix.cache_key }}
+
+      - name: Download tested browser frontend
+        uses: actions/download-artifact@v4
+        with:
+          name: shared-web-dist
+          path: dist
+
+      - name: Install Strawberry Perl
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          choco install strawberryperl --no-progress -y
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - run: npm run server-build
+
+      - name: Package Windows server
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          PLATFORM_SLUG: ${{ matrix.slug }}
+        run: |
+          $payload = "release-staging\dfir-investigator-server"
+          New-Item -ItemType Directory -Path $payload -Force | Out-Null
+          Copy-Item "src-tauri\target\x86_64-pc-windows-msvc\release\dfir-server.exe" $payload
+          Copy-Item "dist" "$payload\dist" -Recurse
+          Copy-Item "docs\SERVER.md", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md" $payload
+          New-Item -ItemType Directory -Path "release-output" -Force | Out-Null
+          Compress-Archive -Path "$payload\*" -DestinationPath "release-output\dfir-investigator-$env:RELEASE_TAG-server-$env:PLATFORM_SLUG.zip"
+
+      - name: Package Unix server
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          PLATFORM_SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          payload="release-staging/dfir-investigator-server"
+          mkdir -p "$payload" release-output
+          cp src-tauri/target/release/dfir-server "$payload/"
+          cp -R dist "$payload/dist"
+          cp docs/SERVER.md README.md LICENSE THIRD_PARTY_NOTICES.md "$payload/"
+          tar -czf "release-output/dfir-investigator-${RELEASE_TAG}-server-${PLATFORM_SLUG}.tar.gz" \
+            -C release-staging dfir-investigator-server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-server-${{ matrix.slug }}
+          path: release-output/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs:
+      - prepare
+      - quality
+      - desktop
+      - android
+      - server
+    if: >-
+      needs.prepare.outputs.should_run == 'true' &&
+      needs.quality.result == 'success' &&
+      needs.desktop.result == 'success' &&
+      needs.android.result == 'success' &&
+      needs.server.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release-assets
+          find . -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create or update release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: DFIR Investigator ${{ needs.prepare.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          body: |
+            Unified release built from one commit after all quality and platform jobs passed.
+
+            Includes desktop packages for Windows, Linux, and universal macOS; an Android
+            ARM64 APK; and browser-server bundles for Windows, Linux, macOS Intel, and
+            macOS Apple Silicon. Verify `SHA256SUMS.txt` after downloading.
+          generate_release_notes: true
+          draft: ${{ needs.prepare.outputs.draft_release }}
+          prerelease: false
+          make_latest: ${{ needs.prepare.outputs.draft_release == 'true' && 'false' || 'true' }}
+          overwrite_files: true
+          preserve_order: true
+          files: release-assets/**/*
