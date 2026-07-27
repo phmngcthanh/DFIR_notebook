@@ -316,13 +316,38 @@ src-tauri/target/release/bundle/dmg/*.dmg
 
 Smoke-test on both an Intel Mac and an Apple Silicon Mac when distributing the universal package.
 
-### GitHub Actions cross-platform builds
+### GitHub Actions cross-platform builds and releases
 
-`.github/workflows/desktop-build.yml` builds the native packages on GitHub-hosted Windows, Ubuntu 22.04, and macOS runners. It runs only when started manually with **Actions > Desktop builds > Run workflow**, so commits and tags do not automatically start expensive native builds.
+`.github/workflows/build-release.yml` is the single release pipeline for every
+supported shell. It builds:
 
-Every successful job stores its packages as downloadable workflow artifacts. The required `release_tag` input selects the Git tag and draft GitHub Release name; the run attaches the native packages and includes the standalone Windows executable. Review and smoke-test the draft before publishing it.
+- Windows x64, Linux x64, and universal Intel/Apple Silicon macOS desktop packages;
+- an Android ARM64 APK;
+- browser-server bundles for Windows x64, Linux x64, macOS Intel, and macOS Apple Silicon.
 
-The macOS CI package is built as a universal Intel/Apple Silicon application. Without Apple Developer secrets it is not notarized for general distribution; configure the repository's Apple signing and notarization secrets before treating it as a public macOS release.
+The pipeline starts in either of two ways:
+
+1. Run **Actions > Build and release all platforms > Run workflow**. The release
+   tag is optional; when omitted, the workflow generates
+   `v<app-version>.<commit-date>.<run-number>`. Manual runs can select the Android
+   debug or unsigned release profile and can keep the GitHub Release as a draft.
+2. Push to `main` with a commit subject that ends exactly in `-v`, for example
+   `Prepare 1.0.21 release-v`. Other pushes create only the inexpensive trigger
+   check and skip every build job. Automatic `-v` releases use the Android debug
+   profile and are published rather than left as drafts.
+
+Frontend lint/build/tests and the server/core Rust tests run before the platform
+matrix. Each platform job uploads workflow artifacts. Only after every required
+desktop, Android, and server job succeeds does the final job create the tag,
+generate release notes and SHA-256 checksums, attach every artifact, and publish
+the GitHub Release. A failed or cancelled platform job therefore cannot publish
+a partial release.
+
+The macOS desktop package is universal. The two server bundles remain
+architecture-specific. Without Apple Developer secrets, macOS outputs are not
+signed or notarized for general distribution. Android `release` output is also
+unsigned unless signing is configured; use the default debug APK when an
+immediately installable test package is required.
 
 ## 10. Troubleshooting
 

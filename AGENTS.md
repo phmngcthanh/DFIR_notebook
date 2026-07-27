@@ -144,4 +144,6 @@ All DDL and migrations live in `db.rs`; current schema version is tracked via `P
 - A case's connection opens on first unlock and closes when its last session ends; pending merge/import previews live on the case, not the session.
 - Deleting an asset preserves its timeline events (asset reference nulled); networks cannot be deleted while referenced.
 - The Rust toolchain is pinned in `rust-toolchain.toml`; bump it deliberately (a channel change triggers a full rebuild including OpenSSL).
-- CI (`.github/workflows/desktop-build.yml`) is `workflow_dispatch`-only with `Swatinem/rust-cache`.
+- CI (`.github/workflows/build-release.yml`) builds and releases every supported
+  shell/platform after a manual dispatch or a push to `main` whose commit subject
+  ends in `-v`. All required jobs must pass before the release job runs.
