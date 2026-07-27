@@ -51,6 +51,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Check trigger and resolve release settings
         id: release
         shell: bash
