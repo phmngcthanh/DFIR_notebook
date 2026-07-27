@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '@/lib/api';
 import { Cable, ChevronDown, ChevronRight, Pencil, Plus, Search, Star, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import type { ApiResponse, Asset, CompromiseStatus, ExpertIdentity, InvestigationStatus, Network, NetworkInterface } from '@/types';
+import type { ApiResponse, Asset, CompromiseStatus, ExpertIdentity, InfectionSummary, InvestigationStatus, Network, NetworkInterface } from '@/types';
 
 interface Props { refreshTrigger: number; expert: ExpertIdentity }
 interface AssetFormState {
@@ -39,16 +39,21 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
   const [investigationFilter, setInvestigationFilter] = useState('all');
   const [focusOnly, setFocusOnly] = useState(expert.scope_network_ids.length > 0);
 
+  const [infection, setInfection] = useState<InfectionSummary>({ entities: [], iocs: [] });
+
   const loadData = useCallback(async () => {
     try {
-      const [assetResponse, networkResponse, interfaceResponse] = await Promise.all([
+      const [assetResponse, networkResponse, interfaceResponse, infectionResponse] = await Promise.all([
         invoke<ApiResponse<Asset[]>>('list_assets'), invoke<ApiResponse<Network[]>>('list_networks'),
         invoke<ApiResponse<NetworkInterface[]>>('list_network_interfaces', { assetId: null }),
+        invoke<ApiResponse<InfectionSummary>>('get_infection_summary'),
       ]);
       if (!assetResponse.success) throw new Error(assetResponse.error);
       if (!networkResponse.success) throw new Error(networkResponse.error);
       if (!interfaceResponse.success) throw new Error(interfaceResponse.error);
+      if (!infectionResponse.success) throw new Error(infectionResponse.error);
       setAssets(assetResponse.data ?? []); setNetworks(networkResponse.data ?? []); setInterfaces(interfaceResponse.data ?? []);
+      setInfection(infectionResponse.data ?? { entities: [], iocs: [] });
     } catch (reason) { toast.error(String(reason)); }
   }, []);
 
@@ -148,7 +153,8 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
       <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead /><TableHead>Name</TableHead><TableHead>Primary network</TableHead><TableHead>IP</TableHead><TableHead>Type / OS</TableHead><TableHead>Compromise</TableHead><TableHead>Progress</TableHead><TableHead>NICs</TableHead><TableHead /></TableRow></TableHeader><TableBody>
         {filteredAssets.length === 0 ? <TableRow><TableCell colSpan={9} className="py-10 text-center text-slate-400">No matching assets.</TableCell></TableRow> : filteredAssets.map((asset) => {
           const assetInterfaces = interfacesByAsset.get(asset.id) ?? [];
-          return <AssetRows key={asset.id} asset={asset} interfaces={assetInterfaces} expanded={expandedAssetId === asset.id}
+          const sightingCount = infection.entities.find((entry) => entry.entity_kind === 'asset' && entry.entity_id === asset.id)?.sighting_count ?? 0;
+          return <AssetRows key={asset.id} asset={asset} sightingCount={sightingCount} interfaces={assetInterfaces} expanded={expandedAssetId === asset.id}
             onToggle={() => { setExpandedAssetId(expandedAssetId === asset.id ? null : asset.id); setShowInterfaceForm(false); }} onEdit={() => startEdit(asset)} onDelete={() => void deleteAsset(asset.id)}
             interfaceForm={interfaceForm} setInterfaceForm={setInterfaceForm} showInterfaceForm={showInterfaceForm && expandedAssetId === asset.id}
             editingInterfaceId={editingInterfaceId} networks={networks} onBeginInterface={beginInterface} onSaveInterface={() => void saveInterface()}
@@ -172,12 +178,12 @@ function AssetForm({ form, setForm, networks, editing, onSave, onCancel }: { for
   </CardContent></Card>;
 }
 
-interface AssetRowsProps { asset: Asset; interfaces: NetworkInterface[]; expanded: boolean; onToggle: () => void; onEdit: () => void; onDelete: () => void; interfaceForm: InterfaceFormState; setInterfaceForm: (value: InterfaceFormState) => void; showInterfaceForm: boolean; editingInterfaceId: string | null; networks: Network[]; onBeginInterface: (item?: NetworkInterface) => void; onSaveInterface: () => void; onCancelInterface: () => void; onPrimary: (id: string) => void; onDeleteInterface: (id: string) => void }
+interface AssetRowsProps { asset: Asset; sightingCount: number; interfaces: NetworkInterface[]; expanded: boolean; onToggle: () => void; onEdit: () => void; onDelete: () => void; interfaceForm: InterfaceFormState; setInterfaceForm: (value: InterfaceFormState) => void; showInterfaceForm: boolean; editingInterfaceId: string | null; networks: Network[]; onBeginInterface: (item?: NetworkInterface) => void; onSaveInterface: () => void; onCancelInterface: () => void; onPrimary: (id: string) => void; onDeleteInterface: (id: string) => void }
 function AssetRows(props: AssetRowsProps) {
   const { asset, interfaces, expanded } = props;
   return <><TableRow className={asset.compromise_status === 'infected' ? 'bg-red-50' : asset.compromise_status === 'suspected' ? 'bg-amber-50' : ''}>
     <TableCell><Button size="sm" variant="ghost" onClick={props.onToggle}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</Button></TableCell><TableCell className="font-medium">{asset.name}<div className="text-xs text-slate-400">{asset.user_name}</div></TableCell><TableCell>{asset.network_name || 'Unassigned'}</TableCell><TableCell className="font-mono text-xs">{asset.ip_address || '—'}</TableCell><TableCell><Badge variant="outline">{asset.asset_type}</Badge><div className="mt-1 text-xs text-slate-500">{asset.os}</div></TableCell>
-    <TableCell><StatusBadge value={asset.compromise_status} /></TableCell><TableCell><StatusBadge value={asset.investigation_status} /></TableCell><TableCell>{interfaces.length}</TableCell><TableCell><div className="flex"><Button size="sm" variant="ghost" onClick={props.onEdit}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={props.onDelete}><Trash2 size={14} className="text-red-500" /></Button></div></TableCell>
+    <TableCell><StatusBadge value={asset.compromise_status} />{props.sightingCount > 0 && <span className="ml-1 rounded bg-red-600 px-1.5 py-0.5 text-xs text-white" title={`${props.sightingCount} IOC sighting(s) recorded on this asset`}>⚠{props.sightingCount}</span>}</TableCell><TableCell><StatusBadge value={asset.investigation_status} /></TableCell><TableCell>{interfaces.length}</TableCell><TableCell><div className="flex"><Button size="sm" variant="ghost" onClick={props.onEdit}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={props.onDelete}><Trash2 size={14} className="text-red-500" /></Button></div></TableCell>
   </TableRow>{expanded && <TableRow><TableCell colSpan={9} className="bg-slate-50 p-4"><div className="mb-3 flex items-center justify-between"><h3 className="flex items-center gap-2 text-sm font-semibold"><Cable size={15} />Network interfaces</h3><Button size="sm" variant="outline" onClick={() => props.onBeginInterface()}><Plus size={14} className="mr-1" />Add NIC</Button></div>
     <div className="grid gap-2">{interfaces.map((item) => <div key={item.id} className="flex items-center justify-between rounded border bg-white p-2 text-sm"><div className="flex items-center gap-3">{item.is_primary && <Star size={14} className="fill-amber-400 text-amber-500" />}<strong>{item.name}</strong><span>{item.network_name || 'Unassigned'}</span><code>{item.ip_address}</code><span className="text-slate-500">{item.mac_address}</span></div><div className="flex">{!item.is_primary && <Button size="sm" variant="ghost" onClick={() => props.onPrimary(item.id)} title="Make primary"><Star size={14} /></Button>}<Button size="sm" variant="ghost" onClick={() => props.onBeginInterface(item)}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={() => props.onDeleteInterface(item.id)}><Trash2 size={14} className="text-red-500" /></Button></div></div>)}</div>
     {props.showInterfaceForm && <div className="mt-3 grid grid-cols-6 items-end gap-2 rounded border bg-white p-3"><Field label="Name"><Input value={props.interfaceForm.name} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, name: e.target.value })} /></Field><Field label="Network"><NetworkSelect value={props.interfaceForm.networkId} networks={props.networks} onChange={(networkId) => props.setInterfaceForm({ ...props.interfaceForm, networkId })} /></Field><Field label="IP"><Input value={props.interfaceForm.ipAddress} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, ipAddress: e.target.value })} /></Field><Field label="MAC"><Input value={props.interfaceForm.macAddress} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, macAddress: e.target.value })} /></Field><label className="flex h-9 items-center gap-2"><input type="checkbox" checked={props.interfaceForm.isPrimary} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, isPrimary: e.target.checked })} />Primary</label><div className="flex gap-1"><Button size="sm" onClick={props.onSaveInterface}>Save</Button><Button size="sm" variant="outline" onClick={props.onCancelInterface}>Cancel</Button></div></div>}

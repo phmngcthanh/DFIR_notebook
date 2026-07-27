@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { Pencil, Plus, Search, ShieldAlert, Trash2 } from 'lucide-react';
+import { downloadText, invoke } from '@/lib/api';
+import { Download, Pencil, Plus, Search, ShieldAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import type { ApiResponse, Ioc } from '@/types';
+import type { ApiResponse, InfectionSummary, Ioc } from '@/types';
 
 interface Props { refreshTrigger: number }
 interface FormState { iocType: string; value: string; description: string; threatLevel: string; firstSeen: string; lastSeen: string }
@@ -23,12 +23,18 @@ export default function IocManager({ refreshTrigger }: Props) {
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [threatFilter, setThreatFilter] = useState('all');
+  const [infection, setInfection] = useState<InfectionSummary>({ entities: [], iocs: [] });
 
   const loadIocs = useCallback(async () => {
     try {
-      const response = await invoke<ApiResponse<Ioc[]>>('list_iocs');
-      if (!response.success) throw new Error(response.error || 'Could not load IOCs');
-      setIocs(response.data ?? []);
+      const [iocResponse, infectionResponse] = await Promise.all([
+        invoke<ApiResponse<Ioc[]>>('list_iocs'),
+        invoke<ApiResponse<InfectionSummary>>('get_infection_summary'),
+      ]);
+      if (!iocResponse.success) throw new Error(iocResponse.error || 'Could not load IOCs');
+      if (!infectionResponse.success) throw new Error(infectionResponse.error || 'Could not load IOC sightings');
+      setIocs(iocResponse.data ?? []);
+      setInfection(infectionResponse.data ?? { entities: [], iocs: [] });
     } catch (reason) { toast.error(String(reason)); }
   }, []);
   useEffect(() => { void loadIocs(); }, [loadIocs, refreshTrigger]);
@@ -63,12 +69,28 @@ export default function IocManager({ refreshTrigger }: Props) {
       && (!term || [ioc.value, ioc.description, ioc.ioc_type].some((value) => value.toLowerCase().includes(term))));
   }, [iocs, search, typeFilter, threatFilter]);
 
+  // Push the currently visible indicators outward. CSV for SIEM/EDR/firewall
+  // imports; STIX 2.1 for a threat-intel platform. The server formats the set
+  // of ids we send, so "filter, then export" gives the analyst exactly the
+  // indicators they chose.
+  const exportIocs = async (format: 'csv' | 'stix') => {
+    if (filtered.length === 0) { toast.error('No IOCs to export'); return; }
+    try {
+      const command = format === 'csv' ? 'export_iocs_csv' : 'export_iocs_stix';
+      const response = await invoke<ApiResponse<string>>(command, { ids: filtered.map((ioc) => ioc.id) });
+      if (!response.success || response.data === undefined) throw new Error(response.error || 'Export failed');
+      const date = new Date().toISOString().slice(0, 10);
+      downloadText(format === 'csv' ? `iocs-${date}.csv` : `iocs-${date}.stix.json`, response.data);
+      toast.success(`Exported ${filtered.length} IOC${filtered.length === 1 ? '' : 's'} as ${format.toUpperCase()}`);
+    } catch (reason) { toast.error(String(reason)); }
+  };
+
   return <div className="space-y-4 p-6">
-    <div className="flex items-center justify-between"><div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><ShieldAlert className="text-cyan-600" />Indicators of Compromise</h2><p className="text-sm text-slate-500">Search, validate, and version IOC findings</p></div><Button onClick={() => { reset(); setShowForm(true); }} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add IOC</Button></div>
+    <div className="flex items-center justify-between"><div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><ShieldAlert className="text-cyan-600" />Indicators of Compromise</h2><p className="text-sm text-slate-500">Search, validate, and version IOC findings</p></div><div className="flex gap-2"><Button variant="outline" disabled={filtered.length === 0} onClick={() => void exportIocs('csv')} title="Download the visible IOCs as CSV"><Download size={16} className="mr-2" />Export CSV</Button><Button variant="outline" disabled={filtered.length === 0} onClick={() => void exportIocs('stix')} title="Download the visible IOCs as a STIX 2.1 bundle"><Download size={16} className="mr-2" />Export STIX</Button><Button onClick={() => { reset(); setShowForm(true); }} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add IOC</Button></div></div>
     <Card><CardContent className="flex flex-wrap gap-3 p-3"><div className="relative min-w-64 flex-1"><Search size={15} className="absolute left-3 top-2.5 text-slate-400" /><Input className="pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search value, type, or description…" /></div><Filter value={typeFilter} onChange={setTypeFilter} values={['all','IP','Hash','Domain','URL','Email','Registry','Mutex']} /><Filter value={threatFilter} onChange={setThreatFilter} values={['all','low','medium','high','critical']} /></CardContent></Card>
     {showForm && <IocForm form={form} setForm={setForm} editing={Boolean(editingId)} onSave={() => void save()} onCancel={reset} />}
-    <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Type</TableHead><TableHead>Value</TableHead><TableHead>Threat</TableHead><TableHead>Description</TableHead><TableHead>First seen</TableHead><TableHead>Last seen</TableHead><TableHead /></TableRow></TableHeader><TableBody>
-      {filtered.length === 0 ? <TableRow><TableCell colSpan={7} className="py-10 text-center text-slate-400">No matching IOCs.</TableCell></TableRow> : filtered.map((ioc) => <TableRow key={ioc.id}><TableCell><span className={`rounded px-2 py-0.5 text-xs ${typeColor(ioc.ioc_type)}`}>{ioc.ioc_type}</span></TableCell><TableCell className="max-w-xs truncate font-mono text-xs">{ioc.value}</TableCell><TableCell><span className={`rounded px-2 py-0.5 text-xs text-white ${threatColor(ioc.threat_level)}`}>{ioc.threat_level}</span></TableCell><TableCell className="max-w-xs truncate text-xs">{ioc.description || '—'}</TableCell><TableCell className="text-xs">{displayTime(ioc.first_seen)}</TableCell><TableCell className="text-xs">{displayTime(ioc.last_seen)}</TableCell><TableCell className="whitespace-nowrap"><Button variant="ghost" size="sm" onClick={() => edit(ioc)}><Pencil size={14} /></Button><Button variant="ghost" size="sm" onClick={() => void remove(ioc.id)}><Trash2 size={14} className="text-red-500" /></Button></TableCell></TableRow>)}
+    <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Type</TableHead><TableHead>Value</TableHead><TableHead>Threat</TableHead><TableHead>Description</TableHead><TableHead>Seen on</TableHead><TableHead>First seen</TableHead><TableHead>Last seen</TableHead><TableHead /></TableRow></TableHeader><TableBody>
+      {filtered.length === 0 ? <TableRow><TableCell colSpan={8} className="py-10 text-center text-slate-400">No matching IOCs.</TableCell></TableRow> : filtered.map((ioc) => <TableRow key={ioc.id}><TableCell><span className={`rounded px-2 py-0.5 text-xs ${typeColor(ioc.ioc_type)}`}>{ioc.ioc_type}</span></TableCell><TableCell className="max-w-xs truncate font-mono text-xs">{ioc.value}</TableCell><TableCell><span className={`rounded px-2 py-0.5 text-xs text-white ${threatColor(ioc.threat_level)}`}>{ioc.threat_level}</span></TableCell><TableCell className="max-w-xs truncate text-xs">{ioc.description || '—'}</TableCell><TableCell className="max-w-40 text-xs">{affectedEntities(infection, ioc.id)}</TableCell><TableCell className="text-xs">{displayTime(ioc.first_seen)}</TableCell><TableCell className="text-xs">{displayTime(ioc.last_seen)}</TableCell><TableCell className="whitespace-nowrap"><Button variant="ghost" size="sm" onClick={() => edit(ioc)}><Pencil size={14} /></Button><Button variant="ghost" size="sm" onClick={() => void remove(ioc.id)}><Trash2 size={14} className="text-red-500" /></Button></TableCell></TableRow>)}
     </TableBody></Table></CardContent></Card>
   </div>;
 }
@@ -84,6 +106,14 @@ function IocForm({ form, setForm, editing, onSave, onCancel }: { form: FormState
 }
 function Field({ label, children }: { label: string; children: React.ReactNode }) { return <div className="space-y-1"><Label>{label}</Label>{children}</div>; }
 function Filter({ value, onChange, values }: { value: string; onChange: (value: string) => void; values: string[] }) { return <Select value={value} onValueChange={onChange}><SelectTrigger className="w-40"><SelectValue /></SelectTrigger><SelectContent>{values.map((item) => <SelectItem key={item} value={item}>{item === 'all' ? 'All' : item}</SelectItem>)}</SelectContent></Select>; }
+// Sightings recorded in the Investigation tab surface here as affected entities.
+function affectedEntities(infection: InfectionSummary, iocId: string) {
+  const entry = infection.iocs.find((item) => item.ioc_id === iocId);
+  if (!entry || entry.entities.length === 0) return <span className="text-slate-400">—</span>;
+  const names = entry.entities.map((item) => item.entity_name || item.entity_id);
+  const shown = names.slice(0, 2).join(', ');
+  return <span className="text-red-700" title={names.join(', ')}>{shown}{names.length > 2 ? ` +${names.length - 2}` : ''}</span>;
+}
 function toUtc(value: string) { return value ? new Date(value).toISOString() : null; }
 function toLocalInput(value?: string) { if (!value) return ''; const date = new Date(value); const offset = date.getTimezoneOffset() * 60_000; return new Date(date.getTime() - offset).toISOString().slice(0, 16); }
 function displayTime(value?: string) { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : date.toLocaleString(); }

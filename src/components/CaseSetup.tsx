@@ -1,43 +1,82 @@
-import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { FolderOpen, Loader2, LockKeyhole, Plus } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { FolderOpen, Loader2, Plus, ServerCog } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import { createCase, listCases, unlockCase, type SessionPayload } from '@/lib/api';
 
 interface Props {
-  mode: 'new' | 'open';
-  onComplete: () => void;
-  onCancel: () => void;
-}
-
-interface CommandResponse {
-  success: boolean;
-  data?: string;
-  error?: string;
+  onSession: (session: SessionPayload) => void;
+  onCancel?: () => void;
 }
 
 const MIN_PASSWORD_LENGTH = 6;
 
-export default function CaseSetup({ mode, onComplete, onCancel }: Props) {
+/**
+ * The login screen. There is no username: the case database password is the
+ * credential, and the expert name beside it is attribution only — the server
+ * never checks one against the other.
+ */
+export default function CaseSetup({ onSession, onCancel }: Props) {
+  const [mode, setMode] = useState<'open' | 'new'>('open');
+  const [cases, setCases] = useState<string[]>([]);
+  const [allowCreate, setAllowCreate] = useState(false);
+  const [caseId, setCaseId] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [clientName, setClientName] = useState('');
   const [expertName, setExpertName] = useState(() => localStorage.getItem('dfir-expert-name') ?? '');
   const [databasePassword, setDatabasePassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [showLegacyConversion, setShowLegacyConversion] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const validateNewPassword = () => {
-    if ([...databasePassword].length < MIN_PASSWORD_LENGTH) {
-      return `Database password must contain at least ${MIN_PASSWORD_LENGTH} characters`;
+  useEffect(() => {
+    let cancelled = false;
+    listCases()
+      .then((listing) => {
+        if (cancelled) return;
+        setCases(listing.cases);
+        setAllowCreate(listing.allowCreate);
+        setCaseId((current) => current || listing.cases[0] || '');
+        if (listing.cases.length === 0 && listing.allowCreate) setMode('new');
+      })
+      .catch((reason) => !cancelled && setError(String(reason)));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const complete = (session: SessionPayload) => {
+    localStorage.setItem('dfir-expert-name', session.expert.name);
+    onSession(session);
+  };
+
+  const handleUnlock = async () => {
+    if (!caseId) {
+      setError('Select the case to unlock');
+      return;
     }
-    if (databasePassword !== confirmPassword) return 'Database passwords do not match';
-    return '';
+    if (!expertName.trim()) {
+      setError('Enter the expert name recorded on your changes');
+      return;
+    }
+    if (!databasePassword) {
+      setError('Enter the case database password');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      complete(await unlockCase({ caseId, password: databasePassword, expertName: expertName.trim() }));
+    } catch (reason) {
+      setError(String(reason instanceof Error ? reason.message : reason));
+    } finally {
+      setDatabasePassword('');
+      setLoading(false);
+    }
   };
 
   const handleCreate = async () => {
@@ -45,66 +84,28 @@ export default function CaseSetup({ mode, onComplete, onCancel }: Props) {
       setError('Case name and session expert name are required');
       return;
     }
-    const passwordError = validateNewPassword();
-    if (passwordError) {
-      setError(passwordError);
+    if ([...databasePassword].length < MIN_PASSWORD_LENGTH) {
+      setError(`Database password must contain at least ${MIN_PASSWORD_LENGTH} characters`);
+      return;
+    }
+    if (databasePassword !== confirmPassword) {
+      setError('Database passwords do not match');
       return;
     }
     setLoading(true);
     setError('');
     try {
-      const response = await invoke<CommandResponse>('create_new_case', {
-        name: name.trim(),
-        description: description.trim(),
-        clientName: clientName.trim(),
-        expertName: expertName.trim(),
-        databasePassword,
-      });
-      if (!response.success) throw new Error(response.error || 'Failed to create case');
-      localStorage.setItem('dfir-expert-name', expertName.trim());
-      onComplete();
+      complete(
+        await createCase({
+          name: name.trim(),
+          description: description.trim(),
+          clientName: clientName.trim(),
+          expertName: expertName.trim(),
+          databasePassword,
+        }),
+      );
     } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setDatabasePassword('');
-      setConfirmPassword('');
-      setLoading(false);
-    }
-  };
-
-  const handleOpen = async () => {
-    if (!databasePassword) {
-      setError('Enter the database file password before selecting the case');
-      return;
-    }
-    setLoading(true);
-    setError('');
-    try {
-      const response = await invoke<CommandResponse>('open_existing_case', { databasePassword });
-      if (!response.success) throw new Error(response.error || 'Failed to open case');
-      onComplete();
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setDatabasePassword('');
-      setLoading(false);
-    }
-  };
-
-  const handleLegacyConversion = async () => {
-    const passwordError = validateNewPassword();
-    if (passwordError) {
-      setError(passwordError);
-      return;
-    }
-    setLoading(true);
-    setError('');
-    try {
-      const response = await invoke<CommandResponse>('migrate_legacy_case', { databasePassword });
-      if (!response.success) throw new Error(response.error || 'Failed to convert legacy case');
-      onComplete();
-    } catch (reason) {
-      setError(String(reason));
+      setError(String(reason instanceof Error ? reason.message : reason));
     } finally {
       setDatabasePassword('');
       setConfirmPassword('');
@@ -117,7 +118,7 @@ export default function CaseSetup({ mode, onComplete, onCancel }: Props) {
       <Card className="w-full max-w-xl">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            {mode === 'new' ? <><Plus size={20} className="text-cyan-600" />Create New Case</> : <><FolderOpen size={20} className="text-cyan-600" />Unlock Existing Case</>}
+            {mode === 'new' ? <><Plus size={20} className="text-cyan-600" />Create Case On This Server</> : <><ServerCog size={20} className="text-cyan-600" />Unlock A Case</>}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -128,47 +129,50 @@ export default function CaseSetup({ mode, onComplete, onCancel }: Props) {
               <Field label="Description" htmlFor="description"><Textarea id="description" value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></Field>
               <Field label="Session expert name *" htmlFor="expert-name"><Input id="expert-name" value={expertName} onChange={(event) => setExpertName(event.target.value)} placeholder="Name recorded on changes" /></Field>
               <p className="text-xs text-slate-500">This session name is recorded on changes. It is attribution only, is not checked against the password, and can change between sessions.</p>
-              <PasswordFields password={databasePassword} confirmation={confirmPassword} onPassword={setDatabasePassword} onConfirmation={setConfirmPassword} />
-              <p className="text-xs text-slate-500">This password encrypts only the selected .db file. Copies initially share it; each copy can later be given a different password.</p>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <Field label="Case database password *" htmlFor="database-password"><Input id="database-password" type="password" autoComplete="new-password" value={databasePassword} onChange={(event) => setDatabasePassword(event.target.value)} /></Field>
+                <Field label="Confirm password *" htmlFor="confirm-password"><Input id="confirm-password" type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></Field>
+              </div>
+              <p className="text-xs text-slate-500">Everyone who works on this case shares this password. Because it now travels over the network, choose a long passphrase rather than the six-character minimum.</p>
               {error && <ErrorText text={error} />}
               <div className="flex gap-3 pt-2">
                 <Button onClick={() => void handleCreate()} disabled={loading} className="flex-1 bg-cyan-600 hover:bg-cyan-700">{loading ? <Loader2 size={16} className="mr-2 animate-spin" /> : <Plus size={16} className="mr-2" />}Create Case</Button>
-                <Button onClick={onCancel} variant="outline">Cancel</Button>
+                {cases.length > 0 && <Button onClick={() => { setMode('open'); setError(''); }} variant="outline">Back to unlock</Button>}
+                {onCancel && <Button onClick={onCancel} variant="outline">Cancel</Button>}
               </div>
             </>
           ) : (
             <>
-              <p className="text-sm text-slate-600">Enter the password stored with the database file, then select that .db file.</p>
-              <Field label="Database file password *" htmlFor="database-password"><Input id="database-password" type="password" autoComplete="current-password" value={databasePassword} onChange={(event) => setDatabasePassword(event.target.value)} /></Field>
-              {!showLegacyConversion && <p className="text-xs text-slate-500">After the file unlocks, you will enter the expert name used only for audit attribution.</p>}
-              {showLegacyConversion && (
-                <>
-                  <Field label="Confirm new database password *" htmlFor="confirm-password"><Input id="confirm-password" type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></Field>
-                  <p className="rounded bg-amber-50 p-3 text-xs text-amber-800">Conversion preserves the original plaintext file and asks where to save a new encrypted copy.</p>
-                </>
-              )}
+              <p className="text-sm text-slate-600">Pick the case on this server, then enter the password stored with that case file.</p>
+              <Field label="Case *" htmlFor="case-id">
+                {cases.length === 0 ? (
+                  <p className="rounded border border-dashed p-3 text-sm text-slate-500">This server has no case files yet.</p>
+                ) : (
+                  <select id="case-id" value={caseId} onChange={(event) => setCaseId(event.target.value)}
+                    className="flex h-10 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-cyan-600">
+                    {cases.map((item) => <option key={item} value={item}>{item}</option>)}
+                  </select>
+                )}
+              </Field>
+              <Field label="Expert name *" htmlFor="expert-name"><Input id="expert-name" value={expertName} onChange={(event) => setExpertName(event.target.value)} placeholder="Name recorded on changes" /></Field>
+              <Field label="Case database password *" htmlFor="database-password"><Input id="database-password" type="password" autoComplete="current-password" value={databasePassword} onChange={(event) => setDatabasePassword(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void handleUnlock()} /></Field>
+              <p className="text-xs text-slate-500">Repeated wrong passwords from one address are locked out for a while.</p>
               {error && <ErrorText text={error} />}
               <div className="flex flex-wrap gap-3 pt-2">
-                {showLegacyConversion ? (
-                  <Button onClick={() => void handleLegacyConversion()} disabled={loading} className="flex-1 bg-cyan-600 hover:bg-cyan-700"><LockKeyhole size={16} className="mr-2" />Convert and Open Copy</Button>
-                ) : (
-                  <Button onClick={() => void handleOpen()} disabled={loading} className="flex-1 bg-cyan-600 hover:bg-cyan-700">{loading ? <Loader2 size={16} className="mr-2 animate-spin" /> : <FolderOpen size={16} className="mr-2" />}Select and Unlock Case</Button>
-                )}
-                <Button onClick={onCancel} variant="outline">Cancel</Button>
+                <Button onClick={() => void handleUnlock()} disabled={loading || cases.length === 0} className="flex-1 bg-cyan-600 hover:bg-cyan-700">{loading ? <Loader2 size={16} className="mr-2 animate-spin" /> : <FolderOpen size={16} className="mr-2" />}Unlock Case</Button>
+                {onCancel && <Button onClick={onCancel} variant="outline">Cancel</Button>}
               </div>
-              <Button variant="link" className="h-auto p-0 text-xs" onClick={() => { setShowLegacyConversion((value) => !value); setError(''); setConfirmPassword(''); }}>
-                {showLegacyConversion ? 'Back to encrypted case login' : 'Convert a legacy unencrypted case'}
-              </Button>
+              {allowCreate && (
+                <Button variant="link" className="h-auto p-0 text-xs" onClick={() => { setMode('new'); setError(''); }}>
+                  Create a new case on this server
+                </Button>
+              )}
             </>
           )}
         </CardContent>
       </Card>
     </div>
   );
-}
-
-function PasswordFields({ password, confirmation, onPassword, onConfirmation }: { password: string; confirmation: string; onPassword: (value: string) => void; onConfirmation: (value: string) => void }) {
-  return <div className="grid gap-4 sm:grid-cols-2"><Field label="Database file password *" htmlFor="database-password"><Input id="database-password" type="password" autoComplete="new-password" value={password} onChange={(event) => onPassword(event.target.value)} /></Field><Field label="Confirm password *" htmlFor="confirm-password"><Input id="confirm-password" type="password" autoComplete="new-password" value={confirmation} onChange={(event) => onConfirmation(event.target.value)} /></Field></div>;
 }
 
 function Field({ label, htmlFor, children }: { label: string; htmlFor: string; children: React.ReactNode }) {

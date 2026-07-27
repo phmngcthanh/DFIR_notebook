@@ -123,6 +123,120 @@ export interface Ioc {
   created_at: string;
 }
 
+export type SightingEntityKind = 'asset' | 'network' | 'firewall';
+
+export interface IocSighting {
+  id: string;
+  ioc_id: string;
+  ioc_value?: string;
+  ioc_type?: string;
+  threat_level?: string;
+  entity_kind: SightingEntityKind;
+  entity_id: string;
+  entity_name?: string;
+  sighted_at?: string | null;
+  location: string;
+  note: string;
+  created_at: string;
+}
+
+export type AttackEdgeSourceKind = SightingEntityKind | 'external';
+export type AttackEdgeType = 'initial_access' | 'lateral_movement' | 'privilege_escalation' | 'persistence' | 'c2' | 'exfiltration' | 'other';
+export type AttackEdgeConfidence = 'confirmed' | 'probable' | 'suspected';
+
+export interface AttackEdge {
+  id: string;
+  source_kind: AttackEdgeSourceKind;
+  source_id: string;
+  source_name?: string;
+  target_kind: SightingEntityKind;
+  target_id: string;
+  target_name?: string;
+  title: string;
+  description: string;
+  edge_type: AttackEdgeType;
+  confidence: AttackEdgeConfidence;
+  mitre_tactic?: string | null;
+  mitre_technique?: string | null;
+  occurred_at?: string | null;
+  timeline_event_id?: string | null;
+  timeline_event_time?: string | null;
+  sequence: number;
+  ioc_ids: string[];
+  created_at: string;
+}
+
+export interface InfectionEntitySummary {
+  entity_kind: SightingEntityKind;
+  entity_id: string;
+  entity_name: string;
+  sighting_count: number;
+  max_threat_level: string;
+  ioc_ids: string[];
+}
+
+export interface InfectionIocEntityRef {
+  entity_kind: SightingEntityKind;
+  entity_id: string;
+  entity_name: string;
+}
+
+export interface InfectionIocSummary {
+  ioc_id: string;
+  entity_count: number;
+  entities: InfectionIocEntityRef[];
+}
+
+export interface InfectionSummary {
+  entities: InfectionEntitySummary[];
+  iocs: InfectionIocSummary[];
+}
+
+export interface InvestigationViewFilters {
+  compromise: CompromiseStatus[];
+  only_with_sightings: boolean;
+  min_threat: string | null;
+  time_from: string | null;
+  time_to: string | null;
+}
+
+export interface InvestigationViewDisplay {
+  show_topology_edges: boolean;
+  show_attack_edges: boolean;
+  show_ioc_badges: boolean;
+  show_step_numbers: boolean;
+}
+
+export interface InvestigationViewState {
+  version: 1;
+  hidden_network_ids: string[];
+  hidden_node_ids: string[];
+  filters: InvestigationViewFilters;
+  display: InvestigationViewDisplay;
+  layout: TopologyLayoutName;
+  positions: TopologyNodePosition[];
+  zoom: number;
+  pan_x: number;
+  pan_y: number;
+}
+
+export interface InvestigationView {
+  id: string;
+  name: string;
+  description: string;
+  state: InvestigationViewState;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface InvestigationViewSummary {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Firewall {
   id: string;
   network_id?: string;
@@ -325,10 +439,23 @@ export interface PartialApplySummary {
   commit_id?: string;
 }
 
+export interface LocalCaseFile {
+  file_name: string;
+  size_bytes: number;
+  modified_at?: string;
+}
+
+export interface PlatformInfo {
+  platform: 'android' | 'desktop';
+  cases_dir: string;
+  exports_dir: string;
+  inbox_dir: string;
+}
+
 export interface ApiResponse<T> {
   success: boolean;
   data?: T;
   error?: string;
 }
 
-export type View = 'dashboard' | 'networks' | 'assets' | 'topology' | 'timeline' | 'iocs' | 'notes' | 'activity' | 'export' | 'about';
+export type View = 'dashboard' | 'networks' | 'assets' | 'topology' | 'investigation' | 'timeline' | 'iocs' | 'notes' | 'activity' | 'export' | 'about';

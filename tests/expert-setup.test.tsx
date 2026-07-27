@@ -5,7 +5,7 @@ import ExpertSetup from '@/components/ExpertSetup';
 import type { ExpertIdentity, Network } from '@/types';
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
+vi.mock('@/lib/api', () => ({ invoke: invokeMock }));
 
 const network: Network = { id: 'zone-1', name: 'Office', subnet: '10.0.0.0/24', network_type: 'LAN', description: '', created_at: '2025-01-01T00:00:00Z' };
 

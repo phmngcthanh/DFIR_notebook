@@ -861,6 +861,8 @@ fn entity_order(entity_type: &str, deleting: bool) -> usize {
         "timeline_event" => 6,
         "note" => 6,
         "ioc" => 6,
+        "ioc_sighting" => 7,
+        "attack_edge" => 7,
         _ => 9,
     };
     if deleting {

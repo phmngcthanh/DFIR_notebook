@@ -13,6 +13,9 @@ dist-ssr
 *.local
 
 # Local case/export data
+cases/
+server-cert.pem
+server-key.pem
 *.db
 *.sqlite
 *.sqlite3

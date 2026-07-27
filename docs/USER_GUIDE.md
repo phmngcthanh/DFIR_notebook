@@ -6,7 +6,7 @@ Last reviewed: 2026-07-19
 
 ## 1. Purpose
 
-DFIR Network Investigator is an offline desktop workbench for manually documenting a network incident when responders do not have a shared SIEM or dependable access to the client environment. It keeps the developing network picture, computer status, interfaces, findings, timeline, IOCs, and notes in one local SQLite case file.
+DFIR Network Investigator is a browser workbench for manually documenting a network incident when responders do not have a shared SIEM or dependable access to the client environment. It keeps the developing network picture, computer status, interfaces, findings, timeline, IOCs, and notes in one encrypted SQLite case file held by a case server the team shares.
 
 The application is designed to answer six early-response questions quickly:
 
@@ -21,38 +21,27 @@ It is a documentation and coordination tool. It does not collect evidence automa
 
 ## 2. Installation and startup
 
-Use the package built for your operating system. The verified Windows setup executable is:
+Open the address your operator gives you in a normal browser — there is nothing to install on your machine. The first time you connect over HTTPS with a self-signed certificate, compare the fingerprint the browser shows against the one the operator read out at startup, then accept it once.
 
-- `src-tauri/target/release/bundle/nsis/DFIR-Investigator_1.0.20_x64-setup.exe`
+Operators: see [SERVER.md](SERVER.md) for running the server, its flags, TLS, and the case directory.
 
-The standalone release executable is `src-tauri/target/release/dfir-investigator.exe`. It is a GUI application, so it normally prints nothing in a terminal; it should open a window titled **DFIR Network Investigator**.
-
-Windows requires Microsoft Edge WebView2 Runtime, which is normally present on supported Windows systems. Linux requires the normal WebKitGTK desktop runtime packages for the distribution. macOS uses the system WebKit framework; unsigned local builds may be blocked by Gatekeeper policy.
-
-For development, use:
-
-```powershell
-npm install
-npm run tauri-dev
-```
-
-`npm run dev` starts only the web frontend and cannot provide native dialogs, SQLite case access, encryption, or other Tauri operations. Full prerequisites, build gates, artifact paths, and `dlltool.exe` troubleshooting are in [RUNNING_AND_BUILDING.md](RUNNING_AND_BUILDING.md).
+Because your work now lives on the server rather than on your laptop, two habits change: closing the tab ends your session, and **End Session** in the sidebar is what you use when leaving the workstation.
 
 ## 3. Case and identity concepts
 
 ### 3.1 Case file
 
-A case is one SQLCipher-encrypted `.db` file selected by the user. It contains the investigation data and local change history. The application opens one case at a time and requires that file's shared database password whenever it is opened.
+A case is one SQLCipher-encrypted `.db` file in the server's case directory. It contains the investigation data and the change history. Unlocking it requires that case's shared password, and that password is the only credential — there are no user accounts.
 
-The database password belongs to the physical file copy, not to a username, machine, or logical case UUID. A direct copy initially accepts the same password. If machine A and machine B each rekey their own copies, the copies may use different passwords while still representing the same merge-compatible case.
+The password belongs to the file, not to a username, machine, or logical case UUID. A copy taken elsewhere initially accepts the same password; a copy that is independently rekeyed may use a different password while still representing the same merge-compatible case.
 
-Keep the case file on a local or organization-approved protected location. Do not allow two running application instances to edit the same file over an unreliable network share.
+Everyone unlocking the same case on the server works on the same file at the same time. Your session ends when you close the tab, select **End Session**, or stay idle past the operator's timeout.
 
 ### 3.2 Session expert
 
-The **active expert** is the name attributed to changes made during the current application session. It is not an account and is never checked against either password. Names are self-declared operational attribution, not cryptographic proof of identity.
+The **active expert** is the name attributed to changes made during the current session. It is not an account and is never checked against either password. Names are self-declared operational attribution, not cryptographic proof of identity.
 
-When opening an existing case, enter:
+When unlocking a case, enter:
 
 - expert name;
 - optional assignment label, such as `Room 204`, `Finance`, or `DMZ`; and
@@ -66,30 +55,34 @@ Click the expert name in the left sidebar to change the active session identity 
 
 ### Create
 
-1. Select **New Case**.
-2. Enter the case name and expert name for this first work session. Client and description are optional.
-3. Enter and confirm a database-file password of at least 6 characters.
-4. Select **Create Case** and choose the `.db` file location in the native Save dialog.
+Only available when the operator started the server with `--allow-create`; otherwise they add case files for you.
 
-The application appends `.db` when needed and refuses to overwrite an existing file.
+1. Select **Create a new case on this server**.
+2. Enter the case name and your expert name. Client and description are optional.
+3. Enter and confirm the case password.
+4. Select **Create Case**.
 
-### Open
+The password now travels over the network, so use a long passphrase rather than the six-character minimum. Everyone who will work on this case needs it.
 
-1. Select **Open Case**.
-2. Enter the database-file password and select the `.db` file.
-3. After it unlocks, enter the active expert name and optional focus.
+### Unlock
 
-Before using the file, the application authenticates and decrypts its SQLCipher pages, validates the expected schema and single case record, runs required migrations, repairs supported legacy references, checks encrypted-page integrity, checks SQLite integrity, and checks foreign-key consistency.
+1. Pick the case from the list.
+2. Enter your expert name and the case password.
+3. Select **Unlock Case**.
 
-Use **Lock / Close Case** in the sidebar when handing over or leaving the workstation. It drops the open connection and requires the database password to reopen the file. It does not depend on the expert name.
+Before using the file, the server authenticates and decrypts its SQLCipher pages, validates the expected schema and single case record, runs required migrations, repairs supported legacy references, checks encrypted-page integrity, checks SQLite integrity, and checks foreign-key consistency.
 
-### Change the database password
+Repeated wrong passwords from one address are locked out for a while, so if you are locked out, wait rather than retrying.
 
-Open **Dashboard → Database file security**, enter the current password, then enter and confirm the new password. This re-encrypts only the open physical copy. It does not change the expert name, case UUID, exported files, or passwords on other database copies. There is no password recovery.
+Use **End Session** in the sidebar when handing over or leaving the workstation. It drops your token; the case password is required to get back in. It does not depend on the expert name.
+
+### Change the case password
+
+Open **Dashboard → Database file security**, enter the current password, then enter and confirm the new password. Everyone else working on that case is signed out immediately, because their access was granted against the old password — tell the team before you do it. This does not change the expert name, case UUID, or exported files. There is no password recovery.
 
 ### Convert an older unencrypted case
 
-From **Open Case**, select **Convert a legacy unencrypted case**, enter and confirm a new password, choose the old `.db`, and choose where to save the encrypted copy. The app preserves the old plaintext source and opens the validated encrypted copy. Dispose of the plaintext source only under the site's approved data-handling procedure.
+Not available in the browser, because it needs two local file paths. Convert with the desktop build, then ask the operator to put the encrypted copy in the server's case directory. Dispose of the plaintext source only under the site's approved data-handling procedure.
 
 ## 5. Recommended first-response workflow
 
@@ -183,7 +176,19 @@ Use **IOCs** for indicators such as IP addresses, hashes, domains, and URLs. Rec
 
 Use **Notes** for findings, hypotheses, evidence references, decisions, and handover information. Notes support a safe Markdown subset. Raw HTML is displayed as text rather than executed.
 
-### Step 8: Use the dashboard as the coverage board
+### Step 8: Rebuild the intrusion in the Investigation Graph
+
+Open **Investigation**. It starts from the same networks, assets, and firewalls as Topology, then adds the attacker's story:
+
+- **Record IOC sightings.** Select an entity and use *IOC sighting* to link an existing IOC to that asset, network, or firewall with an optional time, location (file path, registry key, log source), and note. When the target is an asset, an explicit checkbox can raise its compromise status to suspected or infected in the same step — the graph, asset list, and IOC list all update from the same record, and a status is never silently downgraded.
+- **Draw attack edges.** Use *Draw attack edge* and click source then target, or *Add attack edge* for an external origin such as "Internet". Each edge records a title, movement type (initial access, lateral movement, and so on), confidence, optional MITRE tactic/technique, an optional occurrence time or linked timeline event, and linked IOCs. Edges are numbered in pathway order (step number first, then time).
+- **Replay the intrusion.** The playback slider highlights the pathway up to any step so the sequence of compromise can be walked through during a briefing.
+- **Curate the picture.** Hide individual nodes or whole networks, filter to suspected/infected entities, entities with sightings, or a minimum IOC threat level, and toggle topology links or attack edges. The *Hidden* panel restores anything hidden by hand. Nodes that anchor a drawn attack edge stay visible through filters unless hidden explicitly.
+- **Save views.** Name the current combination of visibility, filters, layout, positions, and camera, and reload it later. Saved views are shared presentation state: they travel with snapshots but stay out of evidence history and expert bundles.
+
+Sightings and attack edges are evidence: they are attributed in history, merge like other entities, and appear in exports and text reports. Deleting an IOC removes its sightings and unlinks it from edges; deleting an asset or firewall removes the sightings and edges that referenced it; a network with sightings or edges refuses deletion until they are removed.
+
+### Step 9: Use the dashboard as the coverage board
 
 The **Dashboard** shows full-case counts, including:
 
@@ -207,11 +212,48 @@ Important safeguards:
 - Updates or deletes that match no record return an error.
 - Multi-table changes and imports use SQLite transactions.
 
-## 7. Daily expert collaboration and merge
+## 7. Working alongside the rest of the team
+
+Everyone unlocking this case on the server is editing the same file. There is no
+daily merge for ordinary work:
+
+1. Each expert unlocks the case, enters their own name, and optionally sets a focus scope.
+2. Everyone records network, asset/NIC, status, timeline, IOC, note, firewall, and connection changes as they go.
+3. Every change is committed with its author and shows up in **Activity Board** and the audit history.
+4. Other open browsers pick up your edits within about five seconds and show a "case was updated" notice. The sidebar shows how many experts are working right now.
+
+Two people editing the same record at the same moment is last-write-wins — the
+last save is what remains, and both edits stay visible in the history. Split work
+by zone, department, or room the way you would offline, and use the focus scope
+to label it.
+
+### Bringing in an expert who worked offline
+
+Someone who worked in the desktop app can still hand their work over. On the
+server, open **Case Transfer** and:
+
+1. select **Load for review** and choose their bundle file;
+2. review topology/PC configuration and timeline changes;
+3. accept or reject each entity change;
+4. resolve same-field conflicts by choosing current or incoming value; and
+5. select **Apply selected**.
+
+Loading a bundle creates an in-memory preview only. Applying accepted changes is
+one transaction and adds a merge commit with both history parents.
+
+Classifications include:
+
+- **clean**: incoming change can be applied directly;
+- **auto mergeable**: local and incoming work changed different fields;
+- **conflict**: both sides changed the same field differently;
+- **delete conflict**: a deletion conflicts with local edits; and
+- **already applied**: the imported source change was previously merged.
+
+Bundles from another case ID are rejected. Unknown baselines require explicit review.
 
 ### Structured information and LLM-assisted intake
 
-Use **Expert Merge → Plain structured partial import** when information comes from prose, another team's notes, a script, or an LLM rather than a shared-baseline expert bundle.
+Use **Case Transfer → Plain structured partial import** when information comes from prose, another team's notes, a script, or an LLM.
 
 1. Load or save the case-aware template.
 2. Give only the required template/context to an approved person or model.
@@ -223,67 +265,26 @@ Use **Expert Merge → Plain structured partial import** when information comes 
 
 Add-only retains current notes/timeline records and adds expert records with different UUIDs. Use incoming versions also updates matching UUIDs but never deletes unrelated local records. See [INPUT_FORMATS.md](INPUT_FORMATS.md) for the complete field contract and examples, and [PARTIAL_IMPORT.md](PARTIAL_IMPORT.md) for the review workflow.
 
-### 7.1 Prepare a shared baseline
+## 8. Snapshot backup and add-only import
 
-1. The merge lead opens the agreed master case.
-2. Resolve existing work.
-3. Open **Expert Merge**.
-4. Select **Mark current head** under Shared baseline.
-5. Distribute identical copies of that `.db` file to experts.
+**Download snapshot** exports the complete case structure to your browser's downloads. **Import add-only** accepts only a matching case ID, inserts missing UUID records, and skips existing UUIDs without overwriting them. The result shows inserted/skipped counts by entity.
 
-### 7.2 Expert work
+The authoritative backup is the `.db` file itself, which the operator copies from the server's case directory.
 
-Each expert:
-
-1. opens their copy;
-2. enters their own active expert name and optional focus;
-3. records network, asset/NIC, status, timeline, IOC, note, firewall, and connection changes; and
-4. selects **Save change bundle** at the end of the work period.
-
-The bundle contains attributed commits since the shared baseline, not a replacement database.
-
-### 7.3 Team review
-
-On the master case, the merge lead:
-
-1. selects **Load for review**;
-2. chooses an expert bundle;
-3. reviews topology/PC configuration and timeline changes;
-4. accepts or rejects each entity change;
-5. resolves same-field conflicts by choosing current master or incoming value; and
-6. selects **Apply selected**.
-
-Loading a bundle creates an in-memory preview only. Applying accepted changes is one transaction and adds a merge commit with the local and incoming history parents.
-
-Classifications include:
-
-- **clean**: incoming change can be applied directly;
-- **auto mergeable**: local and incoming work changed different fields;
-- **conflict**: both sides changed the same field differently;
-- **delete conflict**: a deletion conflicts with local edits; and
-- **already applied**: the imported source change was previously merged.
-
-Bundles from another case ID are rejected. Unknown baselines require explicit review. After all agreed work is applied, mark the new shared baseline and redistribute the new master.
-
-## 8. Snapshot backup and legacy import
-
-**Save snapshot** exports the complete case structure. **Import snapshot** accepts only a matching case ID, inserts missing UUID records, and skips existing UUIDs without overwriting them. The result shows inserted/skipped counts by entity.
-
-Snapshot import is not the preferred way to reconcile concurrent edits. Use expert change bundles for field-level review and merge.
 
 ## 9. Plain and encrypted portable files
 
 ### Unencrypted mode
 
-Leave **Encrypt new snapshots and change bundles** unchecked.
+Leave **Encrypt downloaded snapshots** unchecked.
 
 Outputs are formatted UTF-8 JSON that can be opened as text and parsed by other software or programming languages. No wrapper changes the data structure.
 
 ### Encrypted mode
 
-1. Check **Encrypt new snapshots and change bundles**.
+1. Check **Encrypt downloaded snapshots**.
 2. Enter and confirm an export password of at least 6 characters.
-3. Save the snapshot or change bundle.
+3. Download the snapshot.
 
 The output uses the `.dfirx` extension. The original JSON bytes are encrypted inside a portable, versioned envelope. The password:
 
@@ -304,8 +305,7 @@ The **Text parser** converts either a snapshot or expert change bundle into a hu
 
 1. For an encrypted input, enter its password under **Import / decrypt password**. Leave blank for plain JSON.
 2. Select **Create text report**.
-3. Choose the `.json` or `.dfirx` input.
-4. Choose the `.txt` output location.
+3. Choose the `.json` or `.dfirx` input. Your browser saves the `.txt` report to its downloads folder.
 
 The parser does not open or modify a case database. The output text is display-only and cannot be imported back into the application.
 
@@ -315,29 +315,27 @@ Important: the `.txt` result is unencrypted and can contain the full sensitive i
 
 | Material | Built-in application encryption | Required handling |
 |---|---|---|
-| Live `.db` case | Yes; SQLCipher page encryption and authentication | Keep a recoverable password copy under approved procedure; also use endpoint/full-disk controls |
+| Live `.db` case on the server | Yes; SQLCipher page encryption and authentication | Keep a recoverable password copy under approved procedure; also use full-disk controls on the server |
 | Plain `.json` export | No | Use only where interoperability or inspection is required; protect externally |
 | Encrypted `.dfirx` export | Yes; password-derived authenticated encryption | Protect password separately; retain backups because there is no recovery |
 | Text-parser `.txt` | No | Treat as sensitive plain text |
 | Topology `.png` | No | Treat as sensitive plain image |
 
-The database password and optional export password are independent. Neither authenticates an expert's identity. Expert names are audit labels, not digital signatures. SQLCipher protects the closed database contents, but not an unlocked process, screenshots, filenames, plain JSON/text/PNG output, or a compromised endpoint.
+The case password and optional export password are independent. Neither authenticates an expert's identity. Expert names are audit labels, not digital signatures. SQLCipher protects the closed database contents, but not an unlocked case in the server's memory, screenshots, case filenames, plain JSON/text/PNG output, or a compromised endpoint. Because the case password now travels over the network, use a long passphrase and keep the server on HTTPS.
 
 ## 12. Troubleshooting
 
-### Application exits immediately
+### The page will not load, or the browser warns about the certificate
 
-Use the current rebuilt executable or installer. Ensure WebView2 Runtime is installed.
+Confirm the address with the operator, and compare the certificate fingerprint the browser shows against the one printed when the server started. Do not accept a fingerprint that does not match.
 
-### Development build reports `dlltool.exe` missing
+### "Too many failed unlock attempts from this address"
 
-The GNU Rust target was selected on Windows. Install and select MSVC:
+Five wrong passwords within fifteen minutes locks your address out. Wait it out and confirm the password rather than retrying.
 
-```powershell
-rustup toolchain install stable-x86_64-pc-windows-msvc
-rustup default stable-x86_64-pc-windows-msvc
-npm run tauri-dev
-```
+### "This session has expired. Unlock the case again"
+
+Your session was idle past the operator's timeout, someone changed the case password, or the last expert left and the case closed. Unlock again.
 
 ### Import says the case is different
 
@@ -363,8 +361,7 @@ This is intentional. The event remains as evidence but becomes unassigned.
 2. Check suspected/infected systems and confirm supporting timeline entries.
 3. Review secondary NIC edges and unexpected cross-zone connections.
 4. Add unresolved assumptions and handover notes.
-5. Save an encrypted snapshot when handling rules require it.
-6. Each expert saves a change bundle.
-7. The team reviews and applies agreed changes on the master.
-8. Mark the new shared baseline.
-9. Lock the master, back it up, and redistribute the same new master database under approved data-at-rest protection. Direct copies initially have the master's database password; each expert may rekey their own copy if procedure requires it.
+5. Download an encrypted snapshot when handling rules require it.
+6. Review the day's work in **Activity Board** and the audit history.
+7. Select **End Session** before leaving the workstation.
+8. Operator: back up the `.db` files from the case directory under approved data-at-rest protection. A copy initially accepts the same case password.

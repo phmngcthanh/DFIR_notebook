@@ -1,8 +1,10 @@
 mod db;
 mod history;
+mod ioc_export;
 mod partial_import;
 mod portable_export;
 mod secure_db;
+mod storage;
 
 use db::*;
 use history::*;
@@ -13,7 +15,7 @@ use secure_db::*;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
@@ -112,6 +114,7 @@ fn selected_path(file_path: tauri_plugin_dialog::FilePath) -> AppResult<PathBuf>
         .ok_or_else(|| "Selected location is not a local filesystem path".to_string())
 }
 
+#[cfg(not(target_os = "android"))]
 fn ensure_extension(mut path: PathBuf, extension: &str) -> PathBuf {
     if path.extension().is_none() {
         path.set_extension(extension);
@@ -161,18 +164,27 @@ fn create_new_case(
         Ok(actor) => actor,
         Err(error) => return Response::err(error),
     };
-    let selection = app_handle
-        .dialog()
-        .file()
-        .set_file_name(format!("{}.db", sanitize_filename(&name)))
-        .add_filter("DFIR Case", &["db"])
-        .blocking_save_file();
-    let path = match selection
-        .and_then(|value| selected_path(value).ok())
-        .map(|path| ensure_extension(path, "db"))
-    {
-        Some(path) => path,
-        None => return Response::err("Case creation cancelled"),
+    // Android has no native save dialog; cases live in app-private storage.
+    #[cfg(target_os = "android")]
+    let path = match storage::cases_dir(&app_handle) {
+        Ok(dir) => storage::unique_path(&dir, &sanitize_filename(&name), "db"),
+        Err(error) => return Response::err(error),
+    };
+    #[cfg(not(target_os = "android"))]
+    let path = {
+        let selection = app_handle
+            .dialog()
+            .file()
+            .set_file_name(format!("{}.db", sanitize_filename(&name)))
+            .add_filter("DFIR Case", &["db"])
+            .blocking_save_file();
+        match selection
+            .and_then(|value| selected_path(value).ok())
+            .map(|path| ensure_extension(path, "db"))
+        {
+            Some(path) => path,
+            None => return Response::err("Case creation cancelled"),
+        }
     };
     if path.exists() {
         return Response::err("Refusing to overwrite an existing case file");
@@ -235,7 +247,11 @@ async fn open_existing_case(
         None => return Response::err("Open cancelled"),
     };
     let state = app_handle.state::<DbState>();
-    let mut conn = match open_encrypted_connection(&path, database_password.as_str()) {
+    open_case_at(&state, path, database_password.as_str())
+}
+
+fn open_case_at(state: &DbState, path: PathBuf, database_password: &str) -> Response<String> {
+    let mut conn = match open_encrypted_connection(&path, database_password) {
         Ok(conn) => conn,
         Err(error) => return Response::err(format!("Failed to open case: {error}")),
     };
@@ -267,9 +283,88 @@ async fn open_existing_case(
 }
 
 #[tauri::command]
+fn open_local_case(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    file_name: String,
+    database_password: String,
+) -> Response<String> {
+    let database_password = Zeroizing::new(database_password);
+    let dir = match storage::cases_dir(&app_handle) {
+        Ok(dir) => dir,
+        Err(error) => return Response::err(error),
+    };
+    let path = match storage::safe_child_path(&dir, &file_name) {
+        Ok(path) => path,
+        Err(error) => return Response::err(error),
+    };
+    if !path.is_file() {
+        return Response::err("Case file was not found");
+    }
+    open_case_at(&state, path, database_password.as_str())
+}
+
+#[tauri::command]
+fn list_local_cases(app_handle: tauri::AppHandle) -> Response<Vec<storage::LocalCaseFile>> {
+    match storage::list_case_files(&app_handle) {
+        Ok(cases) => Response::ok(cases),
+        Err(error) => Response::err(error),
+    }
+}
+
+#[derive(Serialize)]
+struct PlatformInfo {
+    platform: String,
+    cases_dir: String,
+    exports_dir: String,
+    inbox_dir: String,
+}
+
+#[tauri::command]
+fn get_platform_info(app_handle: tauri::AppHandle) -> Response<PlatformInfo> {
+    let dirs = storage::cases_dir(&app_handle).and_then(|cases| {
+        storage::exports_dir(&app_handle)
+            .and_then(|exports| storage::inbox_dir(&app_handle).map(|inbox| (cases, exports, inbox)))
+    });
+    match dirs {
+        Ok((cases, exports, inbox)) => Response::ok(PlatformInfo {
+            platform: if cfg!(target_os = "android") {
+                "android".to_string()
+            } else {
+                "desktop".to_string()
+            },
+            cases_dir: cases.to_string_lossy().to_string(),
+            exports_dir: exports.to_string_lossy().to_string(),
+            inbox_dir: inbox.to_string_lossy().to_string(),
+        }),
+        Err(error) => Response::err(error),
+    }
+}
+
+#[tauri::command]
 fn migrate_legacy_case(
     app_handle: tauri::AppHandle,
     state: State<DbState>,
+    database_password: String,
+) -> Response<String> {
+    migrate_legacy_case_impl(app_handle, state, database_password)
+}
+
+// Legacy migration is a desktop workflow: it needs two native file dialogs
+// and plaintext legacy databases only ever existed on desktop installs.
+#[cfg(target_os = "android")]
+fn migrate_legacy_case_impl(
+    _app_handle: tauri::AppHandle,
+    _state: State<'_, DbState>,
+    _database_password: String,
+) -> Response<String> {
+    Response::err("Legacy case migration is a desktop-only workflow")
+}
+
+#[cfg(not(target_os = "android"))]
+fn migrate_legacy_case_impl(
+    app_handle: tauri::AppHandle,
+    state: State<'_, DbState>,
     database_password: String,
 ) -> Response<String> {
     let database_password = Zeroizing::new(database_password);
@@ -906,6 +1001,191 @@ fn remove_ioc(state: State<DbState>, id: String) -> Response<bool> {
 }
 
 #[tauri::command]
+fn list_ioc_sightings(
+    state: State<DbState>,
+    ioc_id: Option<String>,
+    entity_kind: Option<String>,
+    entity_id: Option<String>,
+) -> Response<Vec<IocSighting>> {
+    with_conn(&state, |conn| {
+        get_ioc_sightings(
+            conn,
+            ioc_id.as_deref(),
+            entity_kind.as_deref(),
+            entity_id.as_deref(),
+        )
+    })
+}
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn create_new_ioc_sighting(
+    state: State<DbState>,
+    ioc_id: String,
+    entity_kind: String,
+    entity_id: String,
+    sighted_at: Option<String>,
+    location: String,
+    note: String,
+    set_compromise_status: Option<String>,
+) -> Response<IocSighting> {
+    with_actor_conn(&state, |conn, actor| {
+        create_ioc_sighting(
+            conn,
+            actor,
+            &ioc_id,
+            &entity_kind,
+            &entity_id,
+            sighted_at.as_deref(),
+            &location,
+            &note,
+            set_compromise_status.as_deref(),
+        )
+    })
+}
+#[tauri::command]
+fn update_existing_ioc_sighting(
+    state: State<DbState>,
+    id: String,
+    sighted_at: Option<String>,
+    location: String,
+    note: String,
+) -> Response<IocSighting> {
+    with_actor_conn(&state, |conn, actor| {
+        update_ioc_sighting(conn, actor, &id, sighted_at.as_deref(), &location, &note)
+    })
+}
+#[tauri::command]
+fn remove_ioc_sighting(state: State<DbState>, id: String) -> Response<bool> {
+    with_actor_conn(&state, |conn, actor| {
+        delete_ioc_sighting(conn, actor, &id).map(|_| true)
+    })
+}
+#[tauri::command]
+fn get_infection_summary(state: State<DbState>) -> Response<InfectionSummary> {
+    with_conn(&state, |conn| db::get_infection_summary(conn))
+}
+
+#[tauri::command]
+fn list_attack_edges(state: State<DbState>) -> Response<Vec<AttackEdge>> {
+    with_conn(&state, |conn| get_attack_edges(conn))
+}
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn create_new_attack_edge(
+    state: State<DbState>,
+    source_kind: String,
+    source_id: String,
+    target_kind: String,
+    target_id: String,
+    title: String,
+    description: String,
+    edge_type: String,
+    confidence: String,
+    mitre_tactic: Option<String>,
+    mitre_technique: Option<String>,
+    occurred_at: Option<String>,
+    timeline_event_id: Option<String>,
+    sequence: Option<i64>,
+    ioc_ids: Vec<String>,
+) -> Response<AttackEdge> {
+    with_actor_conn(&state, |conn, actor| {
+        create_attack_edge(
+            conn,
+            actor,
+            &source_kind,
+            &source_id,
+            &target_kind,
+            &target_id,
+            &title,
+            &description,
+            &edge_type,
+            &confidence,
+            mitre_tactic.as_deref(),
+            mitre_technique.as_deref(),
+            occurred_at.as_deref(),
+            timeline_event_id.as_deref(),
+            sequence,
+            ioc_ids,
+        )
+    })
+}
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn update_existing_attack_edge(
+    state: State<DbState>,
+    id: String,
+    source_kind: String,
+    source_id: String,
+    target_kind: String,
+    target_id: String,
+    title: String,
+    description: String,
+    edge_type: String,
+    confidence: String,
+    mitre_tactic: Option<String>,
+    mitre_technique: Option<String>,
+    occurred_at: Option<String>,
+    timeline_event_id: Option<String>,
+    sequence: i64,
+    ioc_ids: Vec<String>,
+) -> Response<AttackEdge> {
+    with_actor_conn(&state, |conn, actor| {
+        update_attack_edge(
+            conn,
+            actor,
+            &id,
+            &source_kind,
+            &source_id,
+            &target_kind,
+            &target_id,
+            &title,
+            &description,
+            &edge_type,
+            &confidence,
+            mitre_tactic.as_deref(),
+            mitre_technique.as_deref(),
+            occurred_at.as_deref(),
+            timeline_event_id.as_deref(),
+            sequence,
+            ioc_ids,
+        )
+    })
+}
+#[tauri::command]
+fn remove_attack_edge(state: State<DbState>, id: String) -> Response<bool> {
+    with_actor_conn(&state, |conn, actor| {
+        delete_attack_edge(conn, actor, &id).map(|_| true)
+    })
+}
+
+#[tauri::command]
+fn list_investigation_views(state: State<DbState>) -> Response<Vec<InvestigationViewSummary>> {
+    with_conn(&state, |conn| get_investigation_views(conn))
+}
+#[tauri::command]
+fn get_investigation_view(state: State<DbState>, id: String) -> Response<InvestigationView> {
+    with_conn(&state, |conn| db::get_investigation_view(conn, &id))
+}
+#[tauri::command]
+fn save_investigation_view(
+    state: State<DbState>,
+    id: Option<String>,
+    name: String,
+    description: String,
+    view_state: serde_json::Value,
+) -> Response<InvestigationView> {
+    with_conn(&state, |conn| {
+        db::save_investigation_view(conn, id.as_deref(), &name, &description, &view_state)
+    })
+}
+#[tauri::command]
+fn remove_investigation_view(state: State<DbState>, id: String) -> Response<bool> {
+    with_conn(&state, |conn| {
+        delete_investigation_view(conn, &id).map(|_| true)
+    })
+}
+
+#[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn create_new_firewall(
     state: State<DbState>,
@@ -1453,6 +1733,62 @@ fn save_export_as_text(app_handle: tauri::AppHandle, password: Option<String>) -
     )
 }
 
+// The four commands below take text rather than opening a dialog, so the same
+// React code path serves both shells: the seam in `src/lib/api.ts` supplies the
+// file (native dialog here, file input in the browser) and these do the work.
+#[tauri::command]
+fn render_export_report(contents: String, password: Option<String>) -> Response<String> {
+    let password = protected_password(password);
+    let decoded = match decode_portable_text(&contents, password_ref(&password)) {
+        Ok(decoded) => decoded,
+        Err(error) => return Response::err(error),
+    };
+    match render_export_text(&decoded.plaintext) {
+        Ok(report) => Response::ok(report),
+        Err(error) => Response::err(error),
+    }
+}
+
+#[tauri::command]
+fn load_change_bundle_text(
+    state: State<DbState>,
+    contents: String,
+    password: Option<String>,
+) -> Response<MergePreview> {
+    let password = protected_password(password);
+    let decoded = match decode_portable_text(&contents, password_ref(&password)) {
+        Ok(decoded) => decoded,
+        Err(error) => return Response::err(error),
+    };
+    stage_change_bundle(&state, &decoded.plaintext)
+}
+
+#[tauri::command]
+fn export_iocs_csv(state: State<DbState>, ids: Option<Vec<String>>) -> Response<String> {
+    with_conn(&state, |conn| {
+        Ok(ioc_export::iocs_to_csv(&filter_iocs(get_iocs(conn)?, &ids)))
+    })
+}
+
+#[tauri::command]
+fn export_iocs_stix(state: State<DbState>, ids: Option<Vec<String>>) -> Response<String> {
+    with_conn(&state, |conn| {
+        ioc_export::iocs_to_stix(&filter_iocs(get_iocs(conn)?, &ids))
+    })
+}
+
+/// Narrow the IOC list to the analyst's currently filtered view; `None` exports
+/// the whole case.
+fn filter_iocs(iocs: Vec<Ioc>, ids: &Option<Vec<String>>) -> Vec<Ioc> {
+    match ids {
+        Some(ids) => iocs
+            .into_iter()
+            .filter(|ioc| ids.iter().any(|id| id == &ioc.id))
+            .collect(),
+        None => iocs,
+    }
+}
+
 #[tauri::command]
 fn mark_current_shared_baseline(state: State<DbState>) -> Response<String> {
     with_conn(&state, |conn| mark_shared_baseline(conn))
@@ -1529,11 +1865,17 @@ fn load_change_bundle_from_file(
         Ok(decoded) => decoded,
         Err(error) => return Response::err(error),
     };
-    let bundle = match parse_change_bundle(&decoded.plaintext) {
+    stage_change_bundle(&state, &decoded.plaintext)
+}
+
+/// Parse an already-decrypted bundle, preview it against the open case, and
+/// hold it in memory. Shared by the native-dialog and text-input entry points.
+fn stage_change_bundle(state: &State<DbState>, plaintext: &str) -> Response<MergePreview> {
+    let bundle = match parse_change_bundle(plaintext) {
         Ok(bundle) => bundle,
         Err(error) => return Response::err(error),
     };
-    let preview = match with_conn(&state, |conn| preview_bundle(conn, &bundle)) {
+    let preview = match with_conn(state, |conn| preview_bundle(conn, &bundle)) {
         Response {
             success: true,
             data: Some(preview),
@@ -1634,6 +1976,7 @@ fn get_db_path(state: State<DbState>) -> Response<Option<String>> {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn save_text_file(
     app_handle: &tauri::AppHandle,
     default_name: impl AsRef<str>,
@@ -1660,6 +2003,34 @@ fn save_text_file(
     }
 }
 
+// Android has no save dialog: exports land in the app-private exports
+// directory and the returned path tells the user where (retrievable via the
+// share flow later, or `adb pull` during development).
+#[cfg(target_os = "android")]
+fn save_text_file(
+    app_handle: &tauri::AppHandle,
+    default_name: impl AsRef<str>,
+    _label: &str,
+    extension: &str,
+    contents: &str,
+) -> Response<String> {
+    let dir = match storage::exports_dir(app_handle) {
+        Ok(dir) => dir,
+        Err(error) => return Response::err(error),
+    };
+    let stem = Path::new(default_name.as_ref())
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("dfir-export")
+        .to_string();
+    let path = storage::unique_path(&dir, &stem, extension);
+    match fs::write(&path, contents) {
+        Ok(()) => Response::ok(path.to_string_lossy().to_string()),
+        Err(error) => Response::err(format!("Failed to write file: {error}")),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
 fn pick_text_file(
     app_handle: &tauri::AppHandle,
     label: &str,
@@ -1672,7 +2043,30 @@ fn pick_text_file(
         .blocking_pick_file()
         .ok_or_else(|| "Open cancelled".to_string())?;
     let path = selected_path(selection)?;
-    let length = fs::metadata(&path)
+    read_portable_file(&path)
+}
+
+// Android file picks return content:// URIs that rusqlite/fs cannot use, so
+// import commands read the newest matching file from the app-private inbox
+// directory instead (populated via `adb push` or a future share integration).
+#[cfg(target_os = "android")]
+fn pick_text_file(
+    app_handle: &tauri::AppHandle,
+    _label: &str,
+    extensions: &[&str],
+) -> AppResult<String> {
+    let dir = storage::inbox_dir(app_handle)?;
+    let path = storage::newest_file_with_extensions(&dir, extensions)?.ok_or_else(|| {
+        format!(
+            "No matching file in the import inbox. Copy the file into {} and retry.",
+            dir.display()
+        )
+    })?;
+    read_portable_file(&path)
+}
+
+fn read_portable_file(path: &Path) -> AppResult<String> {
+    let length = fs::metadata(path)
         .map_err(|error| format!("Failed to inspect file: {error}"))?
         .len();
     if length > MAX_PORTABLE_FILE_BYTES {
@@ -1682,6 +2076,62 @@ fn pick_text_file(
         ));
     }
     fs::read_to_string(path).map_err(|error| format!("Failed to read file: {error}"))
+}
+
+/// Platform seam for `downloadText()` in `src/lib/api.ts`. The browser writes a
+/// download; this opens the native save dialog with the same suggested name, so
+/// feature components never branch on which shell they are running in.
+#[tauri::command]
+fn save_text_download(
+    app_handle: tauri::AppHandle,
+    filename: String,
+    contents: String,
+) -> Response<String> {
+    let extension = filename.rsplit('.').next().unwrap_or("txt").to_string();
+    save_text_file(&app_handle, &filename, "DFIR file", &extension, &contents)
+}
+
+/// Platform seam for `pickTextFile()`. Returns `None` when the investigator
+/// cancels the dialog, matching the browser file input resolving to null.
+#[tauri::command]
+fn open_text_upload(app_handle: tauri::AppHandle) -> Response<Option<PickedTextFile>> {
+    match pick_named_text_file(&app_handle) {
+        Ok(value) => Response::ok(value),
+        Err(error) => Response::err(error),
+    }
+}
+
+#[derive(Serialize)]
+struct PickedTextFile {
+    name: String,
+    text: String,
+}
+
+fn pick_named_text_file(app_handle: &tauri::AppHandle) -> AppResult<Option<PickedTextFile>> {
+    let Some(selection) = app_handle
+        .dialog()
+        .file()
+        .add_filter("DFIR file", &["json", "dfirx", "txt"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = selected_path(selection)?;
+    let length = fs::metadata(&path)
+        .map_err(|error| format!("Failed to inspect file: {error}"))?
+        .len();
+    if length > MAX_PORTABLE_FILE_BYTES {
+        return Err(format!(
+            "Refusing to open a portable file larger than {} MiB",
+            MAX_PORTABLE_FILE_BYTES / 1024 / 1024
+        ));
+    }
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let text = fs::read_to_string(&path).map_err(|error| format!("Failed to read file: {error}"))?;
+    Ok(Some(PickedTextFile { name, text }))
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -1712,6 +2162,9 @@ pub fn run() {
             get_current_expert,
             create_new_case,
             open_existing_case,
+            open_local_case,
+            list_local_cases,
+            get_platform_info,
             migrate_legacy_case,
             change_database_password,
             close_current_case,
@@ -1751,6 +2204,19 @@ pub fn run() {
             update_existing_ioc,
             list_iocs,
             remove_ioc,
+            list_ioc_sightings,
+            create_new_ioc_sighting,
+            update_existing_ioc_sighting,
+            remove_ioc_sighting,
+            get_infection_summary,
+            list_attack_edges,
+            create_new_attack_edge,
+            update_existing_attack_edge,
+            remove_attack_edge,
+            list_investigation_views,
+            get_investigation_view,
+            save_investigation_view,
+            remove_investigation_view,
             create_new_firewall,
             update_existing_firewall,
             list_firewalls,
@@ -1786,6 +2252,12 @@ pub fn run() {
             refresh_pending_change_bundle,
             apply_pending_change_bundle,
             discard_pending_change_bundle,
+            render_export_report,
+            load_change_bundle_text,
+            export_iocs_csv,
+            export_iocs_stix,
+            save_text_download,
+            open_text_upload,
             get_db_path,
         ])
         .run(tauri::generate_context!())

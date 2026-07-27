@@ -4,7 +4,7 @@ import type { HistoryCommit } from '@/types';
 import ActivityBoard from './ActivityBoard';
 
 const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
+vi.mock('@/lib/api', () => ({ invoke: invokeMock }));
 
 function commit(overrides: Partial<HistoryCommit>): HistoryCommit {
   return {

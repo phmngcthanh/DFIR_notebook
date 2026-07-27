@@ -1,54 +1,92 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { SessionPayload } from '@/lib/api';
 import CaseSetup from './CaseSetup';
 
-const { invokeMock } = vi.hoisted(() => ({ invokeMock: vi.fn() }));
-vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }));
+const { listCasesMock, unlockCaseMock, createCaseMock } = vi.hoisted(() => ({
+  listCasesMock: vi.fn(),
+  unlockCaseMock: vi.fn(),
+  createCaseMock: vi.fn(),
+}));
+vi.mock('@/lib/api', () => ({
+  listCases: listCasesMock,
+  unlockCase: unlockCaseMock,
+  createCase: createCaseMock,
+}));
 
-describe('CaseSetup database passwords', () => {
+function session(): SessionPayload {
+  return {
+    token: 'token',
+    caseId: 'incident-7',
+    case: null,
+    expert: { name: 'Expert A', session_id: 'session-1', scope_network_ids: [] },
+    revision: 0,
+  };
+}
+
+describe('CaseSetup', () => {
   beforeEach(() => {
-    invokeMock.mockReset();
+    listCasesMock.mockReset();
+    unlockCaseMock.mockReset();
+    createCaseMock.mockReset();
     localStorage.clear();
+    listCasesMock.mockResolvedValue({ cases: ['incident-7'], allowCreate: true });
   });
 
-  it('keeps session attribution and the database password separate', async () => {
+  it('signs in with the case password alone — there is no username', async () => {
     const user = userEvent.setup();
-    const onComplete = vi.fn();
-    invokeMock.mockResolvedValue({ success: true, data: 'case-id' });
-    render(<CaseSetup mode="new" onComplete={onComplete} onCancel={vi.fn()} />);
+    const onSession = vi.fn();
+    unlockCaseMock.mockResolvedValue(session());
+    render(<CaseSetup onSession={onSession} />);
 
+    await waitFor(() => expect(screen.getByLabelText('Case *')).toBeInTheDocument());
+    await user.type(screen.getByLabelText('Expert name *'), 'Expert A');
+    await user.type(screen.getByLabelText('Case database password *'), 'existing-secret');
+    await user.click(screen.getByRole('button', { name: 'Unlock Case' }));
+
+    await waitFor(() => expect(unlockCaseMock).toHaveBeenCalledWith({
+      caseId: 'incident-7',
+      password: 'existing-secret',
+      expertName: 'Expert A',
+    }));
+    expect(onSession).toHaveBeenCalledOnce();
+  });
+
+  it('keeps session attribution and the database password separate when creating a case', async () => {
+    const user = userEvent.setup();
+    const onSession = vi.fn();
+    createCaseMock.mockResolvedValue(session());
+    render(<CaseSetup onSession={onSession} />);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /Create a new case/ })).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: /Create a new case/ }));
     await user.type(screen.getByLabelText('Case name *'), 'Incident 7');
     await user.type(screen.getByLabelText('Session expert name *'), 'Expert A');
-    await user.type(screen.getByLabelText('Database file password *'), 'sixsix');
+    await user.type(screen.getByLabelText('Case database password *'), 'sixsix');
     await user.type(screen.getByLabelText('Confirm password *'), 'sixsix');
     await user.click(screen.getByRole('button', { name: 'Create Case' }));
 
-    expect(invokeMock).toHaveBeenCalledWith('create_new_case', expect.objectContaining({
+    await waitFor(() => expect(createCaseMock).toHaveBeenCalledWith(expect.objectContaining({
       expertName: 'Expert A',
       databasePassword: 'sixsix',
-    }));
-    expect(onComplete).toHaveBeenCalledOnce();
+    })));
+    expect(onSession).toHaveBeenCalledOnce();
   });
 
   it('does not submit a new case when password confirmation differs', async () => {
     const user = userEvent.setup();
-    render(<CaseSetup mode="new" onComplete={vi.fn()} onCancel={vi.fn()} />);
+    render(<CaseSetup onSession={vi.fn()} />);
+
+    await waitFor(() => expect(screen.getByRole('button', { name: /Create a new case/ })).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: /Create a new case/ }));
     await user.type(screen.getByLabelText('Case name *'), 'Incident 8');
     await user.type(screen.getByLabelText('Session expert name *'), 'Expert B');
-    await user.type(screen.getByLabelText('Database file password *'), 'database-secret-1');
+    await user.type(screen.getByLabelText('Case database password *'), 'database-secret-1');
     await user.type(screen.getByLabelText('Confirm password *'), 'database-secret-2');
     await user.click(screen.getByRole('button', { name: 'Create Case' }));
-    expect(screen.getByRole('alert')).toHaveTextContent('do not match');
-    expect(invokeMock).not.toHaveBeenCalled();
-  });
 
-  it('uses the entered database password to unlock an existing file', async () => {
-    const user = userEvent.setup();
-    invokeMock.mockResolvedValue({ success: true, data: 'Case opened' });
-    render(<CaseSetup mode="open" onComplete={vi.fn()} onCancel={vi.fn()} />);
-    await user.type(screen.getByLabelText('Database file password *'), 'existing-secret');
-    await user.click(screen.getByRole('button', { name: 'Select and Unlock Case' }));
-    expect(invokeMock).toHaveBeenCalledWith('open_existing_case', { databasePassword: 'existing-secret' });
+    expect(screen.getByRole('alert')).toHaveTextContent('do not match');
+    expect(createCaseMock).not.toHaveBeenCalled();
   });
 });

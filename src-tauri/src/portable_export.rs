@@ -246,10 +246,35 @@ fn render_case_snapshot(root: &Value) -> Result<String, String> {
         ("firewall_nat_rules", "FIREWALL NAT / VIP / PORT MAPPINGS"),
         ("timeline_events", "TIMELINE EVENTS"),
         ("iocs", "INDICATORS OF COMPROMISE"),
+        ("ioc_sightings", "IOC SIGHTINGS"),
+        ("attack_edges", "ATTACK PATHWAY"),
         ("notes", "NOTES"),
     ] {
         render_collection(&mut output, title, object.get(field))?;
     }
+    // Saved views are presentation state: list them by name only.
+    let views = object
+        .get("investigation_views")
+        .and_then(Value::as_array)
+        .map(|views| {
+            views
+                .iter()
+                .map(|view| {
+                    let mut reduced = Map::new();
+                    for field in ["name", "description", "updated_at"] {
+                        if let Some(value) = view.get(field) {
+                            reduced.insert(field.to_string(), value.clone());
+                        }
+                    }
+                    Value::Object(reduced)
+                })
+                .collect::<Vec<_>>()
+        });
+    render_collection(
+        &mut output,
+        "SAVED INVESTIGATION VIEWS",
+        views.map(Value::Array).as_ref(),
+    )?;
     Ok(output)
 }
 
