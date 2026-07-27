@@ -218,6 +218,31 @@ jobs:
           uploadWorkflowArtifacts: true
           workflowArtifactNamePattern: release-desktop-${{ matrix.slug }}-[bundle]
 
+      - name: Package portable Windows desktop application
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: |
+          $payload = "release-staging\DFIR-Investigator-portable"
+          $archive = "release-output\dfir-investigator-$env:RELEASE_TAG-desktop-windows-x64-portable.zip"
+          New-Item -ItemType Directory -Force $payload, "release-output" | Out-Null
+          Copy-Item `
+            "src-tauri\target\x86_64-pc-windows-msvc\release\DFIR-Investigator.exe", `
+            "README.md", `
+            "LICENSE", `
+            "THIRD_PARTY_NOTICES.md" `
+            $payload
+          Compress-Archive -Path "$payload\*" -DestinationPath $archive
+
+      - name: Upload portable Windows desktop application
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-desktop-windows-x64-portable
+          path: release-output/*-desktop-windows-x64-portable.zip
+          if-no-files-found: error
+
   android:
     name: Android ARM64 APK
     needs:
@@ -443,9 +468,10 @@ jobs:
           body: |
             Unified release built from one commit after all quality and platform jobs passed.
 
-            Includes desktop packages for Windows, Linux, and universal macOS; an Android
-            ARM64 APK; and browser-server bundles for Windows, Linux, macOS Intel, and
-            macOS Apple Silicon. Verify `SHA256SUMS.txt` after downloading.
+            Includes Windows installer and portable desktop packages, Linux and universal
+            macOS desktop packages, an Android ARM64 APK, and browser-server bundles for
+            Windows, Linux, macOS Intel, and macOS Apple Silicon. Verify
+            `SHA256SUMS.txt` after downloading.
           generate_release_notes: true
           draft: ${{ needs.prepare.outputs.draft_release }}
           prerelease: false

@@ -321,7 +321,8 @@ Smoke-test on both an Intel Mac and an Apple Silicon Mac when distributing the u
 `.github/workflows/build-release.yml` is the single release pipeline for every
 supported shell. It builds:
 
-- Windows x64, Linux x64, and universal Intel/Apple Silicon macOS desktop packages;
+- Windows x64 installer and portable ZIP, Linux x64, and universal Intel/Apple
+  Silicon macOS desktop packages;
 - an Android ARM64 APK;
 - browser-server bundles for Windows x64, Linux x64, macOS Intel, and macOS Apple Silicon.
 
@@ -348,6 +349,12 @@ architecture-specific. Without Apple Developer secrets, macOS outputs are not
 signed or notarized for general distribution. Android `release` output is also
 unsigned unless signing is configured; use the default debug APK when an
 immediately installable test package is required.
+
+The Windows portable release is named
+`dfir-investigator-<tag>-desktop-windows-x64-portable.zip`. It contains the
+standalone `DFIR-Investigator.exe`, README, license, and third-party notices.
+Unlike the NSIS installer, it does not install prerequisites; Microsoft Edge
+WebView2 Runtime must already be available on the computer.
 
 ## 10. Troubleshooting
 
