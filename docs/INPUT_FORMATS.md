@@ -2,7 +2,7 @@
 
 Document version: 1.0  
 Application version: 1.0.20
-Last reviewed: 2026-07-19
+Last reviewed: 2026-07-28
 
 ## 1. Format selection
 
@@ -14,6 +14,8 @@ Last reviewed: 2026-07-19
 | Expert change bundle | `.json` | No | Git-like attributed review/merge | Only after review and confirmation |
 | Encrypted expert bundle | `.dfirx` | AES-256-GCM envelope | Protected attributed review/merge | Only after password, review, and confirmation |
 | Structured partial import | `.json` or pasted JSON | No, deliberately | One-field, multi-section, script/LLM-assisted intake | Only after preview, selection, and confirmation |
+| Vendor device configuration | `.conf`, `.cfg`, `.txt`, `.set`, `.xml` | No | Derive infrastructure topology plus route/ACL/NAT evidence | Only after normalized preview and confirmation |
+| Virtual-machine inventory | `.csv`, `.json`, `.txt` or pasted text | No | Create/update ESXi/vSphere, Proxmox VE, or Hyper-V guests in Assets | Only after normalized preview and confirmation |
 | Text report | `.txt` | No | Display/print output | Never; not importable |
 
 Use a shared-baseline expert bundle for end-of-day expert reconciliation. Use structured partial import for information extracted from prose, another tool, an LLM, or a team that did not work from the shared database baseline.
@@ -21,6 +23,81 @@ Use a shared-baseline expert bundle for end-of-day expert reconciliation. Use st
 Encrypted `.dfirx` is supported for full snapshots and expert bundles. Structured partial import is plain JSON only; if its contents require protected transport, use an approved encrypted container/channel outside the application.
 
 The `.db` password and `.dfirx` password are independent. A case database cannot be opened as JSON and an encrypted export cannot be used to unlock a database. Plain `.json` remains the interoperable format for other applications and programming languages. Legacy plaintext `.db` files must be converted from the **Open Case** screen into a new encrypted copy before use.
+
+### 1.1 Vendor device configurations
+
+Open **Topology → Import config**. The first supported profiles are:
+
+| Profile | Expected native input | Normalized records |
+|---|---|---|
+| Palo Alto firewall | PAN-OS `set` commands or configuration XML | firewall, interfaces/zones, VLANs, static routes, security rules, NAT |
+| OPNsense firewall | `config.xml` backup | firewall, interfaces, VLANs, static routes/gateways, filter rules, NAT |
+| Juniper firewall | Junos `show configuration \| display set` | firewall, interfaces/units, VLAN ids, zones, static routes, security policies |
+| OpenWrt router/switch | UCI configuration export | router/switch asset, logical interfaces, bridge VLANs, routes, firewall forwarding/rules, redirects/NAT |
+| Cisco router/switch | IOS/IOS-XE running configuration | router/switch asset, SVIs/interfaces, access/trunk VLANs, static routes, named/numbered ACLs |
+| Palo Alto router/switch | PAN-OS `set` commands or configuration XML | router/switch asset using the same interface, VLAN, route, and policy normalizer |
+
+Parsing happens in the UI process; the raw file is not sent to a third party. The app produces the vendor-neutral `dfir-network-config-v1` representation and embeds it in the existing firewall `rules` or router/switch asset `properties` JSON. The raw configuration is retained with that normalized record (`config_text` for firewalls and `rawConfig` in normalized router/switch properties) so the investigator can review its source. Native exports may contain hashes, SNMP communities, pre-shared keys, or other credentials; remove them before import when case-handling policy does not permit retaining those secrets. Raw configurations also travel in snapshots and expert bundles that include the device.
+
+The importer then generates an ordinary case-aware structured partial import. Existing devices are matched by device name and role; a network is reused only when its name/VLAN/subnet match or its subnet is unique in the case. The normal preview reports create, update, unchanged, and invalid records, and the selected changes are dry-run and applied in one audited SQLite transaction.
+
+An L2 VLAN can be imported before its routed subnet is known. It is stored with an empty subnet and shown as **subnet unresolved**; reachability analysis does not invent an address for it.
+
+Configuration parsing is deliberately best effort:
+
+- named address/service objects that cannot be resolved from the supported syntax remain symbolic;
+- a recognized explicit deny blocks a candidate logical edge;
+- explicit route + allow + required NAT evidence can produce a confirmed path;
+- missing or symbolic control evidence produces a **possible** path, never a claim that traffic was observed; and
+- parser warnings remain attached to the normalized device and appear in the import/device-detail UI.
+
+Re-export from the vendor's documented native format when a warning reports unsupported input. Junos XML, dynamic routing state, policy inheritance, application identification, VPN/tunnel negotiation, PBR, VRFs/virtual systems, and vendor-specific rule shadowing are not fully simulated in this first profile set.
+
+### 1.2 Virtual-machine inventories
+
+Open **Assets → Import VM inventory** and choose the source platform. The importer auto-detects JSON, CSV, or supported native table text.
+
+| Platform | Supported native/structured input | Recommended stable identity | Useful normalized fields |
+|---|---|---|---|
+| VMware ESXi / vSphere | `vim-cmd vmsvc/getallvms`; PowerCLI `Get-VM` CSV; simple `Get-VM` JSON | PowerCLI `Id`, or host-scoped numeric `VMid` plus inventory scope | name, host, power state, guest OS, CPUs, memory, version, VMX/config path, IPs, MACs |
+| Proxmox VE | JSON from `pvesh get /cluster/resources --type vm --output-format json`; `qm list`; CSV | cluster-scoped `vmid` | QEMU/LXC kind, name, node, state, CPUs, memory, disk, IPs, MACs |
+| Microsoft Hyper-V | `Get-VM` JSON; `Get-VM` table; selected-property PowerShell CSV | `VMId` plus optional inventory scope | name, host, state, CPUs, assigned/startup memory, generation, version, configuration path, IPs, MACs |
+
+Copy-ready collection commands:
+
+```powershell
+# vSphere PowerCLI: rich CSV
+Get-VM | Select-Object Id,Name,PowerState,NumCpu,MemoryGB,@{N="GuestOS";E={$_.Guest.OSFullName}},@{N="VMHost";E={$_.VMHost.Name}},Version,@{N="IPAddress";E={$_.Guest.IPAddress -join ";"}},@{N="MacAddress";E={(Get-NetworkAdapter -VM $_).MacAddress -join ";"}} | Export-Csv -NoTypeInformation vms.csv
+
+# Hyper-V: rich CSV
+Get-VM | Select-Object VMId,Name,State,ComputerName,ProcessorCount,MemoryAssigned,MemoryStartup,Generation,Version,ConfigurationLocation,@{N="IPAddress";E={(Get-VMNetworkAdapter -VM $_).IPAddresses -join ";"}},@{N="MacAddress";E={(Get-VMNetworkAdapter -VM $_).MacAddress -join ";"}} | Export-Csv -NoTypeInformation vms.csv
+
+# Hyper-V: native PowerShell JSON
+Get-VM | ConvertTo-Json -Depth 3 | Set-Content vms.json
+```
+
+```sh
+# One ESXi host: native registered-VM table
+vim-cmd vmsvc/getallvms
+
+# One Proxmox cluster: API-backed JSON
+pvesh get /cluster/resources --type vm --output-format json > vms.json
+
+# One Proxmox node: QEMU VM table
+qm list
+```
+
+CSV header matching ignores case, spaces, punctuation, and parentheses. `Name` is required. Common identifier aliases (`Id`, `VMId`, `vmid`), state aliases (`State`, `Status`, `PowerState`), host aliases (`VMHost`, `Node`, `ComputerName`), and resource aliases are accepted. Multi-value IP and MAC columns should use semicolons inside the CSV field as the copy-ready commands do.
+
+The optional **Inventory scope** should identify the ESXi host, Proxmox cluster, or Hyper-V host/failover-cluster inventory. It participates in the stored identity key. This is especially important for numeric ESXi `VMid` values, which are local to a host. Re-import matching checks the normalized identity first, then uses a unique same-platform native ID with a compatible scope or the same imported name/scope as a controlled fallback. It never name-matches and overwrites a manually created asset.
+
+Each recognized guest is created as an ordinary `asset_type: "vm"` row, so it appears immediately in **Assets and PC Configuration** and in normal snapshots/history. Proxmox LXC guests remain `asset_type: "vm"` for the current schema but carry `kind: "container"` in their normalized properties. Platform, source format/file, native ID, scope, host/node, runtime state, resources, addresses, configuration path, and the source row are stored under `schema: "dfir-vm-inventory-v1"` in encrypted asset `properties`. Existing non-inventory properties are retained as `legacyProperties`.
+
+Discovered IP/MAC pairs become `Inventory NIC N` records. IPv4 addresses attach automatically to the most-specific existing case subnet; IPv6 and unmatched addresses remain unassigned rather than causing a network to be invented. A repeat import reuses those managed NIC IDs and preserves analyst-owned compromise state, investigation progress, user, OS when the inventory has no OS, scan results, and legacy properties.
+
+Inventory disappearance is not evidence of deletion. The workflow therefore never deletes an asset or an older inventory NIC merely because it is absent from a later file; it reports retained stale NICs for review. The importer does not query the hypervisor, fetch VM configuration/disks, or prove that reported runtime state is current.
+
+Vendor basis for the supported shapes: Broadcom documents both [`vim-cmd vmsvc/getallvms`](https://knowledge.broadcom.com/external/article?legacyId=1003738) and PowerCLI [`Get-VM`](https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/commands/get-vm); Proxmox documents `pvesh`, `qm`, and JSON output options in the [Proxmox VE Administration Guide](https://pve.proxmox.com/pve-docs/pve-admin-guide.pdf); Microsoft documents Hyper-V [`Get-VM`](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/powershell), PowerShell [`Export-Csv`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/export-csv), and [`ConvertTo-Json`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertto-json).
 
 ## 2. Structured partial-import envelope
 
@@ -84,7 +161,7 @@ Fields listed as required are required when creating a record. Updates may conta
 | `entity_type` | Required create fields | Optional/update fields and accepted values |
 |---|---|---|
 | `case` | Update only | `name`, `description`, `client_name`, `status` (`active`, `closed`, `archived`), `metadata`; legacy `investigator` values are preserved but ignored |
-| `network` | `name`, `subnet` | `network_type` (`LAN`, `DMZ`, `DMS`, `WAN`, `GUEST`, `MANAGEMENT`, `OTHER`), `description`, `vlan_id` |
+| `network` | `name` | `subnet` (CIDR, or empty while an L2 VLAN subnet is unresolved), `network_type` (`LAN`, `DMZ`, `DMS`, `WAN`, `GUEST`, `MANAGEMENT`, `OTHER`), `description`, `vlan_id` |
 | `asset` | `name`, `ip_address` | `network_id`, `mac_address`, `asset_type` (`workstation`, `server`, `vm`, `laptop`, `router`, `switch`, `other`), `os`, `user_name`, `compromise_status` (`unknown`, `clean`, `suspected`, `infected`), `investigation_status` (`not_started`, `in_progress`, `completed`), `properties`, `scan_results` |
 | `network_interface` | `asset_id`, `name`, `ip_address` | `network_id`, `mac_address`, `is_primary`; at most one primary NIC per asset |
 | `clock_profile` | `name`, `server_reference_raw`, `correct_reference_raw` | `description`, `server_timezone`, `correct_timezone`; UTC values and offset are derived by the app |

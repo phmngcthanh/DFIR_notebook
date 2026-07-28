@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@/lib/api';
-import { Cable, ChevronDown, ChevronRight, Pencil, Plus, Search, Star, Trash2 } from 'lucide-react';
+import { Boxes, Cable, ChevronDown, ChevronRight, Pencil, Plus, Search, Star, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
+import VmInventoryImportPanel from '@/components/VmInventoryImportPanel';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -10,7 +11,8 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import type { ApiResponse, Asset, CompromiseStatus, ExpertIdentity, InfectionSummary, InvestigationStatus, Network, NetworkInterface } from '@/types';
+import { platformLabel, readStoredVmInventory } from '@/lib/vm-inventory';
+import type { ApiResponse, Asset, Case, CompromiseStatus, ExpertIdentity, InfectionSummary, InvestigationStatus, Network, NetworkInterface } from '@/types';
 
 interface Props { refreshTrigger: number; expert: ExpertIdentity }
 interface AssetFormState {
@@ -23,6 +25,7 @@ const EMPTY_ASSET: AssetFormState = { networkId: '', name: '', ipAddress: '', ma
 const EMPTY_INTERFACE: InterfaceFormState = { name: '', ipAddress: '', macAddress: '', networkId: '', isPrimary: false };
 
 export default function AssetManager({ refreshTrigger, expert }: Props) {
+  const [currentCase, setCurrentCase] = useState<Case | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [networks, setNetworks] = useState<Network[]>([]);
   const [interfaces, setInterfaces] = useState<NetworkInterface[]>([]);
@@ -38,20 +41,24 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
   const [compromiseFilter, setCompromiseFilter] = useState('all');
   const [investigationFilter, setInvestigationFilter] = useState('all');
   const [focusOnly, setFocusOnly] = useState(expert.scope_network_ids.length > 0);
+  const [showVmImport, setShowVmImport] = useState(false);
 
   const [infection, setInfection] = useState<InfectionSummary>({ entities: [], iocs: [] });
 
   const loadData = useCallback(async () => {
     try {
-      const [assetResponse, networkResponse, interfaceResponse, infectionResponse] = await Promise.all([
+      const [caseResponse, assetResponse, networkResponse, interfaceResponse, infectionResponse] = await Promise.all([
+        invoke<ApiResponse<Case | null>>('get_current_case_info'),
         invoke<ApiResponse<Asset[]>>('list_assets'), invoke<ApiResponse<Network[]>>('list_networks'),
         invoke<ApiResponse<NetworkInterface[]>>('list_network_interfaces', { assetId: null }),
         invoke<ApiResponse<InfectionSummary>>('get_infection_summary'),
       ]);
+      if (!caseResponse.success) throw new Error(caseResponse.error);
       if (!assetResponse.success) throw new Error(assetResponse.error);
       if (!networkResponse.success) throw new Error(networkResponse.error);
       if (!interfaceResponse.success) throw new Error(interfaceResponse.error);
       if (!infectionResponse.success) throw new Error(infectionResponse.error);
+      setCurrentCase(caseResponse.data ?? null);
       setAssets(assetResponse.data ?? []); setNetworks(networkResponse.data ?? []); setInterfaces(interfaceResponse.data ?? []);
       setInfection(infectionResponse.data ?? { entities: [], iocs: [] });
     } catch (reason) { toast.error(String(reason)); }
@@ -128,18 +135,31 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
     const term = search.trim().toLowerCase();
     return assets.filter((asset) => {
       const assetInterfaces = interfacesByAsset.get(asset.id) ?? [];
+      const vmInventory = readStoredVmInventory(asset.properties);
       const scopeMatch = !focusOnly || expert.scope_network_ids.length === 0 || assetInterfaces.some((item) => item.network_id && expert.scope_network_ids.includes(item.network_id));
       const networkMatch = networkFilter === 'all' || assetInterfaces.some((item) => item.network_id === networkFilter);
       return scopeMatch && networkMatch && (compromiseFilter === 'all' || asset.compromise_status === compromiseFilter)
         && (investigationFilter === 'all' || asset.investigation_status === investigationFilter)
-        && (!term || [asset.name, asset.ip_address, asset.mac_address, asset.os, asset.user_name, asset.network_name].some((value) => value?.toLowerCase().includes(term)));
+        && (!term || [
+          asset.name, asset.ip_address, asset.mac_address, asset.os, asset.user_name, asset.network_name,
+          vmInventory?.platform, vmInventory?.hypervisor, vmInventory?.inventoryScope, vmInventory?.nativeId,
+        ].some((value) => value?.toLowerCase().includes(term)));
     });
   }, [assets, interfacesByAsset, focusOnly, expert.scope_network_ids, networkFilter, compromiseFilter, investigationFilter, search]);
 
   return (
     <div className="space-y-4 p-6">
-      <div className="flex items-center justify-between"><div><h2 className="text-2xl font-bold text-slate-800">Assets and PC Configuration</h2><p className="text-sm text-slate-500">Primary configuration, investigation status, and multi-homed interfaces</p></div>
-        <Button onClick={() => { resetAssetForm(); setShowForm(true); }} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add Asset</Button></div>
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-2xl font-bold text-slate-800">Assets and PC Configuration</h2><p className="text-sm text-slate-500">Primary configuration, investigation status, multi-homed interfaces, and virtual-machine inventory</p></div>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setShowVmImport((value) => !value)}><Boxes size={16} className="mr-2" />Import VM inventory</Button>
+          <Button onClick={() => { resetAssetForm(); setShowForm(true); }} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add Asset</Button>
+        </div>
+      </div>
+      {showVmImport && currentCase && <VmInventoryImportPanel
+        inventory={{ caseId: currentCase.id, assets, networks, networkInterfaces: interfaces }}
+        onApplied={loadData}
+        onClose={() => setShowVmImport(false)}
+      />}
       <Card><CardContent className="flex flex-wrap items-end gap-3 p-3">
         <div className="relative min-w-64 flex-1"><Search size={15} className="absolute left-3 top-2.5 text-slate-400" /><Input className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, IP, MAC, OS, or user…" /></div>
         <SmallSelect value={networkFilter} onChange={setNetworkFilter} label="Network" items={[['all','All networks'], ...networks.map((item): [string,string] => [item.id,item.name])]} />
@@ -181,10 +201,23 @@ function AssetForm({ form, setForm, networks, editing, onSave, onCancel }: { for
 interface AssetRowsProps { asset: Asset; sightingCount: number; interfaces: NetworkInterface[]; expanded: boolean; onToggle: () => void; onEdit: () => void; onDelete: () => void; interfaceForm: InterfaceFormState; setInterfaceForm: (value: InterfaceFormState) => void; showInterfaceForm: boolean; editingInterfaceId: string | null; networks: Network[]; onBeginInterface: (item?: NetworkInterface) => void; onSaveInterface: () => void; onCancelInterface: () => void; onPrimary: (id: string) => void; onDeleteInterface: (id: string) => void }
 function AssetRows(props: AssetRowsProps) {
   const { asset, interfaces, expanded } = props;
+  const vmInventory = readStoredVmInventory(asset.properties);
   return <><TableRow className={asset.compromise_status === 'infected' ? 'bg-red-50' : asset.compromise_status === 'suspected' ? 'bg-amber-50' : ''}>
     <TableCell><Button size="sm" variant="ghost" onClick={props.onToggle}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</Button></TableCell><TableCell className="font-medium">{asset.name}<div className="text-xs text-slate-400">{asset.user_name}</div></TableCell><TableCell>{asset.network_name || 'Unassigned'}</TableCell><TableCell className="font-mono text-xs">{asset.ip_address || '—'}</TableCell><TableCell><Badge variant="outline">{asset.asset_type}</Badge><div className="mt-1 text-xs text-slate-500">{asset.os}</div></TableCell>
     <TableCell><StatusBadge value={asset.compromise_status} />{props.sightingCount > 0 && <span className="ml-1 rounded bg-red-600 px-1.5 py-0.5 text-xs text-white" title={`${props.sightingCount} IOC sighting(s) recorded on this asset`}>⚠{props.sightingCount}</span>}</TableCell><TableCell><StatusBadge value={asset.investigation_status} /></TableCell><TableCell>{interfaces.length}</TableCell><TableCell><div className="flex"><Button size="sm" variant="ghost" onClick={props.onEdit}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={props.onDelete}><Trash2 size={14} className="text-red-500" /></Button></div></TableCell>
-  </TableRow>{expanded && <TableRow><TableCell colSpan={9} className="bg-slate-50 p-4"><div className="mb-3 flex items-center justify-between"><h3 className="flex items-center gap-2 text-sm font-semibold"><Cable size={15} />Network interfaces</h3><Button size="sm" variant="outline" onClick={() => props.onBeginInterface()}><Plus size={14} className="mr-1" />Add NIC</Button></div>
+  </TableRow>{expanded && <TableRow><TableCell colSpan={9} className="bg-slate-50 p-4">
+    {vmInventory && <div className="mb-4 rounded border border-violet-200 bg-violet-50 p-3">
+      <div className="mb-2 flex flex-wrap items-center gap-2"><Boxes size={15} className="text-violet-600" /><strong className="text-sm">Imported virtualization inventory</strong><Badge variant="outline">{platformLabel(vmInventory.platform)}</Badge><Badge variant="outline">{vmInventory.kind}</Badge></div>
+      <div className="grid gap-2 text-xs sm:grid-cols-3 lg:grid-cols-6">
+        <InventoryField label="Native ID" value={vmInventory.nativeId} />
+        <InventoryField label="Host / node" value={vmInventory.hypervisor ?? vmInventory.inventoryScope} />
+        <InventoryField label="State" value={vmInventory.state} />
+        <InventoryField label="CPU" value={vmInventory.cpuCount} />
+        <InventoryField label="Memory" value={formatBytes(vmInventory.memoryBytes)} />
+        <InventoryField label="Disk" value={formatBytes(vmInventory.diskBytes)} />
+      </div>
+    </div>}
+    <div className="mb-3 flex items-center justify-between"><h3 className="flex items-center gap-2 text-sm font-semibold"><Cable size={15} />Network interfaces</h3><Button size="sm" variant="outline" onClick={() => props.onBeginInterface()}><Plus size={14} className="mr-1" />Add NIC</Button></div>
     <div className="grid gap-2">{interfaces.map((item) => <div key={item.id} className="flex items-center justify-between rounded border bg-white p-2 text-sm"><div className="flex items-center gap-3">{item.is_primary && <Star size={14} className="fill-amber-400 text-amber-500" />}<strong>{item.name}</strong><span>{item.network_name || 'Unassigned'}</span><code>{item.ip_address}</code><span className="text-slate-500">{item.mac_address}</span></div><div className="flex">{!item.is_primary && <Button size="sm" variant="ghost" onClick={() => props.onPrimary(item.id)} title="Make primary"><Star size={14} /></Button>}<Button size="sm" variant="ghost" onClick={() => props.onBeginInterface(item)}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={() => props.onDeleteInterface(item.id)}><Trash2 size={14} className="text-red-500" /></Button></div></div>)}</div>
     {props.showInterfaceForm && <div className="mt-3 grid grid-cols-6 items-end gap-2 rounded border bg-white p-3"><Field label="Name"><Input value={props.interfaceForm.name} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, name: e.target.value })} /></Field><Field label="Network"><NetworkSelect value={props.interfaceForm.networkId} networks={props.networks} onChange={(networkId) => props.setInterfaceForm({ ...props.interfaceForm, networkId })} /></Field><Field label="IP"><Input value={props.interfaceForm.ipAddress} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, ipAddress: e.target.value })} /></Field><Field label="MAC"><Input value={props.interfaceForm.macAddress} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, macAddress: e.target.value })} /></Field><label className="flex h-9 items-center gap-2"><input type="checkbox" checked={props.interfaceForm.isPrimary} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, isPrimary: e.target.checked })} />Primary</label><div className="flex gap-1"><Button size="sm" onClick={props.onSaveInterface}>Save</Button><Button size="sm" variant="outline" onClick={props.onCancelInterface}>Cancel</Button></div></div>}
   </TableCell></TableRow>}</>;
@@ -196,3 +229,5 @@ function SmallSelect({ value, onChange, label: text, items }: { value: string; o
 function statusItems(type: 'compromise' | 'investigation'): [string,string][] { const values = type === 'compromise' ? ['unknown','clean','suspected','infected'] : ['not_started','in_progress','completed']; return [['all','All'], ...values.map((value): [string,string] => [value,label(value)])]; }
 function label(value: string) { return value.replaceAll('_', ' ').replace(/^./, (character) => character.toUpperCase()); }
 function StatusBadge({ value }: { value: string }) { const colors: Record<string,string> = { infected:'bg-red-100 text-red-700',suspected:'bg-amber-100 text-amber-700',clean:'bg-green-100 text-green-700',unknown:'bg-slate-100 text-slate-600',not_started:'bg-slate-100 text-slate-600',in_progress:'bg-blue-100 text-blue-700',completed:'bg-green-100 text-green-700' }; return <span className={`rounded px-2 py-1 text-xs ${colors[value] ?? colors.unknown}`}>{label(value)}</span>; }
+function InventoryField({ label: text, value }: { label: string; value: string | number | undefined }) { return <div><div className="text-[10px] uppercase text-slate-400">{text}</div><div className="truncate font-medium text-slate-700">{value ?? '—'}</div></div>; }
+function formatBytes(value: number | undefined): string | undefined { if (value === undefined) return undefined; const units = ['B','KiB','MiB','GiB','TiB']; let size = value; let unit = 0; while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit += 1; } return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`; }

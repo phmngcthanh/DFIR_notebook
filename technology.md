@@ -75,6 +75,9 @@ The database represents the elements needed to coordinate a network investigatio
 - multiple interfaces for multi-homed assets;
 - dedicated firewalls with multiple interfaces and addresses;
 - structured VIP, DNAT, SNAT, and port mappings;
+- normalized imported router/switch/firewall configurations with interfaces, VLANs, routes, ACL/security rules, and NAT evidence;
+- normalized ESXi/vSphere, Proxmox VE, and Hyper-V guest inventory as ordinary assets with stable vendor identity, provenance, runtime/resource metadata, and discovered NICs;
+- case-level physical/logical connectivity compliance assertions and evidence-linked possible-path analysis;
 - timeline events and reusable clock-correction profiles;
 - indicators of compromise;
 - Markdown findings and hypotheses; and
@@ -128,6 +131,8 @@ The Rust layer:
 8. Applies the approved subset and its history commit atomically.
 
 This enables assisted data entry while keeping the investigator responsible for evidence quality. Generated text is input for review, not automatically trusted evidence.
+
+The network-device and virtual-machine importers use this same control boundary. Browser-side adapters parse investigator-selected text into vendor-neutral records, perform deliberately narrow identity matching against the open case, and generate a case-bound partial-import proposal. Rust still performs the authoritative validation, rollback-only dry run, stale-preview check, transactional write, and attributed history commit. No importer connects to a firewall, switch, router, or hypervisor.
 
 ### Portable and protected exchange
 
@@ -185,8 +190,11 @@ An investigator can use the application to:
 
 - create, unlock, rekey, lock, and reopen encrypted case databases;
 - record networks, endpoints, multi-homed interfaces, firewalls, NAT, and asserted connectivity;
+- import Palo Alto, OPNsense, Juniper, OpenWrt, and Cisco device configurations through six initial role profiles;
+- import ESXi/vSphere, Proxmox VE, and Hyper-V VM lists from supported native text, JSON, or CSV into Assets and PC Configuration;
 - track compromise and investigation status across the asset inventory;
 - visualize topology with multiple layouts and export it as PNG;
+- check persisted physical/logical isolation requirements and enumerate possible inbound/outbound paths;
 - preserve source timestamps and correlate incorrect server clocks;
 - create, edit, search, and filter timeline events, IOCs, and notes;
 - retain hypotheses and uncertainty without presenting them as conclusions;
@@ -206,8 +214,8 @@ The repository currently includes:
 
 - strict TypeScript production compilation;
 - ESLint and Vitest tooling;
-- 7 frontend behavioral tests;
-- 28 Rust unit and integration-style tests;
+- 61 frontend behavioral and domain tests;
+- 51 Rust unit and integration-style tests in the shared core/server suite;
 - SQLCipher creation, wrong-password, rekey, and migration tests;
 - cryptographic round-trip and modification-detection tests;
 - merge conflict, repeated-bundle, and unknown-baseline tests;
@@ -232,8 +240,9 @@ DFIR Network Investigator does not currently perform:
 - live network observation or packet-derived topology;
 - automatic log ingestion and parsing;
 - vulnerability scanning or YARA execution;
-- firewall rule-order, shadowing, or effective-policy simulation;
-- attack-path computation or causality inference;
+- complete vendor-semantic policy compilation, dynamic routing/VRF/PBR/VPN state, rule shadowing, or application-aware effective-policy simulation;
+- live hypervisor discovery, VM disk/configuration collection, or proof that an exported VM runtime state is current;
+- proof that a modeled path carried traffic, or automatic malware causality inference;
 - application accounts, verified authentication, or RBAC;
 - real-time multi-user database editing;
 - cryptographic signatures for expert identity or bundles;
