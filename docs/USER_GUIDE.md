@@ -2,7 +2,7 @@
 
 Document version: 1.0  
 Application version: 1.0.20
-Last reviewed: 2026-07-19
+Last reviewed: 2026-07-28
 
 ## 1. Purpose
 
@@ -122,6 +122,16 @@ Open **Assets** and add each workstation, server, VM, appliance, or other system
 
 Use the status filters to identify systems that have not been started or completed. This list should drive physical or remote responder assignments and reduce duplicate visits.
 
+To seed the asset list from virtualization infrastructure, select **Import VM inventory**:
+
+1. choose VMware ESXi/vSphere, Proxmox VE, or Microsoft Hyper-V;
+2. enter a stable inventory scope such as an ESXi host, Proxmox cluster, or Hyper-V host;
+3. select or paste the CSV, JSON, or supported native command output;
+4. select **Parse and review** and inspect create/update/invalid rows; and
+5. apply the reviewed records in one transaction.
+
+Imported guests are ordinary `vm` assets, not a separate inventory silo. Expand one to see its platform/native ID, host/node, runtime state, CPU, memory, disk, and imported NICs. Known IPv4 subnets are attached automatically; no new network is invented from an address alone. Re-imports preserve investigation/compromise state and reuse importer-managed identities. A VM missing from a later inventory is retained because absence from one export does not prove deletion. See [INPUT_FORMATS.md](INPUT_FORMATS.md#12-virtual-machine-inventories) for copy-ready vendor commands, field aliases, identity rules, and limitations.
+
 ### Step 4: Add every NIC
 
 Expand an asset to manage network interfaces. Create, edit, delete, or select the primary interface.
@@ -139,6 +149,17 @@ Multi-homed systems are important because they may explain unexpected paths, rou
 
 Open **Topology**. The asset is shown once inside its primary network. Purple dotted edges show secondary asset NIC attachments, amber dotted edges show additional firewall interfaces, network connections are dashed links, and dedicated firewalls are separate nodes.
 
+Use **Import config** to build the infrastructure skeleton from one of the first six profiles: Palo Alto, OPNsense, or Juniper firewall; OpenWrt, Cisco, or Palo Alto router/switch. Select or paste the native configuration, optionally override its hostname, then choose **Parse and review**. The preview must be applied before it changes the case. The importer creates or updates only infrastructure records—networks/VLANs, routers, switches, firewalls, and their interfaces—rather than inventing workstations.
+
+Select an imported router, switch, or firewall node to inspect its normalized interface, routing, ACL/security-policy, and NAT lists. **Infrastructure only** hides workstation/server nodes without deleting them.
+
+Use **Verify connect** for two separate jobs:
+
+1. **Compliance isolation** stores case-level assertions such as “Camera VLAN must have no physical path to Internet” or “DMZ must not have logical inbound reachability to Users.” Physical checks consider attachments and asserted links; logical checks consider imported routes, rule order, zones/interfaces, and NAT evidence. A confirmed violating path fails, an incomplete/symbolic path requires review, and no modeled path passes a blocked assertion.
+2. **Actual path analysis** enumerates up to 50 simple inbound/outbound logical paths from a selected VLAN/network to Internet or another network. Each hop shows the device and route/ACL/NAT evidence. Confirmed means the supported configuration supplied affirmative evidence; possible means unresolved named objects, missing filtering/NAT evidence, or a manually asserted connection still leaves the route plausible.
+
+Compliance policies are saved in the encrypted case metadata and recorded in history. They are not browser-local preferences.
+
 Available layouts:
 
 - Hierarchical;
@@ -149,7 +170,7 @@ Available layouts:
 
 Use zoom, fit, refresh, and PNG export controls. Select a node to inspect its fields.
 
-The topology is a working operational picture, not a packet-derived proof of connectivity. Mark uncertain information clearly in descriptions or notes.
+The topology and verification output are working hypotheses, not packet-derived proof that traffic occurred. A “no path found” result means no path exists in the imported/supported model, not that the live network is isolated. Review parser warnings and validate material conclusions against device state, logs, captures, or controlled tests.
 
 ### Step 6: Build the timeline continuously
 

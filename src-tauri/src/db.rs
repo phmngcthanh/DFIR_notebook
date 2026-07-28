@@ -1812,6 +1812,13 @@ fn validate_enum(label: &str, value: &str, allowed: &[&str]) -> AppResult<()> {
 }
 
 fn validate_subnet(value: &str) -> AppResult<()> {
+    // Layer-2 VLANs discovered from switch configurations may be real topology
+    // objects before an SVI/gateway address is known. Keep the subnet empty
+    // rather than inventing a misleading CIDR; routed analysis treats it as
+    // unresolved until an address is supplied.
+    if value.trim().is_empty() {
+        return Ok(());
+    }
     let (address, prefix) = value
         .split_once('/')
         .ok_or_else(|| "Subnet must use CIDR notation".to_string())?;
@@ -6298,6 +6305,23 @@ mod tests {
         subnet: &str,
     ) -> Network {
         create_network(conn, actor, name, subnet, "LAN", "", None).unwrap()
+    }
+
+    #[test]
+    fn layer_two_vlan_can_be_recorded_before_its_subnet_is_known() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let network = create_network(
+            &mut conn,
+            &active_expert,
+            "Camera VLAN",
+            "",
+            "LAN",
+            "Discovered from switch configuration",
+            Some("20"),
+        )
+        .unwrap();
+        assert_eq!(network.subnet, "");
+        assert_eq!(network.vlan_id.as_deref(), Some("20"));
     }
 
     #[test]

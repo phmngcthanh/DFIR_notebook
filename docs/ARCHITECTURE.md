@@ -2,7 +2,7 @@
 
 Document version: 1.0  
 Application version: 1.0.20
-Last reviewed: 2026-07-18
+Last reviewed: 2026-07-28
 
 ## 1. Architectural objective
 
@@ -76,6 +76,8 @@ flowchart TB
 | State | Component state and typed Tauri invocations; no remote state store |
 | Navigation | In-process view selection; no browser router or web endpoints |
 | Error feedback | Toasts and form messages from standardized command responses |
+
+Vendor intake adapters are frontend TypeScript modules because their inputs are investigator-selected text, not live device connections. `network-config.ts` normalizes the first six network-device profiles; `config-import.ts` turns that model into case-aware infrastructure changes; and `vm-inventory.ts` normalizes ESXi/vSphere, Proxmox VE, and Hyper-V inventory into asset/NIC changes. All three feed the Rust partial-import preview instead of writing SQLite directly.
 
 ### 3.2 Rust/Tauri layer
 
@@ -166,8 +168,8 @@ erDiagram
 | Table | Purpose | Important fields |
 |---|---|---|
 | `cases` | Single persistent case record | name, description, client, status, timestamps, optional metadata; an obsolete investigator field is retained only for file compatibility |
-| `networks` | Logical network zones | name, CIDR subnet, LAN/DMZ/DMS/WAN/etc. type, VLAN, description |
-| `assets` | Computers and devices | primary zone/IP/MAC projection, type, OS, user, compromise status, investigation status, JSON properties/scan results |
+| `networks` | Logical network zones | name, optional CIDR subnet (empty for an unresolved L2-only VLAN), LAN/DMZ/DMS/WAN/etc. type, VLAN, description |
+| `assets` | Computers and devices | primary zone/IP/MAC projection, type, OS, user, compromise status, investigation status, JSON properties/scan results; imported VM identity/provenance uses `dfir-vm-inventory-v1` properties |
 | `network_interfaces` | Physical/logical NICs and multi-homing | asset, interface name, IP, MAC, optional network, primary flag |
 | `network_connections` | Logical links between zones | source, target, connection type, device, description |
 | `firewalls` | Dedicated firewall records | primary/home network projection, name, vendor, model, legacy JSON rules, configuration text |
@@ -389,6 +391,27 @@ The frontend never applies submitted JSON directly. Rust parses it, checks the c
 
 The selected subset is dry-run again immediately before confirmation. Apply rejects stale previews, missing selected dependencies, and any relationship error, then commits all accepted changes plus one attributed history commit in a single transaction. Pending previews are held only in process memory. See [PARTIAL_IMPORT.md](PARTIAL_IMPORT.md).
 
+### 8.5 Vendor configuration and VM-inventory adapters
+
+Both assisted import workflows deliberately reuse the partial-import boundary:
+
+```mermaid
+flowchart LR
+    Source[Selected or pasted vendor text] --> Detect[Profile / format detection]
+    Detect --> Normalize[Vendor-neutral TypeScript model]
+    Normalize --> Match[Controlled case identity matching]
+    Match --> Partial[dfir-investigator-partial document]
+    Partial --> DryRun[Rust rollback-only validation]
+    DryRun --> Review[Create/update/invalid review]
+    Review --> Apply[One attributed SQLite transaction]
+```
+
+Network configuration imports produce `dfir-network-config-v1` device evidence plus ordinary networks, infrastructure assets/firewalls, interfaces, and structured NAT records. Topology verification reads those normalized routes, ACL/security policies, NAT rules, interfaces, and warnings; it does not execute vendor configuration or contact a device.
+
+VM inventory imports produce ordinary `vm` assets and optional `Inventory NIC N` rows. The stored `dfir-vm-inventory-v1` object preserves platform, source format/file, native identifier, inventory scope, host/node, runtime/resource fields, source row, and any pre-existing non-inventory properties. Identity resolution is restricted to earlier normalized VM imports: exact normalized key, then a unique same-platform native ID with compatible scope, then a unique same-platform imported name/scope. A same-named manual asset is not overwritten.
+
+The VM builder preserves analyst-controlled compromise/investigation state and never treats absence from a later inventory as deletion. IPv4 NICs attach only to the most-specific existing subnet; it neither creates a network from a guest address nor guesses an IPv6 prefix. These are evidence-conservative choices: collection staleness, inaccessible guests, host-local ESXi IDs, migration, and incomplete guest tools can all make one inventory incomplete.
+
 ## 9. Text parser architecture
 
 The parser is a read-only portable-file renderer:
@@ -483,7 +506,7 @@ The current architecture does not include:
 - automated endpoint discovery, evidence collection, log ingestion, or log parsing;
 - YARA execution;
 - STIX/OpenIOC or standardized PDF reporting;
-- automated attack-path computation (the Investigation Graph records analyst-drawn pathways only);
+- automatic malware causality/attack-path inference (Topology can enumerate configuration-supported connectivity paths, while the Investigation Graph still records analyst-evidenced attacker movement);
 - database-password recovery or organizational key escrow; or
 - cryptographic signing of expert identity or bundles.
 

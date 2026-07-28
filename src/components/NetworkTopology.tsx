@@ -2,18 +2,24 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@/lib/api';
 import CytoscapeComponent from 'react-cytoscapejs';
 import type cytoscape from 'cytoscape';
-import { Download, GitGraph, Maximize2, RefreshCw, RotateCcw, Save, ZoomIn, ZoomOut } from 'lucide-react';
+import { Download, FileUp, GitGraph, Maximize2, RefreshCw, RotateCcw, Save, SearchCheck, ZoomIn, ZoomOut } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import ConfigImportPanel from '@/components/ConfigImportPanel';
+import ConnectivityVerifier from '@/components/ConnectivityVerifier';
+import ImportedDeviceDetails from '@/components/ImportedDeviceDetails';
 import { buildTopologyLayout } from '@/lib/topology-layout';
+import { readStoredDeviceConfig } from '@/lib/network-config';
 import type {
   ApiResponse,
   Asset,
+  Case,
   Firewall,
   FirewallInterface,
+  FirewallNatRule,
   Network,
   NetworkConnection,
   NetworkInterface,
@@ -33,6 +39,8 @@ const STYLESHEET: cytoscape.StylesheetJson = [
   { selector: 'node.asset', style: { shape: 'roundrectangle', width: 128, height: 58, 'background-color': '#fff', 'border-color': '#64748b' } },
   { selector: 'node.asset[compromise="suspected"]', style: { 'background-color': '#fffbeb', 'border-color': '#d97706', 'border-width': 4 } },
   { selector: 'node.asset[compromise="infected"]', style: { 'background-color': '#fef2f2', 'border-color': '#dc2626', 'border-width': 4 } },
+  { selector: 'node.asset.router', style: { shape: 'diamond', width: 116, height: 78, 'background-color': '#eef2ff', 'border-color': '#4f46e5', 'border-width': 3 } },
+  { selector: 'node.asset.switch', style: { shape: 'rectangle', width: 132, height: 54, 'background-color': '#ecfeff', 'border-color': '#0e7490', 'border-width': 3 } },
   { selector: 'node.firewall', style: { shape: 'hexagon', width: 126, height: 70, 'background-color': '#fef3c7', 'border-color': '#d97706', 'border-width': 3 } },
   { selector: 'node.layout-anchor', style: { width: 1, height: 1, opacity: 0, label: '' } },
   { selector: 'edge', style: { width: 2, 'line-color': '#94a3b8', 'target-arrow-color': '#94a3b8', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'font-size': 9, color: '#334155', 'text-background-color': '#fff', 'text-background-opacity': 0.92, 'text-background-padding': '3px', 'text-rotation': 'autorotate' } },
@@ -63,54 +71,69 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
   const [firewalls, setFirewalls] = useState<Firewall[]>([]);
   const [firewallInterfaces, setFirewallInterfaces] = useState<FirewallInterface[]>([]);
+  const [firewallNatRules, setFirewallNatRules] = useState<FirewallNatRule[]>([]);
+  const [caseInfo, setCaseInfo] = useState<Case | null>(null);
   const [layout, setLayout] = useState<TopologyLayoutName>('dagre');
   const [selectedNode, setSelectedNode] = useState<cytoscape.NodeDataDefinition | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [viewDirty, setViewDirty] = useState(false);
   const [hasSavedView, setHasSavedView] = useState(false);
+  const [showImporter, setShowImporter] = useState(false);
+  const [showVerifier, setShowVerifier] = useState(false);
+  const [infrastructureOnly, setInfrastructureOnly] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [networkResponse, assetResponse, interfaceResponse, connectionResponse, firewallResponse, firewallInterfaceResponse] = await Promise.all([
+      const [networkResponse, assetResponse, interfaceResponse, connectionResponse, firewallResponse, firewallInterfaceResponse, natResponse, caseResponse] = await Promise.all([
         invoke<ApiResponse<Network[]>>('list_networks'), invoke<ApiResponse<Asset[]>>('list_assets'),
         invoke<ApiResponse<NetworkInterface[]>>('list_network_interfaces', { assetId: null }),
         invoke<ApiResponse<NetworkConnection[]>>('list_network_connections'), invoke<ApiResponse<Firewall[]>>('list_firewalls'),
         invoke<ApiResponse<FirewallInterface[]>>('list_firewall_interfaces', { firewallId: null }),
+        invoke<ApiResponse<FirewallNatRule[]>>('list_firewall_nat_rules', { firewallId: null }),
+        invoke<ApiResponse<Case | null>>('get_current_case_info'),
       ]);
-      for (const response of [networkResponse, assetResponse, interfaceResponse, connectionResponse, firewallResponse, firewallInterfaceResponse]) {
+      for (const response of [networkResponse, assetResponse, interfaceResponse, connectionResponse, firewallResponse, firewallInterfaceResponse, natResponse, caseResponse]) {
         if (!response.success) throw new Error(response.error);
       }
       setNetworks(networkResponse.data ?? []); setAssets(assetResponse.data ?? []); setInterfaces(interfaceResponse.data ?? []);
       setConnections(connectionResponse.data ?? []); setFirewalls(firewallResponse.data ?? []);
       setFirewallInterfaces(firewallInterfaceResponse.data ?? []);
+      setFirewallNatRules(natResponse.data ?? []);
+      setCaseInfo(caseResponse.data ?? null);
     } catch (reason) { toast.error(String(reason)); } finally { setLoading(false); }
   }, []);
 
   useEffect(() => { void loadData(); }, [loadData, refreshTrigger]);
 
+  const visibleAssets = useMemo(
+    () => infrastructureOnly ? assets.filter((item) => ['router', 'switch'].includes(item.asset_type)) : assets,
+    [assets, infrastructureOnly],
+  );
+
   const automaticLayout = useMemo(
-    () => buildTopologyLayout(layout, { networks, assets, firewalls, connections }),
-    [layout, networks, assets, firewalls, connections],
+    () => buildTopologyLayout(layout, { networks, assets: visibleAssets, firewalls, connections }),
+    [layout, networks, visibleAssets, firewalls, connections],
   );
 
   const elements = useMemo<cytoscape.ElementDefinition[]>(() => {
     const result: cytoscape.ElementDefinition[] = [];
     networks.forEach((network) => {
       const parent = `network-${network.id}`;
-      result.push({ group: 'nodes', classes: 'network', data: { id: parent, label: `${network.name}\n${network.subnet}`, kind: network.network_type.toLowerCase(), rawData: network } });
+      result.push({ group: 'nodes', classes: 'network', data: { id: parent, label: `${network.name}\n${network.subnet || (network.vlan_id ? `VLAN ${network.vlan_id} · subnet unresolved` : 'Subnet unresolved')}`, kind: network.network_type.toLowerCase(), rawData: network } });
       for (const corner of ['nw', 'ne', 'sw', 'se']) {
         result.push({ group: 'nodes', classes: 'layout-anchor', selectable: false, grabbable: false, data: { id: `network-boundary-${network.id}-${corner}`, parent } });
       }
     });
-    assets.forEach((asset) => result.push({ group: 'nodes', classes: 'asset', data: { id: `asset-${asset.id}`, label: `${asset.name}\n${asset.ip_address || 'No IP'}`, parent: asset.network_id ? `network-${asset.network_id}` : undefined, compromise: asset.compromise_status, rawData: asset } }));
-    firewalls.forEach((firewall) => result.push({ group: 'nodes', classes: 'firewall', data: { id: `firewall-${firewall.id}`, label: `${firewall.name}\nFirewall`, parent: firewall.network_id ? `network-${firewall.network_id}` : undefined, rawData: firewall } }));
+    visibleAssets.forEach((asset) => result.push({ group: 'nodes', classes: `asset ${asset.asset_type}`, data: { id: `asset-${asset.id}`, label: `${asset.name}\n${['router', 'switch'].includes(asset.asset_type) ? asset.asset_type.toUpperCase() : asset.ip_address || 'No IP'}`, parent: asset.network_id ? `network-${asset.network_id}` : undefined, compromise: asset.compromise_status, rawData: asset } }));
+    firewalls.forEach((firewall) => result.push({ group: 'nodes', classes: 'firewall', data: { id: `firewall-${firewall.id}`, label: `${firewall.name}\n${firewall.vendor ? `${firewall.vendor} ` : ''}Firewall`, parent: firewall.network_id ? `network-${firewall.network_id}` : undefined, rawData: firewall } }));
     connections.forEach((connection) => result.push({ group: 'edges', classes: 'network-link', data: { id: `connection-${connection.id}`, source: `network-${connection.source_network_id}`, target: `network-${connection.target_network_id}`, label: connection.device_name ? `${connection.connection_type} · ${connection.device_name}` : connection.connection_type, rawData: connection } }));
-    interfaces.filter((item) => !item.is_primary && item.network_id).forEach((item) => result.push({ group: 'edges', classes: 'secondary-nic', data: { id: `interface-edge-${item.id}`, source: `asset-${item.asset_id}`, target: `network-${item.network_id}`, label: `${item.name} · ${item.ip_address}`, rawData: item } }));
+    const visibleAssetIds = new Set(visibleAssets.map((item) => item.id));
+    interfaces.filter((item) => visibleAssetIds.has(item.asset_id) && !item.is_primary && item.network_id).forEach((item) => result.push({ group: 'edges', classes: 'secondary-nic', data: { id: `interface-edge-${item.id}`, source: `asset-${item.asset_id}`, target: `network-${item.network_id}`, label: `${item.name} · ${item.ip_address || 'L2'}`, rawData: item } }));
     firewallInterfaces.filter((item) => item.network_id && (!item.is_primary || !firewalls.find((firewall) => firewall.id === item.firewall_id)?.network_id)).forEach((item) => result.push({ group: 'edges', classes: 'firewall-nic', data: { id: `firewall-interface-edge-${item.id}`, source: `firewall-${item.firewall_id}`, target: `network-${item.network_id}`, label: `${item.name} · ${item.ip_addresses.join(', ')}`, rawData: item } }));
     return result;
-  }, [networks, assets, firewalls, connections, interfaces, firewallInterfaces]);
+  }, [networks, visibleAssets, firewalls, connections, interfaces, firewallInterfaces]);
 
   const applyPositions = useCallback((savedView?: TopologyViewState | null, fit = true) => {
     const cy = cyRef.current;
@@ -227,6 +250,26 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
   };
 
   const viewStatus = viewDirty ? 'Unsaved changes' : hasSavedView ? 'Saved view' : 'Automatic view';
+  const selectedRawData = selectedNode?.rawData as Partial<Asset & Firewall> | undefined;
+  const selectedConfig = readStoredDeviceConfig(selectedRawData?.properties ?? selectedRawData?.rules);
+  const configInventory = caseInfo ? {
+    caseId: caseInfo.id,
+    networks,
+    assets,
+    networkInterfaces: interfaces,
+    firewalls,
+    firewallInterfaces,
+    firewallNatRules,
+  } : null;
+  const connectivityInventory = {
+    networks,
+    connections,
+    assets,
+    networkInterfaces: interfaces,
+    firewalls,
+    firewallInterfaces,
+    firewallNatRules,
+  };
 
   return <div className="flex h-full flex-col space-y-4 p-6">
     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -235,6 +278,9 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
         <p className="text-sm text-slate-500">Zones are laid out independently to prevent overlap. Drag a device or an entire zone, then save this layout.</p>
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
+        <label className="flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs text-slate-600"><input type="checkbox" checked={infrastructureOnly} onChange={(event) => setInfrastructureOnly(event.target.checked)} />Infrastructure only</label>
+        <Button size="sm" variant={showImporter ? 'default' : 'outline'} onClick={() => { setShowImporter((value) => !value); setShowVerifier(false); }} disabled={!caseInfo}><FileUp size={16} />Import config</Button>
+        <Button size="sm" variant={showVerifier ? 'default' : 'outline'} onClick={() => { setShowVerifier((value) => !value); setShowImporter(false); }} disabled={!caseInfo}><SearchCheck size={16} />Verify connect</Button>
         <Badge variant={viewDirty ? 'destructive' : 'outline'}>{viewStatus}</Badge>
         <Select value={layout} onValueChange={(value: TopologyLayoutName) => setLayout(value)}>
           <SelectTrigger className="w-36" aria-label="Topology layout"><SelectValue /></SelectTrigger>
@@ -249,9 +295,11 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
         <Button size="sm" title="Save positions and camera" onClick={() => void saveView()} disabled={saving || elements.length === 0}><Save size={16} />{saving ? 'Saving…' : 'Save view'}</Button>
       </div>
     </div>
+    {showImporter && configInventory && <ConfigImportPanel inventory={configInventory} onApplied={loadData} onClose={() => setShowImporter(false)} />}
+    {showVerifier && caseInfo && <ConnectivityVerifier caseInfo={caseInfo} inventory={connectivityInventory} onChanged={loadData} onClose={() => setShowVerifier(false)} />}
     <div className="flex min-h-0 flex-1 gap-4">
       <Card className="min-h-[600px] flex-1"><CardContent ref={containerRef} className="h-full overflow-hidden p-0">{elements.length ? <CytoscapeComponent elements={elements} stylesheet={STYLESHEET} style={{ width: '100%', height: '100%' }} layout={{ name: 'preset' }} minZoom={0.2} maxZoom={4} wheelSensitivity={0.25} cy={wireCytoscape} /> : <div className="flex h-full items-center justify-center text-slate-400">Add a network or asset to build the topology.</div>}</CardContent></Card>
-      {selectedNode && <Card className="w-80 flex-shrink-0"><CardHeader><CardTitle className="text-sm">{String(selectedNode.label ?? 'Node details').split('\n')[0]}</CardTitle></CardHeader><CardContent className="space-y-2 text-xs"><Badge variant="outline">{selectedNode.compromise || selectedNode.kind || 'network object'}</Badge>{selectedNode.rawData && Object.entries(selectedNode.rawData as Record<string, unknown>).filter(([key, value]) => value != null && !['id', 'created_at', 'network_id', 'network_name'].includes(key)).map(([key, value]) => <div key={key} className="grid grid-cols-[110px_1fr] gap-2"><span className="text-slate-500">{key.replaceAll('_', ' ')}</span><span className="break-all font-mono">{String(value)}</span></div>)}</CardContent></Card>}
+      {selectedNode && <Card className="w-[430px] flex-shrink-0 overflow-hidden"><CardHeader><CardTitle className="text-sm">{String(selectedNode.label ?? 'Node details').split('\n')[0]}</CardTitle></CardHeader><CardContent className="max-h-[calc(100vh-240px)] space-y-3 overflow-auto text-xs"><Badge variant="outline">{selectedNode.compromise || selectedNode.kind || selectedConfig?.deviceType || 'network object'}</Badge>{selectedConfig && <ImportedDeviceDetails config={selectedConfig} />}{selectedNode.rawData && Object.entries(selectedNode.rawData as Record<string, unknown>).filter(([key, value]) => value != null && !['id', 'created_at', 'network_id', 'network_name', 'properties', 'rules', 'config_text'].includes(key)).map(([key, value]) => <div key={key} className="grid grid-cols-[110px_1fr] gap-2"><span className="text-slate-500">{key.replaceAll('_', ' ')}</span><span className="break-all font-mono">{String(value)}</span></div>)}</CardContent></Card>}
     </div>
   </div>;
 }
