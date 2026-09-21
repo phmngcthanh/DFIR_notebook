@@ -77,6 +77,9 @@ pub struct OpenCase {
     pub id: String,
     pub path: PathBuf,
     pub conn: Mutex<Connection>,
+    /// Event-log sidecar for this case; opened on unlock when a store file
+    /// already exists beside the case, otherwise on explicit request.
+    pub event_logs: Mutex<Option<Connection>>,
     pub revision: AtomicU64,
     pub pending_bundles: Mutex<HashMap<String, PendingBundle>>,
     pub pending_partial_imports: Mutex<HashMap<String, PreparedPartialImport>>,
@@ -208,10 +211,19 @@ impl AppState {
         if let Some(existing) = guard.get(id) {
             return Ok(existing.clone());
         }
+        // Open an existing event-log store with the just-verified password. A
+        // mismatch or corruption leaves it closed; the dedicated open command
+        // surfaces the real error when someone needs the store.
+        let event_logs = if crate::event_logs::sidecar_path(&path).exists() {
+            crate::event_logs::open_store(&path, password).ok()
+        } else {
+            None
+        };
         let case = Arc::new(OpenCase {
             id: id.to_string(),
             path,
             conn: Mutex::new(conn),
+            event_logs: Mutex::new(event_logs),
             revision: AtomicU64::new(0),
             pending_bundles: Mutex::new(HashMap::new()),
             pending_partial_imports: Mutex::new(HashMap::new()),

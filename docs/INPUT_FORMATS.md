@@ -16,6 +16,7 @@ Last reviewed: 2026-07-28
 | Structured partial import | `.json` or pasted JSON | No, deliberately | One-field, multi-section, script/LLM-assisted intake | Only after preview, selection, and confirmation |
 | Vendor device configuration | `.conf`, `.cfg`, `.txt`, `.set`, `.xml` | No | Derive infrastructure topology plus route/ACL/NAT evidence | Only after normalized preview and confirmation |
 | Virtual-machine inventory | `.csv`, `.json`, `.txt` or pasted text | No | Create/update ESXi/vSphere, Proxmox VE, or Hyper-V guests in Assets | Only after normalized preview and confirmation |
+| Event logs | `.evtx`, `.json`, `.log`, `.txt` or pasted text | Sidecar file is SQLCipher-encrypted with the case password | Searchable raw Windows/Unix event evidence in the Event Logs sidecar | Raw records never mutate the case; promotion to timeline is explicit and attributed |
 | Text report | `.txt` | No | Display/print output | Never; not importable |
 
 Use a shared-baseline expert bundle for end-of-day expert reconciliation. Use structured partial import for information extracted from prose, another tool, an LLM, or a team that did not work from the shared database baseline.
@@ -53,13 +54,14 @@ Configuration parsing is deliberately best effort:
 
 Re-export from the vendor's documented native format when a warning reports unsupported input. Junos XML, dynamic routing state, policy inheritance, application identification, VPN/tunnel negotiation, PBR, VRFs/virtual systems, and vendor-specific rule shadowing are not fully simulated in this first profile set.
 
-### 1.2 Virtual-machine inventories
+### 1.2 Virtual-machine and device inventories
 
-Open **Assets → Import VM inventory** and choose the source platform. The importer auto-detects JSON, CSV, or supported native table text.
+Open **Assets → Import VM inventory** and choose the source platform. The importer auto-detects JSON, CSV, or supported native table text. The **Generic list** platform is the batch path for everything that is not a hypervisor export: manual device lists and `adb devices` output covering both mobile devices and PC/other-OS machines.
 
 | Platform | Supported native/structured input | Recommended stable identity | Useful normalized fields |
 |---|---|---|---|
 | VMware ESXi / vSphere | `vim-cmd vmsvc/getallvms`; PowerCLI `Get-VM` CSV; simple `Get-VM` JSON | PowerCLI `Id`, or host-scoped numeric `VMid` plus inventory scope | name, host, power state, guest OS, CPUs, memory, version, VMX/config path, IPs, MACs |
+| Generic list (mobile & PC/other OS) | one device per line (`name, ip, mac, os, type`); bare hostname lists (one per line or comma-separated); `adb devices` / `adb devices -l` output; headered CSV/JSON | `adb` serial, or inventory scope plus name | name, IP, MAC, OS, declared asset type, user, adb state/model |
 | Proxmox VE | JSON from `pvesh get /cluster/resources --type vm --output-format json`; `qm list`; CSV | cluster-scoped `vmid` | QEMU/LXC kind, name, node, state, CPUs, memory, disk, IPs, MACs |
 | Microsoft Hyper-V | `Get-VM` JSON; `Get-VM` table; selected-property PowerShell CSV | `VMId` plus optional inventory scope | name, host, state, CPUs, assigned/startup memory, generation, version, configuration path, IPs, MACs |
 
@@ -85,19 +87,50 @@ pvesh get /cluster/resources --type vm --output-format json > vms.json
 
 # One Proxmox node: QEMU VM table
 qm list
+
+# Connected Android devices and emulators (mobile batch add)
+adb devices -l
 ```
 
-CSV header matching ignores case, spaces, punctuation, and parentheses. `Name` is required. Common identifier aliases (`Id`, `VMId`, `vmid`), state aliases (`State`, `Status`, `PowerState`), host aliases (`VMHost`, `Node`, `ComputerName`), and resource aliases are accepted. Multi-value IP and MAC columns should use semicolons inside the CSV field as the copy-ready commands do.
+CSV header matching ignores case, spaces, punctuation, and parentheses. `Name` is required. Common identifier aliases (`Id`, `VMId`, `vmid`), state aliases (`State`, `Status`, `PowerState`), host aliases (`VMHost`, `Node`, `ComputerName`), and resource aliases are accepted. Multi-value IP and MAC columns should use semicolons inside the CSV field as the copy-ready commands do. Generic CSV additionally accepts `Type` (asset type: `mobile`, `vm`, `workstation`, `server`, `laptop`, `router`, `switch`, `firewall`, `other`, with `pc`/`phone`/`tablet`-style aliases) and `User` columns; unknown type values are reported as review warnings and ignored. Generic native lines are positional `name, ip, mac, os, type`; a bare line of hostname tokens becomes one device per token.
 
 The optional **Inventory scope** should identify the ESXi host, Proxmox cluster, or Hyper-V host/failover-cluster inventory. It participates in the stored identity key. This is especially important for numeric ESXi `VMid` values, which are local to a host. Re-import matching checks the normalized identity first, then uses a unique same-platform native ID with a compatible scope or the same imported name/scope as a controlled fallback. It never name-matches and overwrites a manually created asset.
 
-Each recognized guest is created as an ordinary `asset_type: "vm"` row, so it appears immediately in **Assets and PC Configuration** and in normal snapshots/history. Proxmox LXC guests remain `asset_type: "vm"` for the current schema but carry `kind: "container"` in their normalized properties. Platform, source format/file, native ID, scope, host/node, runtime state, resources, addresses, configuration path, and the source row are stored under `schema: "dfir-vm-inventory-v1"` in encrypted asset `properties`. Existing non-inventory properties are retained as `legacyProperties`.
+Each recognized guest is created as an ordinary asset row, so it appears immediately in **Assets and PC Configuration** and in normal snapshots/history. The asset type covers both device classes: a guest OS that identifies as mobile (Android, iOS/iPadOS, watchOS, HarmonyOS, KaiOS, Tizen, Wear OS, Fuchsia) becomes `asset_type: "mobile"`; every PC/other-OS guest stays `asset_type: "vm"`. An explicit `Type` column (generic lists) wins over OS detection, and re-imports preserve an analyst-retyped asset type unless the classified OS says otherwise. Proxmox LXC guests remain `asset_type: "vm"` for the current schema but carry `kind: "container"` in their normalized properties. `adb` records use the device serial as the stable native ID, keep the adb state (unauthorized/offline rows import too, for transparent review) and model name, and carry `guestOs: "Android"`. Platform, source format/file, native ID, scope, host/node, runtime state, resources, addresses, configuration path, and the source row are stored under `schema: "dfir-vm-inventory-v1"` in encrypted asset `properties`. Existing non-inventory properties are retained as `legacyProperties`.
 
 Discovered IP/MAC pairs become `Inventory NIC N` records. IPv4 addresses attach automatically to the most-specific existing case subnet; IPv6 and unmatched addresses remain unassigned rather than causing a network to be invented. A repeat import reuses those managed NIC IDs and preserves analyst-owned compromise state, investigation progress, user, OS when the inventory has no OS, scan results, and legacy properties.
 
 Inventory disappearance is not evidence of deletion. The workflow therefore never deletes an asset or an older inventory NIC merely because it is absent from a later file; it reports retained stale NICs for review. The importer does not query the hypervisor, fetch VM configuration/disks, or prove that reported runtime state is current.
 
 Vendor basis for the supported shapes: Broadcom documents both [`vim-cmd vmsvc/getallvms`](https://knowledge.broadcom.com/external/article?legacyId=1003738) and PowerCLI [`Get-VM`](https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/commands/get-vm); Proxmox documents `pvesh`, `qm`, and JSON output options in the [Proxmox VE Administration Guide](https://pve.proxmox.com/pve-docs/pve-admin-guide.pdf); Microsoft documents Hyper-V [`Get-VM`](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/powershell), PowerShell [`Export-Csv`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/export-csv), and [`ConvertTo-Json`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertto-json).
+
+### 1.3 Event logs
+
+Open **Event Logs**, unlock the evidence store with the case password, and import offline copies of Windows and Unix event logs. Raw records are deliberately kept **outside the investigation database**: they live in a second SQLCipher-encrypted file next to the case (`<case>.dfirlogs`) that shares the case password, has no history tables, and never enters snapshots, expert bundles, or merges. The store is created only when you first open it, unlocks automatically when a store already exists beside a case you unlock, and is rekeyed together with the case when the database password changes.
+
+| Input | Expected shape | Notes |
+|---|---|---|
+| Syslog / Unix | RFC 3164 or RFC 5424 lines, pasted or from a `.log`/`.txt` file | Choose the timezone used for timestamps without an offset or year (RFC 3164 dates get the current year) |
+| Windows event JSON | `Get-WinEvent … | ConvertTo-Json` array or one JSON object per line | Fields used: `TimeCreated`, `Id`, `ProviderName`, `LogName`, `LevelDisplayName`, `MachineName`, `Message` |
+| Windows EVTX | binary `.evtx` file | Desktop and Android builds only (native file dialog); parsed directly in the app, never uploaded anywhere |
+
+Copy-ready collection commands:
+
+```powershell
+# Windows event log export (run on the host being investigated)
+Get-WinEvent -FilterHashtable @{LogName='Security'; StartTime=(Get-Date).AddDays(-14)} |
+  Select-Object TimeCreated,Id,ProviderName,LogName,LevelDisplayName,MachineName,Message |
+  ConvertTo-Json -Depth 3 | Set-Content security-events.json
+```
+
+```sh
+# Unix auth log copy (run on the host being investigated)
+sudo cp /var/log/auth.log ./
+```
+
+Every import becomes one **batch** with kind, source file name, timezone assumption, record counts, and the covered time range. Batches can be deleted — deleting a batch removes only raw sidecar records, never promoted timeline events. Records are searched by free text (message, provider, host, channel, event ID, raw content) with host, event-ID, batch, and UTC time-range filters. Timestamps with an explicit offset keep it; undated values are interpreted with the chosen import timezone, and the raw line is always retained in the record details.
+
+**Promotion** copies selected records (up to 500 at a time) into the case timeline as ordinary attributed events — description, source (`Event log <kind>: <file>`), optional asset link, severity, and event type of your choosing. The raw record stays in the sidecar; promotion never rewrites it. The importer parses offline copies only: it never queries a live Windows host, syslog server, or SIEM, and EVTX files reflect whatever point in time the copy was taken.
 
 ## 2. Structured partial-import envelope
 

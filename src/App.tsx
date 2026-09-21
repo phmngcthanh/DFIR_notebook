@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
   Clock, Download, FileText, FolderOpen, GitGraph, LayoutDashboard,
-  Info, LockKeyhole, Network, Plus, Route, Server, ShieldAlert, SquareKanban, UserRound, Users,
+  Info, LockKeyhole, Network, Plus, Route, ScrollText, Server, ShieldAlert, SquareKanban, UserRound, Users,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -26,6 +26,7 @@ const AssetManager = lazy(() => import('@/components/AssetManager'));
 const NetworkTopology = lazy(() => import('@/components/NetworkTopology'));
 const InvestigationGraph = lazy(() => import('@/components/InvestigationGraph'));
 const TimelineView = lazy(() => import('@/components/TimelineView'));
+const EventLogPanel = lazy(() => import('@/components/EventLogPanel'));
 const IocManager = lazy(() => import('@/components/IocManager'));
 const NoteManager = lazy(() => import('@/components/NoteManager'));
 const ActivityBoard = lazy(() => import('@/components/ActivityBoard'));
@@ -39,6 +40,7 @@ const NAV_ITEMS: { view: View; label: string; icon: React.ReactNode }[] = [
   { view: 'topology', label: 'Topology', icon: <GitGraph size={18} /> },
   { view: 'investigation', label: 'Investigation', icon: <Route size={18} /> },
   { view: 'timeline', label: 'Timeline', icon: <Clock size={18} /> },
+  { view: 'eventlogs', label: 'Event Logs', icon: <ScrollText size={18} /> },
   { view: 'iocs', label: 'IOCs', icon: <ShieldAlert size={18} /> },
   { view: 'notes', label: 'Notes', icon: <FileText size={18} /> },
   { view: 'activity', label: 'Activity Board', icon: <SquareKanban size={18} /> },
@@ -232,6 +234,7 @@ function App() {
       {currentView === 'topology' && <NetworkTopology refreshTrigger={refreshTrigger} />}
       {currentView === 'investigation' && <InvestigationGraph refreshTrigger={refreshTrigger} />}
       {currentView === 'timeline' && <TimelineView refreshTrigger={refreshTrigger} />}
+      {currentView === 'eventlogs' && <EventLogPanel refreshTrigger={refreshTrigger} onChanged={() => setRefreshTrigger((value) => value + 1)} />}
       {currentView === 'iocs' && <IocManager refreshTrigger={refreshTrigger} />}
       {currentView === 'notes' && <NoteManager refreshTrigger={refreshTrigger} />}
       {currentView === 'activity' && <ActivityBoard refreshTrigger={refreshTrigger} />}
