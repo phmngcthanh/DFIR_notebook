@@ -1,7 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Asset, JsonValue, Network, NetworkInterface } from '@/types';
 
-export type VmInventoryPlatform = 'esxi' | 'proxmox' | 'hyperv';
+export type VmInventoryPlatform = 'esxi' | 'proxmox' | 'hyperv' | 'generic';
 export type VmInventorySourceFormat = 'csv' | 'json' | 'native';
 export type VmKind = 'virtual-machine' | 'container';
 
@@ -18,6 +18,8 @@ export interface ImportedVmInventory {
   hypervisor?: string;
   state?: string;
   guestOs?: string;
+  assetType?: string;
+  userName?: string;
   cpuCount?: number;
   memoryBytes?: number;
   diskBytes?: number;
@@ -73,7 +75,49 @@ const PLATFORM_LABELS: Record<VmInventoryPlatform, string> = {
   esxi: 'VMware ESXi / vSphere',
   proxmox: 'Proxmox VE',
   hyperv: 'Microsoft Hyper-V',
+  generic: 'Generic device list',
 };
+
+/**
+ * Asset types a batch row may declare explicitly. Mirrors the Assets type
+ * dropdown; anything else is reported as ignored rather than stored.
+ */
+export const BATCH_ASSET_TYPES = ['mobile', 'vm', 'workstation', 'server', 'laptop', 'router', 'switch', 'firewall', 'other'] as const;
+export type BatchAssetType = (typeof BATCH_ASSET_TYPES)[number];
+
+const DECLARED_TYPE_ALIASES: Record<string, BatchAssetType> = {
+  pc: 'workstation',
+  computer: 'workstation',
+  desktop: 'workstation',
+  host: 'workstation',
+  'mobile-device': 'mobile',
+  mobile_device: 'mobile',
+  phone: 'mobile',
+  tablet: 'mobile',
+  smartphone: 'mobile',
+  'virtual-machine': 'vm',
+  'virtual machine': 'vm',
+};
+
+export function normalizeBatchAssetType(value: unknown): BatchAssetType | undefined {
+  const text = cleanText(value)?.toLowerCase();
+  if (!text) return undefined;
+  return (BATCH_ASSET_TYPES as readonly string[]).includes(text)
+    ? text as BatchAssetType
+    : DECLARED_TYPE_ALIASES[text];
+}
+
+const MOBILE_OS_PATTERN = /android|iphone|ipad|ipados|watchos|kaios|tizen|harmony\s*os|wear\s*os|fuchsia/i;
+
+/** Classifies a guest OS string into a mobile-device asset type, or undefined for PC/other OS. */
+export function classifyGuestOs(guestOs: string | undefined): 'mobile' | undefined {
+  const text = guestOs?.trim();
+  if (!text) return undefined;
+  if (MOBILE_OS_PATTERN.test(text)) return 'mobile';
+  // Bare "iOS" without another vendor qualifier; "Cisco IOS" stays a network OS.
+  if (/(?:^|[^a-z])ios(?:[\s\d._-]|$)/i.test(text) && !/cisco/i.test(text)) return 'mobile';
+  return undefined;
+}
 
 function cleanText(value: unknown): string | undefined {
   if (value === null || value === undefined) return undefined;
@@ -186,16 +230,24 @@ function normalizeRecord(
   sourceFormat: VmInventorySourceFormat,
   input: InputRecord,
   options: VmInventoryParseOptions,
+  warnings: string[],
 ): ImportedVmInventory | null {
+  const generic = platform === 'generic';
   const fields = keyed(input);
-  const name = cleanText(read(fields, 'name', 'vmname', 'displayname'));
+  const name = cleanText(read(fields, 'name', 'vmname', 'displayname', ...(generic ? ['hostname', 'devicename'] : [])));
   if (!name) return null;
 
   let nativeId = cleanText(read(fields, 'nativeid', 'vmid', 'id'));
   let hypervisor = cleanText(read(fields, 'hypervisor', 'vmhost', 'host', 'node', 'computername'));
   let kind: VmKind = 'virtual-machine';
   let state = cleanText(read(fields, 'state', 'status', 'powerstate'));
-  let guestOs = cleanText(read(fields, 'guestos', 'guestid', 'osfullname', 'operatingsystem', 'guest'));
+  let guestOs = cleanText(read(fields, 'guestos', 'guestid', 'osfullname', 'operatingsystem', 'guest', ...(generic ? ['os'] : [])));
+  const declaredTypeSource = read(fields, 'assettype', 'devicetype', ...(generic ? ['type'] : []));
+  const assetType = normalizeBatchAssetType(declaredTypeSource);
+  if (generic && cleanText(declaredTypeSource) && !assetType) {
+    warnings.push(`Ignored unknown asset type "${cleanText(declaredTypeSource)}" for ${name}; use one of: ${BATCH_ASSET_TYPES.join(', ')}.`);
+  }
+  const userName = cleanText(read(fields, 'user', 'username', 'owner'));
   const cpuCount = numberValue(read(fields, 'cpucount', 'numcpu', 'processorcount', 'maxcpu', 'cpus'));
   let memoryBytes = numberValue(read(fields, 'memorybytes', 'memoryassigned', 'memorystartup', 'maxmem'));
   let diskBytes = numberValue(read(fields, 'diskbytes', 'maxdisk'));
@@ -222,7 +274,7 @@ function normalizeRecord(
     diskBytes = diskBytes
       ?? scaledNumber(read(fields, 'bootdiskgb', 'diskgb', 'bootdisk(gb)'), 1024 ** 3);
     version = version ?? cleanText(read(fields, 'qemuversion'));
-  } else {
+  } else if (platform === 'hyperv') {
     nativeId = nativeId ?? cleanText(read(fields, 'guid'));
     memoryBytes = memoryBytes
       ?? scaledNumber(read(fields, 'memoryassignedm', 'memoryassignedmb', 'memorymb'), 1024 ** 2);
@@ -245,6 +297,8 @@ function normalizeRecord(
     ...(hypervisor ? { hypervisor } : {}),
     ...(state ? { state } : {}),
     ...(guestOs ? { guestOs } : {}),
+    ...(assetType ? { assetType } : {}),
+    ...(userName ? { userName } : {}),
     ...(cpuCount !== undefined ? { cpuCount } : {}),
     ...(memoryBytes !== undefined ? { memoryBytes } : {}),
     ...(diskBytes !== undefined ? { diskBytes } : {}),
@@ -372,6 +426,67 @@ function parseHyperVNative(text: string): InputRecord[] {
   });
 }
 
+const HOSTNAME_LIKE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+
+/** `adb devices [-l]` output: "List of devices attached" then one `serial state [key:value…]` line per device. */
+function parseAdbDevices(lines: string[]): InputRecord[] | null {
+  const headerIndex = lines.findIndex((line) => /^list of devices attached$/i.test(line.trim()));
+  if (headerIndex < 0) return null;
+  return lines.slice(headerIndex + 1).flatMap((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('*')) return [];
+    const [serial, state = 'device', ...qualifiers] = trimmed.split(/\s+/);
+    if (!serial) return [];
+    const model = qualifiers.find((item) => item.startsWith('model:'))?.slice('model:'.length);
+    return [{
+      Id: serial,
+      Name: model ? model.replaceAll('_', ' ') : serial,
+      State: state,
+      GuestOS: 'Android',
+      Hypervisor: serial.startsWith('emulator-') || serial.includes(':5555') ? 'Android emulator' : 'USB-connected device',
+      Qualifiers: qualifiers.join(' '),
+    }];
+  });
+}
+
+/**
+ * Generic batch list, one device per line. Columns are positional
+ * `name, ip, mac, os, type` (trailing columns optional); a line of bare
+ * hostname tokens is treated as several devices.
+ */
+function parseGenericNative(text: string): InputRecord[] {
+  const lines = text.split(/\r?\n/);
+  const adb = parseAdbDevices(lines);
+  if (adb) return adb;
+  return lines.flatMap((line) => {
+    const row = line.trim();
+    if (!row) return [];
+    const columns = row.split(/[,;\t]/).map((column) => column.trim());
+    if (columns.length === 1) {
+      const tokens = columns[0].split(/\s+/);
+      if (tokens.length > 1) {
+        const joined = tokens.slice(1).join(';');
+        const ipAddress = ipValues(joined)[0];
+        const macAddress = macValues(joined)[0];
+        if (ipAddress || macAddress) {
+          return [{ Name: tokens[0], ...(ipAddress ? { IPAddress: ipAddress } : {}), ...(macAddress ? { MacAddress: macAddress } : {}) }];
+        }
+      }
+      return [{ Name: columns[0] }];
+    }
+    if (columns.slice(1).every((column) => !column || HOSTNAME_LIKE.test(column)) && !columns.slice(1).some((column) => validIp(column))) {
+      return columns.filter(Boolean).map((column) => ({ Name: column }));
+    }
+    return [{
+      Name: columns[0],
+      ...(columns[1] ? { IPAddress: columns[1] } : {}),
+      ...(columns[2] ? { MacAddress: columns[2] } : {}),
+      ...(columns[3] ? { GuestOS: columns[3] } : {}),
+      ...(columns[4] ? { AssetType: columns[4] } : {}),
+    }];
+  });
+}
+
 function jsonRecords(text: string): InputRecord[] {
   const parsed = JSON.parse(text) as unknown;
   const value = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
@@ -408,7 +523,9 @@ export function parseVmInventory(
           ? parseEsxiNative(text)
           : platform === 'proxmox'
             ? parseProxmoxNative(text)
-            : parseHyperVNative(text);
+            : platform === 'hyperv'
+              ? parseHyperVNative(text)
+              : parseGenericNative(text);
   } catch (reason) {
     if (reason instanceof SyntaxError) throw new Error(`Invalid JSON VM inventory: ${reason.message}`);
     throw reason;
@@ -432,7 +549,7 @@ export function parseVmInventory(
   let missingNames = 0;
   let duplicates = 0;
   for (const input of inputs) {
-    const record = normalizeRecord(platform, format, input, options);
+    const record = normalizeRecord(platform, format, input, options, warnings);
     if (!record) {
       missingNames += 1;
       continue;
@@ -452,7 +569,9 @@ export function parseVmInventory(
   if (format === 'native' && platform === 'esxi' && !options.inventoryScope) {
     warnings.push('ESXi VMid values are host-local. Set the inventory scope to the ESXi host name for reliable matching across repeated imports.');
   }
-  if (!records.length) throw new Error(`No ${PLATFORM_LABELS[platform]} VM records were recognized`);
+  if (!records.length) throw new Error(platform === 'generic'
+    ? 'No device records were recognized — provide a name for each device'
+    : `No ${PLATFORM_LABELS[platform]} VM records were recognized`);
   return {
     platform,
     sourceFormat: format,
@@ -468,7 +587,7 @@ export function readStoredVmInventory(properties: string | null | undefined): Im
   try {
     const parsed = JSON.parse(properties) as Partial<ImportedVmInventory>;
     return parsed.schema === VM_INVENTORY_SCHEMA
-      && ['esxi', 'proxmox', 'hyperv'].includes(parsed.platform ?? '')
+      && ['esxi', 'proxmox', 'hyperv', 'generic'].includes(parsed.platform ?? '')
       && typeof parsed.identityKey === 'string'
       && typeof parsed.name === 'string'
       ? parsed as ImportedVmInventory
@@ -580,9 +699,12 @@ export function buildVmInventoryImport(
       name: record.name,
       ip_address: primaryIp,
       mac_address: primaryMac,
-      asset_type: 'vm',
+      asset_type: record.assetType
+        ?? classifyGuestOs(record.guestOs)
+        ?? existing?.asset_type
+        ?? (parsed.platform === 'generic' ? 'workstation' : 'vm'),
       os: record.guestOs ?? existing?.os ?? null,
-      user_name: existing?.user_name ?? null,
+      user_name: record.userName ?? existing?.user_name ?? null,
       compromise_status: existing?.compromise_status ?? 'unknown',
       investigation_status: existing?.investigation_status ?? 'not_started',
       properties: storedProperties(record, existing) as unknown as JsonValue,
@@ -608,12 +730,15 @@ export function buildVmInventoryImport(
     }
   }
   if (!changes.length) throw new Error('The VM inventory did not produce any importable assets');
+  const sourceLabel = parsed.platform === 'generic'
+    ? `Batch device list${parsed.inventoryScope ? ` (${parsed.inventoryScope})` : ''}`
+    : `${PLATFORM_LABELS[parsed.platform]} VM inventory${parsed.inventoryScope ? ` (${parsed.inventoryScope})` : ''}`;
   return {
     document: JSON.stringify({
       format: 'dfir-investigator-partial',
       format_version: 1,
       case_id: inventory.caseId,
-      source: `${PLATFORM_LABELS[parsed.platform]} VM inventory${parsed.inventoryScope ? ` (${parsed.inventoryScope})` : ''}`,
+      source: sourceLabel,
       changes,
     }, null, 2),
     warnings,

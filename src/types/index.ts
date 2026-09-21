@@ -458,4 +458,50 @@ export interface ApiResponse<T> {
   error?: string;
 }
 
-export type View = 'dashboard' | 'networks' | 'assets' | 'topology' | 'investigation' | 'timeline' | 'iocs' | 'notes' | 'activity' | 'export' | 'about';
+// ---- event-log sidecar ----------------------------------------------------
+
+export interface EventLogStoreCounts {
+  batchCount: number;
+  recordCount: number;
+}
+
+export interface EventLogStoreStatus {
+  open: boolean;
+  fileName: string | null;
+  batches: EventLogStoreCounts | null;
+}
+
+export interface EventLogBatch {
+  id: string;
+  kind: 'syslog' | 'windows-json' | 'evtx' | string;
+  fileName: string | null;
+  host: string | null;
+  timezone: string;
+  note: string | null;
+  recordCount: number;
+  skippedCount: number;
+  firstTimeUtc: string | null;
+  lastTimeUtc: string | null;
+  importedAt: string;
+}
+
+export interface EventLogRecord {
+  id: number;
+  batchId: string;
+  kind: string;
+  eventTimeUtc: string | null;
+  rawTime: string | null;
+  host: string | null;
+  provider: string | null;
+  channel: string | null;
+  eventId: string | null;
+  level: string | null;
+  message: string | null;
+}
+
+export interface EventLogSearchOutcome {
+  rows: EventLogRecord[];
+  total: number;
+}
+
+export type View = 'dashboard' | 'networks' | 'assets' | 'topology' | 'investigation' | 'timeline' | 'eventlogs' | 'iocs' | 'notes' | 'activity' | 'export' | 'about';

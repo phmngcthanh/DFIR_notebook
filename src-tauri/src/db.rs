@@ -2005,7 +2005,7 @@ fn parse_naive_timestamp(value: &str) -> AppResult<(NaiveDateTime, String)> {
     Ok((datetime, precision.into()))
 }
 
-fn fixed_offset(value: &str) -> Option<AppResult<FixedOffset>> {
+pub fn fixed_offset(value: &str) -> Option<AppResult<FixedOffset>> {
     let trimmed = value.trim();
     let without_prefix = trimmed
         .strip_prefix("UTC")
@@ -2121,6 +2121,13 @@ pub fn parse_timestamp_preview(
         offset_ms,
         used_embedded_timezone: embedded,
     })
+}
+
+/// Interpret one externally supplied timestamp (event-log importers) and
+/// return the normalized UTC string the investigation model stores.
+pub fn parse_log_timestamp(value: &str, timezone: &str) -> AppResult<String> {
+    let (datetime, _precision, _embedded) = parse_flexible_timestamp(value, timezone)?;
+    Ok(format_utc(datetime))
 }
 
 fn validate_ioc_value(ioc_type: &str, value: &str) -> AppResult<()> {

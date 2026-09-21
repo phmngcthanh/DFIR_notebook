@@ -22,6 +22,8 @@ tauri-plugin-dialog = "2"
 rusqlite = { version = "0.32", features = ["bundled-sqlcipher-vendored-openssl", "chrono", "uuid", "serde_json"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+evtx = { version = "0.12.2", default-features = false }
+syslog_loose = "0.23"
 # v5 backs the deterministic STIX indicator ids in `ioc_export`.
 uuid = { version = "1.10", features = ["serde", "v4", "v5"] }
 aes-gcm = "0.10"

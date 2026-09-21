@@ -44,6 +44,11 @@ use crate::db::{
     update_network_interface, update_note, update_timeline_event, ExportData, Ioc,
     TopologyNodePosition,
 };
+use crate::event_logs::{
+    delete_batch, import_syslog_text, import_windows_json_text, list_batches, open_store,
+    promote_records, search_event_logs, sidecar_path, store_counts, EventLogSearchParams,
+    ImportOptions, PromoteOptions, StoreCounts,
+};
 use crate::history::{
     apply_bundle, get_history, parse_change_bundle, preview_bundle, ActorIdentity, MergeDecision,
 };
@@ -159,10 +164,174 @@ pub(crate) fn run(
             })?;
             open_encrypted_connection(&case.path, new.as_str())
                 .map_err(|error| format!("Password changed but verification failed: {error}"))?;
+            // The event-log sidecar shares the case password: rekey an open
+            // store in place, or open a closed existing one just to rekey it.
+            let sidecar = sidecar_path(&case.path);
+            let mut sidecar_error: Option<String> = None;
+            {
+                let mut guard = case
+                    .event_logs
+                    .lock()
+                    .map_err(|_| "Event-log store lock poisoned".to_string())?;
+                match guard.as_mut() {
+                    Some(conn) => {
+                        if let Err(error) = rekey_connection(conn, new.as_str()) {
+                            sidecar_error = Some(error.to_string());
+                        }
+                    }
+                    None if sidecar.exists() => {
+                        if let Err(error) = open_encrypted_connection(&sidecar, current.as_str())
+                            .map_err(|e| e.to_string())
+                            .and_then(|mut conn| {
+                                rekey_connection(&mut conn, new.as_str()).map_err(|e| e.to_string())
+                            })
+                        {
+                            sidecar_error = Some(error);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            if let Some(error) = sidecar_error {
+                return Err(format!(
+                    "Case password changed, but the event-log store could not be rekeyed: {error}"
+                ));
+            }
             // Every other token was issued against the old password.
             state.end_other_sessions(&case.id, &session.token);
             case.bump();
             to_json(true)
+        }
+
+        // ---- event-log sidecar ---------------------------------------------
+        // The store lives beside the case file, shares its password, and holds
+        // raw evidence outside history/snapshots. EVTX files are binary and
+        // need the desktop dialog command; this shell imports pasted text.
+        "get_event_log_store_status" => {
+            let file_name = sidecar_path(&case.path)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string());
+            let guard = case
+                .event_logs
+                .lock()
+                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let status = match guard.as_ref() {
+                Some(conn) => EventLogStoreStatus {
+                    open: true,
+                    file_name,
+                    batches: Some(store_counts(conn)?),
+                },
+                None => EventLogStoreStatus {
+                    open: false,
+                    file_name,
+                    batches: None,
+                },
+            };
+            to_json(status)
+        }
+        "open_event_log_store" => {
+            let p: EventLogOpenParams = from_args(args)?;
+            let password = Zeroizing::new(p.password);
+            // Prove the password unlocks the case before creating anything.
+            open_encrypted_connection(&case.path, password.as_str())?;
+            let conn = open_store(&case.path, password.as_str())?;
+            let counts = store_counts(&conn)?;
+            let mut guard = case
+                .event_logs
+                .lock()
+                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            *guard = Some(conn);
+            to_json(counts)
+        }
+        "import_event_log_text" => {
+            let p: EventLogImportParams = from_args(args)?;
+            let options = ImportOptions {
+                file_name: p.file_name,
+                host_hint: p.host_hint,
+                timezone: p.timezone.unwrap_or_else(|| "UTC".to_string()),
+                note: p.note,
+            };
+            let mut guard = case
+                .event_logs
+                .lock()
+                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let Some(conn) = guard.as_mut() else {
+                return Err("The event-log store is not open for this case".into());
+            };
+            let summary = match p.kind.as_str() {
+                "syslog" => import_syslog_text(conn, &options, &p.text)?,
+                "windows-json" => import_windows_json_text(conn, &options, &p.text)?,
+                _ => {
+                    return Err(
+                        "Unsupported event-log kind; use syslog or windows-json".to_string()
+                    )
+                }
+            };
+            to_json(summary)
+        }
+        "list_event_log_batches" => {
+            let guard = case
+                .event_logs
+                .lock()
+                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let Some(conn) = guard.as_ref() else {
+                return Err("The event-log store is not open for this case".into());
+            };
+            to_json(list_batches(conn)?)
+        }
+        "search_event_log_records" => {
+            let p: EventLogQueryParams = from_args(args)?;
+            let params = EventLogSearchParams {
+                query: p.query,
+                batch_id: p.batch_id,
+                host: p.host,
+                event_id: p.event_id,
+                from_utc: p.from_utc,
+                to_utc: p.to_utc,
+                limit: p.limit,
+                offset: p.offset,
+            };
+            let guard = case
+                .event_logs
+                .lock()
+                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let Some(conn) = guard.as_ref() else {
+                return Err("The event-log store is not open for this case".into());
+            };
+            to_json(search_event_logs(conn, &params)?)
+        }
+        "delete_event_log_batch" => {
+            let p: EventLogBatchParams = from_args(args)?;
+            let mut guard = case
+                .event_logs
+                .lock()
+                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let Some(conn) = guard.as_mut() else {
+                return Err("The event-log store is not open for this case".into());
+            };
+            delete_batch(conn, &p.batch_id)?;
+            to_json(true)
+        }
+        "promote_event_logs_to_timeline" => {
+            let p: EventLogPromoteParams = from_args(args)?;
+            let options = PromoteOptions {
+                asset_id: p.asset_id,
+                severity: p.severity,
+                event_type: p.event_type.unwrap_or_else(|| "event_log".to_string()),
+            };
+            // Case connection first, then the sidecar — same order as desktop.
+            let value = case.with_conn(|conn| {
+                let guard = case
+                    .event_logs
+                    .lock()
+                    .map_err(|_| "Event-log store lock poisoned".to_string())?;
+                let Some(log_conn) = guard.as_ref() else {
+                    return Err("The event-log store is not open for this case".into());
+                };
+                promote_records(conn, &session.actor, log_conn, &p.record_ids, &options)
+            })?;
+            case.bump();
+            to_json(value)
         }
 
         // ---- networks -----------------------------------------------------
@@ -904,6 +1073,14 @@ macro_rules! params {
 #[derive(Deserialize)]
 struct NoParams {}
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EventLogStoreStatus {
+    open: bool,
+    file_name: Option<String>,
+    batches: Option<StoreCounts>,
+}
+
 params! {
     struct IdParams { id: String }
     struct PreviewIdParams { preview_id: String }
@@ -917,6 +1094,32 @@ params! {
     }
     struct CaseParams { name: String, description: String, client_name: String, status: String }
     struct ChangePasswordParams { current_password: String, new_password: String }
+    struct EventLogOpenParams { password: String }
+    struct EventLogImportParams {
+        kind: String,
+        text: String,
+        #[serde(default)] file_name: Option<String>,
+        #[serde(default)] host_hint: Option<String>,
+        #[serde(default)] timezone: Option<String>,
+        #[serde(default)] note: Option<String>,
+    }
+    struct EventLogQueryParams {
+        #[serde(default)] query: Option<String>,
+        #[serde(default)] batch_id: Option<String>,
+        #[serde(default)] host: Option<String>,
+        #[serde(default)] event_id: Option<String>,
+        #[serde(default)] from_utc: Option<String>,
+        #[serde(default)] to_utc: Option<String>,
+        #[serde(default)] limit: Option<i64>,
+        #[serde(default)] offset: Option<i64>,
+    }
+    struct EventLogBatchParams { batch_id: String }
+    struct EventLogPromoteParams {
+        record_ids: Vec<i64>,
+        #[serde(default)] asset_id: Option<String>,
+        severity: String,
+        #[serde(default)] event_type: Option<String>,
+    }
     struct PasswordParams { #[serde(default)] password: Option<String> }
     struct ImportParams { json_data: String, #[serde(default)] password: Option<String> }
     struct ReportParams { contents: String, #[serde(default)] password: Option<String> }

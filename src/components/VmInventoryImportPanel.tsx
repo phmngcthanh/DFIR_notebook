@@ -11,6 +11,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { invoke, pickTextFile } from '@/lib/api';
 import {
   buildVmInventoryImport,
+  classifyGuestOs,
   parseVmInventory,
   platformLabel,
   type ParsedVmInventory,
@@ -41,6 +42,10 @@ const EXPORT_GUIDANCE: Record<VmInventoryPlatform, { native: string; csv: string
   hyperv: {
     native: 'Get-VM | ConvertTo-Json -Depth 3 | Set-Content vms.json',
     csv: 'Get-VM | Select-Object VMId,Name,State,ComputerName,ProcessorCount,MemoryAssigned,MemoryStartup,Generation,Version,ConfigurationLocation,@{N="IPAddress";E={(Get-VMNetworkAdapter -VM $_).IPAddresses -join ";"}},@{N="MacAddress";E={(Get-VMNetworkAdapter -VM $_).MacAddress -join ";"}} | Export-Csv -NoTypeInformation vms.csv',
+  },
+  generic: {
+    native: 'One device per line: name, ip, mac, os, type — plain hostnames, "adb devices -l", or "emulator -list-avds" output pasted directly',
+    csv: 'CSV columns: name,ipAddress,macAddress,os,type,user — type: mobile, vm, workstation, server, laptop, router, switch, firewall, other',
   },
 };
 
@@ -149,8 +154,8 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
     <Card className="border-violet-200 bg-violet-50/30">
       <CardHeader className="flex flex-row items-start justify-between space-y-0">
         <div>
-          <CardTitle className="flex items-center gap-2 text-base"><Boxes size={18} />Import VM inventory</CardTitle>
-          <p className="mt-1 text-xs text-slate-500">ESXi/vSphere, Proxmox VE, and Hyper-V inventories become reviewed, audited assets and inventory-managed NICs.</p>
+          <CardTitle className="flex items-center gap-2 text-base"><Boxes size={18} />Import VM / device inventory</CardTitle>
+          <p className="mt-1 text-xs text-slate-500">Hypervisor inventories, generic lists, and adb device output become reviewed, audited assets. Mobile guests (Android, iOS, …) are typed <code>mobile</code>; PC/other-OS guests stay <code>vm</code>.</p>
         </div>
         <Button size="sm" variant="ghost" aria-label="Close VM inventory importer" onClick={close}><X size={16} /></Button>
       </CardHeader>
@@ -167,6 +172,7 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
                 <SelectItem value="esxi">VMware ESXi / vSphere</SelectItem>
                 <SelectItem value="proxmox">Proxmox VE</SelectItem>
                 <SelectItem value="hyperv">Microsoft Hyper-V</SelectItem>
+                <SelectItem value="generic">Generic list — mobile &amp; PC/other OS</SelectItem>
               </SelectContent>
             </Select>
           </Field>
@@ -204,7 +210,9 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
             setParsed(null);
             void clearPreview();
           }}
-          placeholder={`Paste ${platformLabel(platform)} VM inventory here…`}
+          placeholder={platform === 'generic'
+            ? 'Paste devices here — one per line: name, ip, mac, os, type — or adb devices / hostname list output…'
+            : `Paste ${platformLabel(platform)} VM inventory here…`}
         />
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => void prepare()} disabled={busy || !text.trim()} className="bg-violet-600 hover:bg-violet-700">
@@ -216,10 +224,11 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
         </div>
 
         {parsed && (
-          <div className="grid gap-2 sm:grid-cols-5">
+          <div className="grid gap-2 sm:grid-cols-6">
             <Summary label="Platform" value={platformLabel(parsed.platform)} />
             <Summary label="Format" value={parsed.sourceFormat} />
             <Summary label="Guests" value={parsed.records.length} />
+            <Summary label="Mobile" value={parsed.records.filter((item) => item.assetType === 'mobile' || classifyGuestOs(item.guestOs) === 'mobile').length} />
             <Summary label="With IPs" value={parsed.records.filter((item) => item.ipAddresses.length).length} />
             <Summary label="Containers" value={parsed.records.filter((item) => item.kind === 'container').length} />
           </div>

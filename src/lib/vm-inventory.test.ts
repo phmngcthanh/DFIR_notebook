@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildVmInventoryImport,
+  classifyGuestOs,
   parseCsv,
   parseVmInventory,
   type VmImportInventory,
@@ -192,5 +193,108 @@ describe('VM inventory import builder', () => {
       changes: Array<{ entity_type: string; target_id: string }>;
     };
     expect(document.changes.find((item) => item.entity_type === 'asset')?.target_id).not.toBe('manual-asset');
+  });
+});
+
+describe('mobile and generic batch imports', () => {
+  function assetChanges(parsed: ReturnType<typeof parseVmInventory>, inventory?: Partial<VmImportInventory>) {
+    const document = JSON.parse(buildVmInventoryImport(parsed, { ...emptyInventory(), ...inventory }).document) as {
+      changes: Array<{ entity_type: string; values: Record<string, unknown> }>;
+    };
+    return document.changes.filter((item) => item.entity_type === 'asset').map((item) => item.values);
+  }
+
+  it('classifies mobile guest OSes and keeps PC/other-OS guests as vm', () => {
+    expect(classifyGuestOs('Android (x86) 14')).toBe('mobile');
+    expect(classifyGuestOs('iOS 17.2')).toBe('mobile');
+    expect(classifyGuestOs('HarmonyOS 4.0')).toBe('mobile');
+    expect(classifyGuestOs('Cisco IOS-XE')).toBeUndefined();
+    expect(classifyGuestOs('Microsoft Windows Server 2022')).toBeUndefined();
+    expect(classifyGuestOs(undefined)).toBeUndefined();
+
+    const parsed = parseVmInventory('hyperv', JSON.stringify([
+      { VMId: 'guid-android', Name: 'Lab Phone', State: 'Running', GuestOS: 'Android 14', IPAddress: '192.168.1.50' },
+      { VMId: 'guid-win', Name: 'Analyst VM', State: 'Running', GuestOS: 'Windows 11', IPAddress: '192.168.1.51' },
+    ]));
+    const values = assetChanges(parsed);
+    expect(values.find((item) => item.name === 'Lab Phone')?.asset_type).toBe('mobile');
+    expect(values.find((item) => item.name === 'Analyst VM')?.asset_type).toBe('vm');
+  });
+
+  it('honors explicit type and user columns in a generic CSV and warns on unknown types', () => {
+    const parsed = parseVmInventory('generic', [
+      '"Name","IPAddress","OS","Type","User"',
+      '"SM-A528B","10.1.2.3","Android 14","phone","n.tran"',
+      '"fin-ws-01","10.1.2.4","Windows 11","pc","t.nguyen"',
+      '"lab-console","10.1.2.5","","gaming-console",""',
+    ].join('\r\n'));
+    expect(parsed.sourceFormat).toBe('csv');
+    const values = assetChanges(parsed);
+    expect(values.find((item) => item.name === 'SM-A528B')).toMatchObject({ asset_type: 'mobile', os: 'Android 14', user_name: 'n.tran' });
+    expect(values.find((item) => item.name === 'fin-ws-01')).toMatchObject({ asset_type: 'workstation', os: 'Windows 11', user_name: 't.nguyen' });
+    expect(values.find((item) => item.name === 'lab-console')?.asset_type).toBe('workstation');
+    expect(parsed.warnings.join('\n')).toContain('gaming-console');
+  });
+
+  it('parses plain hostname lists and positional name, ip, mac, os, type lines', () => {
+    const parsed = parseVmInventory('generic', [
+      'web01',
+      'web02, web03',
+      'tablet-01,10.9.0.21,AA:BB:CC:DD:EE:01,iPadOS 17,',
+      'srv-01,10.9.0.30,,,server',
+    ].join('\n'));
+    expect(parsed.sourceFormat).toBe('native');
+    expect(parsed.records.map((record) => record.name)).toEqual(['web01', 'web02', 'web03', 'tablet-01', 'srv-01']);
+    const values = assetChanges(parsed);
+    expect(values.find((item) => item.name === 'web01')?.asset_type).toBe('workstation');
+    expect(values.find((item) => item.name === 'tablet-01')).toMatchObject({ asset_type: 'mobile', ip_address: '10.9.0.21' });
+    expect(values.find((item) => item.name === 'srv-01')?.asset_type).toBe('server');
+  });
+
+  it('parses adb devices -l output into mobile assets keyed by serial', () => {
+    const parsed = parseVmInventory('generic', [
+      '* daemon not running; starting now at tcp:5037',
+      '* daemon started successfully',
+      '',
+      'List of devices attached',
+      'emulator-5554          device transport_id:1',
+      '29HXAZ123456           device product:a52xq model:SM_A528B device:a52x transport_id:2',
+      'R58RA0ABCDEF           unauthorized transport_id:3',
+      '',
+    ].join('\n'));
+    expect(parsed.sourceFormat).toBe('native');
+    expect(parsed.records.map((record) => record.nativeId)).toEqual(['emulator-5554', '29HXAZ123456', 'R58RA0ABCDEF']);
+    expect(parsed.records[1]).toMatchObject({ name: 'SM A528B', guestOs: 'Android' });
+    expect(parsed.records.map((record) => record.identityKey)).toEqual([
+      'generic:id:emulator-5554',
+      'generic:id:29hxaz123456',
+      'generic:id:r58ra0abcdef',
+    ]);
+    const values = assetChanges(parsed);
+    expect(values.every((item) => item.asset_type === 'mobile')).toBe(true);
+    expect(values.every((item) => item.os === 'Android')).toBe(true);
+  });
+
+  it('preserves an analyst-retyped asset_type when the guest OS is not mobile', () => {
+    const initial = parseVmInventory('hyperv', JSON.stringify([{ VMId: 'guid-9', Name: 'Mail', ComputerName: 'HV-01' }]), { inventoryScope: 'site-a' });
+    const inventory: VmImportInventory = {
+      ...emptyInventory(),
+      assets: [{
+        id: 'asset-9',
+        name: 'Mail',
+        ip_address: '',
+        asset_type: 'server',
+        suspicious: false,
+        compromise_status: 'unknown',
+        investigation_status: 'not_started',
+        properties: JSON.stringify(initial.records[0]),
+        created_at: '',
+      }],
+    };
+    const refreshed = parseVmInventory('hyperv', JSON.stringify([
+      { VMId: 'guid-9', Name: 'Mail', ComputerName: 'HV-01', GuestOS: 'Ubuntu Linux (64-bit)' },
+    ]), { inventoryScope: 'site-a' });
+    const values = assetChanges(refreshed, inventory);
+    expect(values[0].asset_type).toBe('server');
   });
 });

@@ -78,6 +78,7 @@ The database represents the elements needed to coordinate a network investigatio
 - normalized imported router/switch/firewall configurations with interfaces, VLANs, routes, ACL/security rules, and NAT evidence;
 - normalized ESXi/vSphere, Proxmox VE, and Hyper-V guest inventory as ordinary assets with stable vendor identity, provenance, runtime/resource metadata, and discovered NICs;
 - case-level physical/logical connectivity compliance assertions and evidence-linked possible-path analysis;
+- an encrypted event-log sidecar holding searchable raw Windows/Unix events outside the investigation database;
 - timeline events and reusable clock-correction profiles;
 - indicators of compromise;
 - Markdown findings and hypotheses; and
@@ -191,11 +192,12 @@ An investigator can use the application to:
 - create, unlock, rekey, lock, and reopen encrypted case databases;
 - record networks, endpoints, multi-homed interfaces, firewalls, NAT, and asserted connectivity;
 - import Palo Alto, OPNsense, Juniper, OpenWrt, and Cisco device configurations through six initial role profiles;
-- import ESXi/vSphere, Proxmox VE, and Hyper-V VM lists from supported native text, JSON, or CSV into Assets and PC Configuration;
+- import ESXi/vSphere, Proxmox VE, and Hyper-V VM lists, plus generic batch device lists and `adb devices` output (mobile and PC/other-OS guests) from supported native text, JSON, or CSV into Assets and PC Configuration;
 - track compromise and investigation status across the asset inventory;
 - visualize topology with multiple layouts and export it as PNG;
 - check persisted physical/logical isolation requirements and enumerate possible inbound/outbound paths;
 - preserve source timestamps and correlate incorrect server clocks;
+- import offline Windows EVTX, Windows event JSON, and Unix syslog copies into a searchable encrypted event-log sidecar, and promote chosen records into the attributed timeline;
 - create, edit, search, and filter timeline events, IOCs, and notes;
 - retain hypotheses and uncertainty without presenting them as conclusions;
 - export interoperable snapshots or password-protected portable files;
@@ -238,7 +240,7 @@ DFIR Network Investigator does not currently perform:
 
 - automated endpoint discovery or evidence collection;
 - live network observation or packet-derived topology;
-- automatic log ingestion and parsing;
+- live log collection from running systems (offline EVTX/JSON/syslog copies are parsed; nothing queries a host);
 - vulnerability scanning or YARA execution;
 - complete vendor-semantic policy compilation, dynamic routing/VRF/PBR/VPN state, rule shadowing, or application-aware effective-policy simulation;
 - live hypervisor discovery, VM disk/configuration collection, or proof that an exported VM runtime state is current;

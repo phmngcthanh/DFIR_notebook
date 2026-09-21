@@ -1,4 +1,5 @@
 mod db;
+mod event_logs;
 mod history;
 mod ioc_export;
 mod partial_import;
@@ -7,6 +8,12 @@ mod secure_db;
 mod storage;
 
 use db::*;
+use event_logs::{
+    delete_batch, import_evtx_file, import_syslog_text, import_windows_json_text, list_batches,
+    open_store, promote_records, search_event_logs, sidecar_path, store_counts, BatchSummary,
+    EventLogBatch, EventLogSearchOutcome, EventLogSearchParams, ImportOptions, PromoteOptions,
+    PromoteSummary, StoreCounts,
+};
 use history::*;
 use partial_import::*;
 use portable_export::*;
@@ -30,6 +37,9 @@ pub struct DbState {
     conn: Mutex<Option<Connection>>,
     db_path: Mutex<Option<PathBuf>>,
     actor: Mutex<Option<ActorIdentity>>,
+    /// Event-log sidecar for the open case. Absent until the investigator
+    /// opens it (or until case open finds an existing store next to the case).
+    event_logs: Mutex<Option<Connection>>,
     pending_bundles: Mutex<HashMap<String, PendingBundle>>,
     pending_partial_imports: Mutex<HashMap<String, PreparedPartialImport>>,
 }
@@ -40,6 +50,7 @@ impl DbState {
             conn: Mutex::new(None),
             db_path: Mutex::new(None),
             actor: Mutex::new(None),
+            event_logs: Mutex::new(None),
             pending_bundles: Mutex::new(HashMap::new()),
             pending_partial_imports: Mutex::new(HashMap::new()),
         }
@@ -227,6 +238,16 @@ fn create_new_case(
     Response::ok(case_id)
 }
 
+/// Open the event-log sidecar when one already exists beside the case.
+/// Returns `None` when there is nothing to open or the password does not
+/// work, so an untouched case never grows a surprise file.
+fn open_existing_event_log_store(case_path: &Path, password: &str) -> Option<Connection> {
+    if !sidecar_path(case_path).exists() {
+        return None;
+    }
+    open_store(case_path, password).ok()
+}
+
 #[tauri::command]
 async fn open_existing_case(
     app_handle: tauri::AppHandle,
@@ -260,6 +281,10 @@ fn open_case_at(state: &DbState, path: PathBuf, database_password: &str) -> Resp
     {
         return Response::err(error);
     }
+    // An existing event-log store opens with the just-verified password; a
+    // failure leaves it closed and the dedicated open command will surface
+    // the real error when the investigator needs it.
+    let event_log_store = open_existing_event_log_store(&path, database_password);
     if let Ok(mut guard) = state.conn.lock() {
         *guard = Some(conn);
     } else {
@@ -269,6 +294,9 @@ fn open_case_at(state: &DbState, path: PathBuf, database_password: &str) -> Resp
         *guard = Some(path);
     } else {
         return Response::err("Database path lock poisoned");
+    }
+    if let Ok(mut guard) = state.event_logs.lock() {
+        *guard = event_log_store;
     }
     if let Ok(mut guard) = state.actor.lock() {
         *guard = None;
@@ -468,6 +496,39 @@ fn change_database_password(
     if let Some(error) = changed.error {
         return Response::err(error);
     }
+    // The event-log sidecar shares the case password. Rekey an open store in
+    // place; a closed but existing one is opened with the current password,
+    // rekeyed, and released again.
+    let sidecar = sidecar_path(&path);
+    let rekey_sidecar = |conn: &mut Connection| -> Result<(), String> {
+        rekey_connection(conn, new_password.as_str()).map_err(|e| e.to_string())
+    };
+    let mut sidecar_error: Option<String> = None;
+    if let Ok(mut guard) = state.event_logs.lock() {
+        match guard.as_mut() {
+            Some(conn) => {
+                if let Err(error) = rekey_sidecar(conn) {
+                    sidecar_error = Some(error);
+                }
+            }
+            None => {
+                if sidecar.exists() {
+                    match open_encrypted_connection(&sidecar, current_password.as_str())
+                        .map_err(|e| e.to_string())
+                        .and_then(|mut conn| rekey_sidecar(&mut conn))
+                    {
+                        Ok(()) => {}
+                        Err(error) => sidecar_error = Some(error),
+                    }
+                }
+            }
+        }
+    }
+    if let Some(error) = sidecar_error {
+        return Response::err(format!(
+            "Case password changed, but the event-log store could not be rekeyed: {error}"
+        ));
+    }
     match open_encrypted_connection(&path, new_password.as_str()) {
         Ok(conn) => match verify_cipher_integrity(&conn) {
             Ok(()) => Response::ok(true),
@@ -487,6 +548,9 @@ fn close_current_case(state: State<DbState>) -> Response<bool> {
     if let Ok(mut guard) = state.db_path.lock() {
         *guard = None;
     }
+    if let Ok(mut guard) = state.event_logs.lock() {
+        *guard = None;
+    }
     if let Ok(mut guard) = state.actor.lock() {
         *guard = None;
     }
@@ -502,6 +566,245 @@ fn close_current_case(state: State<DbState>) -> Response<bool> {
 #[tauri::command]
 fn get_current_case_info(state: State<DbState>) -> Response<Option<Case>> {
     with_conn(&state, |conn| get_case(conn))
+}
+
+// ---- event-log sidecar ---------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EventLogStoreStatus {
+    open: bool,
+    file_name: Option<String>,
+    batches: Option<StoreCounts>,
+}
+
+fn with_event_logs<T>(
+    state: &State<DbState>,
+    operation: impl FnOnce(&mut Connection) -> AppResult<T>,
+) -> Response<T> {
+    let mut guard = match state.event_logs.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Response::err("Event-log store lock poisoned"),
+    };
+    match guard.as_mut() {
+        Some(conn) => match operation(conn) {
+            Ok(value) => Response::ok(value),
+            Err(error) => Response::err(error),
+        },
+        None => Response::err("The event-log store is not open for this case"),
+    }
+}
+
+fn open_case_path(state: &State<DbState>) -> Result<PathBuf, String> {
+    match state.db_path.lock() {
+        Ok(guard) => guard.clone().ok_or_else(|| "No case is open".to_string()),
+        Err(_) => Err("Database path lock poisoned".to_string()),
+    }
+}
+
+#[tauri::command]
+fn get_event_log_store_status(state: State<DbState>) -> Response<EventLogStoreStatus> {
+    let case_path = match open_case_path(&state) {
+        Ok(path) => path,
+        Err(error) => return Response::err(error),
+    };
+    let file_name = sidecar_path(&case_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string());
+    let guard = match state.event_logs.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Response::err("Event-log store lock poisoned"),
+    };
+    match guard.as_ref() {
+        Some(conn) => match store_counts(conn) {
+            Ok(counts) => Response::ok(EventLogStoreStatus {
+                open: true,
+                file_name,
+                batches: Some(counts),
+            }),
+            Err(error) => Response::err(error),
+        },
+        None => Response::ok(EventLogStoreStatus {
+            open: false,
+            file_name,
+            batches: None,
+        }),
+    }
+}
+
+/// Open (or create) the event-log sidecar. The case password is verified
+/// against the case database first, so a store is never created under a
+/// mistyped password.
+#[tauri::command]
+fn open_event_log_store(state: State<DbState>, password: String) -> Response<StoreCounts> {
+    let password = Zeroizing::new(password);
+    let case_path = match open_case_path(&state) {
+        Ok(path) => path,
+        Err(error) => return Response::err(error),
+    };
+    if let Err(error) = open_encrypted_connection(&case_path, password.as_str()) {
+        return Response::err(error);
+    }
+    let conn = match open_store(&case_path, password.as_str()) {
+        Ok(conn) => conn,
+        Err(error) => return Response::err(error),
+    };
+    let counts = match store_counts(&conn) {
+        Ok(counts) => counts,
+        Err(error) => return Response::err(error),
+    };
+    match state.event_logs.lock() {
+        Ok(mut guard) => {
+            *guard = Some(conn);
+            Response::ok(counts)
+        }
+        Err(_) => Response::err("Event-log store lock poisoned"),
+    }
+}
+
+#[tauri::command]
+fn import_event_log_text(
+    state: State<DbState>,
+    kind: String,
+    text: String,
+    file_name: Option<String>,
+    host_hint: Option<String>,
+    timezone: Option<String>,
+    note: Option<String>,
+) -> Response<BatchSummary> {
+    let options = ImportOptions {
+        file_name,
+        host_hint,
+        timezone: timezone.unwrap_or_else(|| "UTC".to_string()),
+        note,
+    };
+    with_event_logs(&state, |conn| match kind.as_str() {
+        "syslog" => import_syslog_text(conn, &options, &text),
+        "windows-json" => import_windows_json_text(conn, &options, &text),
+        _ => Err("Unsupported event-log kind; use syslog or windows-json".into()),
+    })
+}
+
+/// Pick an event-log file with the native dialog and import it. EVTX parsing
+/// reads the file directly in Rust; text formats are read and routed by
+/// extension. Replaced on the server shell by pasted-text import.
+#[tauri::command]
+fn import_event_log_file(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    host_hint: Option<String>,
+    timezone: Option<String>,
+    note: Option<String>,
+) -> Response<BatchSummary> {
+    if cfg!(target_os = "android") {
+        return Response::err(
+            "Picking an event-log file is available in the desktop build. Paste exported text instead",
+        );
+    }
+    let selection = app_handle
+        .dialog()
+        .file()
+        .add_filter("Event logs", &["evtx", "json", "log", "txt"])
+        .blocking_pick_file();
+    let path = match selection.and_then(|value| selected_path(value).ok()) {
+        Some(path) => path,
+        None => return Response::err("Import cancelled"),
+    };
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string());
+    let options = ImportOptions {
+        file_name,
+        host_hint,
+        timezone: timezone.unwrap_or_else(|| "UTC".to_string()),
+        note,
+    };
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let read_text = || {
+        fs::read_to_string(&path).map_err(|error| format!("Could not read the file: {error}"))
+    };
+    with_event_logs(&state, |conn| match extension.as_str() {
+        "evtx" => import_evtx_file(conn, &options, &path),
+        "json" => import_windows_json_text(conn, &options, &read_text()?),
+        _ => import_syslog_text(conn, &options, &read_text()?),
+    })
+}
+
+#[tauri::command]
+fn list_event_log_batches(state: State<DbState>) -> Response<Vec<EventLogBatch>> {
+    with_event_logs(&state, |conn| list_batches(conn))
+}
+
+#[tauri::command]
+fn search_event_log_records(
+    state: State<DbState>,
+    query: Option<String>,
+    batch_id: Option<String>,
+    host: Option<String>,
+    event_id: Option<String>,
+    from_utc: Option<String>,
+    to_utc: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Response<EventLogSearchOutcome> {
+    let params = EventLogSearchParams {
+        query,
+        batch_id,
+        host,
+        event_id,
+        from_utc,
+        to_utc,
+        limit,
+        offset,
+    };
+    with_event_logs(&state, |conn| search_event_logs(conn, &params))
+}
+
+#[tauri::command]
+fn delete_event_log_batch(state: State<DbState>, batch_id: String) -> Response<bool> {
+    with_event_logs(&state, |conn| delete_batch(conn, &batch_id).map(|_| true))
+}
+
+#[tauri::command]
+fn promote_event_logs_to_timeline(
+    state: State<DbState>,
+    record_ids: Vec<i64>,
+    asset_id: Option<String>,
+    severity: String,
+    event_type: Option<String>,
+) -> Response<PromoteSummary> {
+    let actor = match current_actor(&state) {
+        Ok(actor) => actor,
+        Err(error) => return Response::err(error),
+    };
+    // Case connection first, then the sidecar — the same order everywhere.
+    let mut case_guard = match state.conn.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Response::err("Database lock poisoned"),
+    };
+    let Some(case_conn) = case_guard.as_mut() else {
+        return Response::err("No case is open");
+    };
+    let log_guard = match state.event_logs.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Response::err("Event-log store lock poisoned"),
+    };
+    let Some(log_conn) = log_guard.as_ref() else {
+        return Response::err("The event-log store is not open for this case");
+    };
+    let options = PromoteOptions {
+        asset_id,
+        severity,
+        event_type: event_type.unwrap_or_else(|| "event_log".to_string()),
+    };
+    match promote_records(case_conn, &actor, log_conn, &record_ids, &options) {
+        Ok(summary) => Response::ok(summary),
+        Err(error) => Response::err(error),
+    }
 }
 
 #[tauri::command]
@@ -2168,6 +2471,14 @@ pub fn run() {
             migrate_legacy_case,
             change_database_password,
             close_current_case,
+            get_event_log_store_status,
+            open_event_log_store,
+            import_event_log_text,
+            import_event_log_file,
+            list_event_log_batches,
+            search_event_log_records,
+            delete_event_log_batch,
+            promote_event_logs_to_timeline,
             get_current_case_info,
             update_current_case,
             create_new_network,

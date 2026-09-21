@@ -37,6 +37,11 @@ mod secure_db;
 #[allow(dead_code)]
 #[path = "../../src-tauri/src/ioc_export.rs"]
 mod ioc_export;
+// The event-log sidecar store is part of the shared core: the desktop build
+// gets it directly and this shell reaches the same module by path.
+#[allow(dead_code)]
+#[path = "../../src-tauri/src/event_logs.rs"]
+mod event_logs;
 
 mod auth;
 mod cases;
