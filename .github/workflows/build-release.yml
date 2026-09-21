@@ -264,7 +264,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # The legacy `tools` package was removed from the Android SDK
+      # repository; installing it (the action default) fails. cmdline-tools
+      # ships with the action, and NDK/platforms/build-tools come from the
+      # explicit sdkmanager step below.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
 
       - name: Install Android NDK and SDK
         run: sdkmanager "ndk;$NDK_VERSION" "platforms;android-34" "build-tools;34.0.0"
