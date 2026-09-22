@@ -2280,12 +2280,12 @@ fn get_db_path(state: State<DbState>) -> Response<Option<String>> {
 }
 
 #[cfg(not(target_os = "android"))]
-fn save_text_file(
+fn save_export_file(
     app_handle: &tauri::AppHandle,
     default_name: impl AsRef<str>,
     label: &str,
     extension: &str,
-    contents: &str,
+    contents: impl AsRef<[u8]>,
 ) -> Response<String> {
     let selection = app_handle
         .dialog()
@@ -2310,12 +2310,12 @@ fn save_text_file(
 // directory and the returned path tells the user where (retrievable via the
 // share flow later, or `adb pull` during development).
 #[cfg(target_os = "android")]
-fn save_text_file(
+fn save_export_file(
     app_handle: &tauri::AppHandle,
     default_name: impl AsRef<str>,
     _label: &str,
     extension: &str,
-    contents: &str,
+    contents: impl AsRef<[u8]>,
 ) -> Response<String> {
     let dir = match storage::exports_dir(app_handle) {
         Ok(dir) => dir,
@@ -2331,6 +2331,16 @@ fn save_text_file(
         Ok(()) => Response::ok(path.to_string_lossy().to_string()),
         Err(error) => Response::err(format!("Failed to write file: {error}")),
     }
+}
+
+fn save_text_file(
+    app_handle: &tauri::AppHandle,
+    default_name: impl AsRef<str>,
+    label: &str,
+    extension: &str,
+    contents: &str,
+) -> Response<String> {
+    save_export_file(app_handle, default_name, label, extension, contents)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -2392,6 +2402,18 @@ fn save_text_download(
 ) -> Response<String> {
     let extension = filename.rsplit('.').next().unwrap_or("txt").to_string();
     save_text_file(&app_handle, &filename, "DFIR file", &extension, &contents)
+}
+
+/// Binary sibling of `save_text_download` for exports that are not text
+/// (e.g. the zipped `.xmind` mindmap from the topology page).
+#[tauri::command]
+fn save_bytes_download(
+    app_handle: tauri::AppHandle,
+    filename: String,
+    contents: Vec<u8>,
+) -> Response<String> {
+    let extension = filename.rsplit('.').next().unwrap_or("bin").to_string();
+    save_export_file(&app_handle, &filename, "DFIR file", &extension, contents)
 }
 
 /// Platform seam for `pickTextFile()`. Returns `None` when the investigator
@@ -2568,6 +2590,7 @@ pub fn run() {
             export_iocs_csv,
             export_iocs_stix,
             save_text_download,
+            save_bytes_download,
             open_text_upload,
             get_db_path,
         ])

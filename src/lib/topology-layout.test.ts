@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTopologyLayout, type TopologyLayoutName } from './topology-layout';
+import { buildTopologyLayout, MINDMAP_ROOT_ID, type TopologyLayoutName } from './topology-layout';
 import type { Asset, Firewall, Network, NetworkConnection } from '@/types';
 
 const networks: Network[] = [
@@ -23,7 +23,7 @@ const connections: NetworkConnection[] = [
   { id: 'three', source_network_id: 'lan', target_network_id: 'lab', connection_type: 'routed', description: '' },
 ];
 
-const modes: TopologyLayoutName[] = ['dagre', 'grid', 'circle', 'concentric', 'breadthfirst'];
+const modes: TopologyLayoutName[] = ['dagre', 'grid', 'circle', 'concentric', 'breadthfirst', 'mindmap'];
 
 describe('buildTopologyLayout', () => {
   it.each(modes)('keeps every zone separate and every device positioned in %s mode', (mode) => {
@@ -54,5 +54,21 @@ describe('buildTopologyLayout', () => {
     const result = buildTopologyLayout('dagre', { networks, assets, firewalls, connections });
     expect(result.networkBounds.wan.y).toBeLessThan(result.networkBounds.dmz.y);
     expect(result.networkBounds.dmz.y).toBeLessThan(result.networkBounds.lan.y);
+  });
+
+  it('radiates zones around a central hub in mindmap mode', () => {
+    const result = buildTopologyLayout('mindmap', { networks, assets, firewalls, connections });
+    expect(result.positions[MINDMAP_ROOT_ID]).toEqual({ x: 0, y: 0 });
+    for (const network of networks) {
+      const bounds = result.networkBounds[network.id];
+      const distance = Math.hypot(bounds.x, bounds.y);
+      // Every zone sits outside the hub's clear center on roughly one circle.
+      expect(distance).toBeGreaterThan(460);
+    }
+    const distances = networks.map((network) => {
+      const bounds = result.networkBounds[network.id];
+      return Math.hypot(bounds.x, bounds.y);
+    });
+    expect(Math.max(...distances) - Math.min(...distances)).toBeLessThan(1);
   });
 });

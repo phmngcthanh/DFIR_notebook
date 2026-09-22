@@ -194,7 +194,8 @@ An investigator can use the application to:
 - import Palo Alto, OPNsense, Juniper, OpenWrt, and Cisco device configurations through six initial role profiles;
 - import ESXi/vSphere, Proxmox VE, and Hyper-V VM lists, plus generic batch device lists and `adb devices` output (mobile and PC/other-OS guests) from supported native text, JSON, or CSV into Assets and PC Configuration;
 - track compromise and investigation status across the asset inventory;
-- visualize topology with multiple layouts and export it as PNG;
+- sort the asset inventory by any table column, including numeric ordering of IPv4 addresses;
+- visualize topology with multiple layouts — hierarchical, grid, circle, concentric, breadth-first, and a radial mindmap that fans subnets out around the case hub — and export it as PNG, an editable draw.io diagram, or an XMind mindmap grouped by subnet;
 - check persisted physical/logical isolation requirements and enumerate possible inbound/outbound paths;
 - preserve source timestamps and correlate incorrect server clocks;
 - import offline Windows EVTX, Windows event JSON, and Unix syslog copies into a searchable encrypted event-log sidecar, and promote chosen records into the attributed timeline;
@@ -216,7 +217,7 @@ The repository currently includes:
 
 - strict TypeScript production compilation;
 - ESLint and Vitest tooling;
-- 61 frontend behavioral and domain tests;
+- 86 frontend behavioral and domain tests;
 - 51 Rust unit and integration-style tests in the shared core/server suite;
 - SQLCipher creation, wrong-password, rekey, and migration tests;
 - cryptographic round-trip and modification-detection tests;

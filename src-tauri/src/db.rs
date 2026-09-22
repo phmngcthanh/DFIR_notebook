@@ -1223,7 +1223,16 @@ pub fn get_networks(conn: &Connection) -> AppResult<Vec<Network>> {
 }
 
 fn validate_topology_layout(layout: &str) -> AppResult<()> {
-    if ["dagre", "grid", "circle", "concentric", "breadthfirst"].contains(&layout) {
+    if [
+        "dagre",
+        "grid",
+        "circle",
+        "concentric",
+        "breadthfirst",
+        "mindmap",
+    ]
+    .contains(&layout)
+    {
         Ok(())
     } else {
         Err(format!("Unsupported topology layout: {layout}"))

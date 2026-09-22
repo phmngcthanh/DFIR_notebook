@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@/lib/api';
-import { Boxes, Cable, ChevronDown, ChevronRight, Pencil, Plus, Search, Star, Trash2 } from 'lucide-react';
+import { ArrowUpDown, Boxes, Cable, ChevronDown, ChevronRight, ChevronUp, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import VmInventoryImportPanel from '@/components/VmInventoryImportPanel';
 import { Badge } from '@/components/ui/badge';
@@ -11,6 +11,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
+import { sortAssets, type AssetSort, type AssetSortKey } from '@/lib/asset-sort';
 import { platformLabel, readStoredVmInventory } from '@/lib/vm-inventory';
 import type { ApiResponse, Asset, Case, CompromiseStatus, ExpertIdentity, InfectionSummary, InvestigationStatus, Network, NetworkInterface } from '@/types';
 
@@ -37,6 +38,7 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
   const [editingInterfaceId, setEditingInterfaceId] = useState<string | null>(null);
   const [showInterfaceForm, setShowInterfaceForm] = useState(false);
   const [search, setSearch] = useState('');
+  const [sort, setSort] = useState<AssetSort | null>(null);
   const [networkFilter, setNetworkFilter] = useState('all');
   const [compromiseFilter, setCompromiseFilter] = useState('all');
   const [investigationFilter, setInvestigationFilter] = useState('all');
@@ -146,6 +148,12 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
         ].some((value) => value?.toLowerCase().includes(term)));
     });
   }, [assets, interfacesByAsset, focusOnly, expert.scope_network_ids, networkFilter, compromiseFilter, investigationFilter, search]);
+  const sortedAssets = useMemo(() => {
+    const nicCounts = new Map(Array.from(interfacesByAsset, ([assetId, items]): [string, number] => [assetId, items.length]));
+    return sortAssets(filteredAssets, nicCounts, sort);
+  }, [filteredAssets, interfacesByAsset, sort]);
+  const toggleSort = (key: AssetSortKey) => setSort((current) =>
+    current?.key === key ? (current.direction === 'asc' ? { key, direction: 'desc' } : null) : { key, direction: 'asc' });
 
   return (
     <div className="space-y-4 p-6">
@@ -168,10 +176,21 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
         {expert.scope_network_ids.length > 0 && <label className="flex h-9 items-center gap-2 rounded border px-3 text-sm"><input type="checkbox" checked={focusOnly} onChange={(e) => setFocusOnly(e.target.checked)} />Focus zones only</label>}
       </CardContent></Card>
 
-      {showForm && <AssetForm form={form} setForm={setForm} networks={networks} editing={Boolean(editingId)} onSave={() => void saveAsset()} onCancel={resetAssetForm} />}
+      {showForm && <FormDialog title={editingId ? 'Edit asset' : 'New asset'} onClose={resetAssetForm}>
+        <AssetForm form={form} setForm={setForm} networks={networks} editing={Boolean(editingId)} onSave={() => void saveAsset()} onCancel={resetAssetForm} />
+      </FormDialog>}
 
-      <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead /><TableHead>Name</TableHead><TableHead>Primary network</TableHead><TableHead>IP</TableHead><TableHead>Type / OS</TableHead><TableHead>Compromise</TableHead><TableHead>Progress</TableHead><TableHead>NICs</TableHead><TableHead /></TableRow></TableHeader><TableBody>
-        {filteredAssets.length === 0 ? <TableRow><TableCell colSpan={9} className="py-10 text-center text-slate-400">No matching assets.</TableCell></TableRow> : filteredAssets.map((asset) => {
+      <Card><CardContent className="p-0"><Table><TableHeader><TableRow>
+        <TableHead className="w-10" />
+        <SortHead label="Name" sortKey="name" sort={sort} onChange={toggleSort} />
+        <SortHead label="Primary network" sortKey="network" sort={sort} onChange={toggleSort} />
+        <SortHead label="IP" sortKey="ip" sort={sort} onChange={toggleSort} />
+        <SortHead label="Type / OS" sortKey="type" sort={sort} onChange={toggleSort} />
+        <SortHead label="Compromise" sortKey="compromise" sort={sort} onChange={toggleSort} />
+        <SortHead label="Progress" sortKey="progress" sort={sort} onChange={toggleSort} />
+        <SortHead label="NICs" sortKey="nics" sort={sort} onChange={toggleSort} />
+        <TableHead /></TableRow></TableHeader><TableBody>
+        {sortedAssets.length === 0 ? <TableRow><TableCell colSpan={9} className="py-10 text-center text-slate-400">No matching assets.</TableCell></TableRow> : sortedAssets.map((asset) => {
           const assetInterfaces = interfacesByAsset.get(asset.id) ?? [];
           const sightingCount = infection.entities.find((entry) => entry.entity_kind === 'asset' && entry.entity_id === asset.id)?.sighting_count ?? 0;
           return <AssetRows key={asset.id} asset={asset} sightingCount={sightingCount} interfaces={assetInterfaces} expanded={expandedAssetId === asset.id}
@@ -185,9 +204,38 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
   );
 }
 
+/**
+ * Centered modal wrapper for the asset form, so editing an asset far down a
+ * long list never forces a scroll back to the top of the page.
+ */
+function FormDialog({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" role="dialog" aria-modal="true" aria-label={title} onMouseDown={onClose}>
+      <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-lg shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>{children}</div>
+    </div>
+  );
+}
+
+function SortHead({ label: text, sortKey, sort, onChange }: { label: string; sortKey: AssetSortKey; sort: AssetSort | null; onChange: (key: AssetSortKey) => void }) {
+  const direction = sort?.key === sortKey ? sort.direction : null;
+  return (
+    <TableHead aria-sort={direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none'}>
+      <button type="button" className="flex items-center gap-1 text-left hover:text-cyan-700" onClick={() => onChange(sortKey)} title={`Sort by ${text.toLowerCase()}`}>
+        {text}
+        {direction === 'asc' ? <ChevronUp size={13} className="text-cyan-600" /> : direction === 'desc' ? <ChevronDown size={13} className="text-cyan-600" /> : <ArrowUpDown size={12} className="text-slate-300" />}
+      </button>
+    </TableHead>
+  );
+}
+
 function AssetForm({ form, setForm, networks, editing, onSave, onCancel }: { form: AssetFormState; setForm: (value: AssetFormState) => void; networks: Network[]; editing: boolean; onSave: () => void; onCancel: () => void }) {
-  return <Card><CardHeader><CardTitle className="text-sm">{editing ? 'Edit asset' : 'New asset'}</CardTitle></CardHeader><CardContent className="space-y-3">
-    <div className="grid grid-cols-4 gap-3"><Field label="Name *"><Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field><Field label="Primary network"><NetworkSelect value={form.networkId} networks={networks} onChange={(networkId) => setForm({ ...form, networkId })} /></Field>
+  return <Card><CardHeader className="flex flex-row items-center justify-between space-y-0"><CardTitle className="text-sm">{editing ? 'Edit asset' : 'New asset'}</CardTitle><Button size="sm" variant="ghost" onClick={onCancel} aria-label="Close"><X size={16} /></Button></CardHeader><CardContent className="space-y-3">
+    <div className="grid grid-cols-4 gap-3"><Field label="Name *"><Input autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field><Field label="Primary network"><NetworkSelect value={form.networkId} networks={networks} onChange={(networkId) => setForm({ ...form, networkId })} /></Field>
       <Field label="IP address"><Input value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} /></Field><Field label="MAC address"><Input value={form.macAddress} onChange={(e) => setForm({ ...form, macAddress: e.target.value })} /></Field></div>
     <div className="grid grid-cols-5 gap-3"><Field label="Type"><Select value={form.assetType} onValueChange={(assetType) => setForm({ ...form, assetType })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['workstation','server','vm','mobile','laptop','router','switch','other'].map((type) => <SelectItem key={type} value={type}>{type}</SelectItem>)}</SelectContent></Select></Field>
       <Field label="OS"><Input value={form.os} onChange={(e) => setForm({ ...form, os: e.target.value })} /></Field><Field label="User / owner"><Input value={form.userName} onChange={(e) => setForm({ ...form, userName: e.target.value })} /></Field>
