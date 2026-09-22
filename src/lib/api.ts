@@ -240,6 +240,33 @@ function browserDownload(filename: string, contents: string): void {
 }
 
 /**
+ * Same seam as `downloadText` for binary exports (e.g. the zipped `.xmind`
+ * mindmap): native save dialog on Tauri, blob download in the browser.
+ */
+export async function downloadBytes(filename: string, contents: Uint8Array): Promise<void> {
+  if (isDesktop) {
+    const response = await tauriInvoke<ApiResponse<string>>('save_bytes_download', {
+      filename,
+      contents: Array.from(contents),
+    });
+    if (!response.success && !String(response.error ?? '').toLowerCase().includes('cancel')) {
+      throw new Error(response.error || 'Could not save the file');
+    }
+    return;
+  }
+  // The DOM type is narrower than Uint8Array's default buffer type; an archive
+  // we just built in memory is always a plain ArrayBuffer-backed view.
+  const url = URL.createObjectURL(new Blob([contents as BlobPart], { type: 'application/octet-stream' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
  * Read a file the investigator picks. Native dialog on Tauri, file input in the
  * browser. Resolves to null when the dialog is cancelled on either shell.
  */

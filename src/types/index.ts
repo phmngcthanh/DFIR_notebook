@@ -293,7 +293,7 @@ export interface NetworkConnection {
   device_name?: string;
 }
 
-export type TopologyLayoutName = 'dagre' | 'grid' | 'circle' | 'concentric' | 'breadthfirst';
+export type TopologyLayoutName = 'dagre' | 'grid' | 'circle' | 'concentric' | 'breadthfirst' | 'mindmap';
 
 export interface TopologyNodePosition {
   id: string;

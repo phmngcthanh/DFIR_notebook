@@ -369,7 +369,7 @@ export function defaultViewState(): InvestigationViewState {
   };
 }
 
-const LAYOUTS: TopologyLayoutName[] = ['dagre', 'grid', 'circle', 'concentric', 'breadthfirst'];
+const LAYOUTS: TopologyLayoutName[] = ['dagre', 'grid', 'circle', 'concentric', 'breadthfirst', 'mindmap'];
 const COMPROMISE: CompromiseStatus[] = ['unknown', 'clean', 'suspected', 'infected'];
 
 function stringArray(value: unknown): string[] {

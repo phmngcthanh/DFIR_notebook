@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@/lib/api';
+import { downloadBytes, downloadText, invoke } from '@/lib/api';
 import CytoscapeComponent from 'react-cytoscapejs';
 import type cytoscape from 'cytoscape';
-import { Download, FileUp, GitGraph, Maximize2, RefreshCw, RotateCcw, Save, SearchCheck, ZoomIn, ZoomOut } from 'lucide-react';
+import { Brain, Download, FileDown, FileUp, GitGraph, Maximize2, RefreshCw, RotateCcw, Save, SearchCheck, ZoomIn, ZoomOut } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -11,7 +11,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import ConfigImportPanel from '@/components/ConfigImportPanel';
 import ConnectivityVerifier from '@/components/ConnectivityVerifier';
 import ImportedDeviceDetails from '@/components/ImportedDeviceDetails';
-import { buildTopologyLayout } from '@/lib/topology-layout';
+import { buildTopologyLayout, MINDMAP_ROOT_ID } from '@/lib/topology-layout';
+import { buildDrawioXml, buildXmindArchive, type TopologyExportEdge, type TopologyExportModel, type TopologyExportNode, type TopologyExportNodeKind } from '@/lib/topology-export';
 import { readStoredDeviceConfig } from '@/lib/network-config';
 import type {
   ApiResponse,
@@ -42,11 +43,13 @@ const STYLESHEET: cytoscape.StylesheetJson = [
   { selector: 'node.asset.router', style: { shape: 'diamond', width: 116, height: 78, 'background-color': '#eef2ff', 'border-color': '#4f46e5', 'border-width': 3 } },
   { selector: 'node.asset.switch', style: { shape: 'rectangle', width: 132, height: 54, 'background-color': '#ecfeff', 'border-color': '#0e7490', 'border-width': 3 } },
   { selector: 'node.firewall', style: { shape: 'hexagon', width: 126, height: 70, 'background-color': '#fef3c7', 'border-color': '#d97706', 'border-width': 3 } },
+  { selector: 'node.mindmap-root', style: { shape: 'roundrectangle', width: 190, height: 84, 'background-color': '#0e7490', 'border-color': '#155e75', 'border-width': 4, color: '#f8fafc', 'font-size': 14, 'font-weight': 700, 'text-outline-color': '#0e7490', 'text-outline-width': 3 } },
   { selector: 'node.layout-anchor', style: { width: 1, height: 1, opacity: 0, label: '' } },
   { selector: 'edge', style: { width: 2, 'line-color': '#94a3b8', 'target-arrow-color': '#94a3b8', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'font-size': 9, color: '#334155', 'text-background-color': '#fff', 'text-background-opacity': 0.92, 'text-background-padding': '3px', 'text-rotation': 'autorotate' } },
   { selector: 'edge.network-link', style: { label: 'data(label)', 'line-style': 'dashed', 'line-color': '#0891b2', 'target-arrow-color': '#0891b2', width: 4, 'curve-style': 'unbundled-bezier', 'control-point-distances': 55 } },
   { selector: 'edge.secondary-nic', style: { label: '', 'line-style': 'dotted', 'line-color': '#7c3aed', 'target-arrow-color': '#7c3aed', width: 2, opacity: 0.58 } },
   { selector: 'edge.firewall-nic', style: { label: '', 'line-style': 'dotted', 'line-color': '#d97706', 'target-arrow-color': '#d97706', width: 3, opacity: 0.68 } },
+  { selector: 'edge.mindmap-branch', style: { label: '', 'target-arrow-shape': 'none', 'line-color': '#0e7490', width: 6, opacity: 0.4, 'curve-style': 'unbundled-bezier', 'control-point-distances': 60 } },
   { selector: 'edge:selected', style: { label: 'data(label)', opacity: 1, width: 5, 'z-index': 10 } },
   { selector: ':selected', style: { 'overlay-color': '#0ea5e9', 'overlay-opacity': 0.15, 'overlay-padding': 8 } },
 ];
@@ -57,6 +60,7 @@ const LAYOUT_LABELS: Record<TopologyLayoutName, string> = {
   circle: 'Circle',
   concentric: 'Concentric',
   breadthfirst: 'Breadth-first',
+  mindmap: 'Mindmap (subnets)',
 };
 
 export default function NetworkTopology({ refreshTrigger }: Props) {
@@ -119,11 +123,18 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
 
   const elements = useMemo<cytoscape.ElementDefinition[]>(() => {
     const result: cytoscape.ElementDefinition[] = [];
+    const mindmap = layout === 'mindmap';
+    if (mindmap) {
+      result.push({ group: 'nodes', classes: 'mindmap-root', data: { id: MINDMAP_ROOT_ID, label: `${caseInfo?.name ?? 'Network environment'}\n${networks.length} ${networks.length === 1 ? 'subnet' : 'subnets'}` } });
+    }
     networks.forEach((network) => {
       const parent = `network-${network.id}`;
       result.push({ group: 'nodes', classes: 'network', data: { id: parent, label: `${network.name}\n${network.subnet || (network.vlan_id ? `VLAN ${network.vlan_id} · subnet unresolved` : 'Subnet unresolved')}`, kind: network.network_type.toLowerCase(), rawData: network } });
       for (const corner of ['nw', 'ne', 'sw', 'se']) {
         result.push({ group: 'nodes', classes: 'layout-anchor', selectable: false, grabbable: false, data: { id: `network-boundary-${network.id}-${corner}`, parent } });
+      }
+      if (mindmap) {
+        result.push({ group: 'edges', classes: 'mindmap-branch', data: { id: `mindmap-branch-${network.id}`, source: MINDMAP_ROOT_ID, target: parent } });
       }
     });
     visibleAssets.forEach((asset) => result.push({ group: 'nodes', classes: `asset ${asset.asset_type}`, data: { id: `asset-${asset.id}`, label: `${asset.name}\n${['router', 'switch'].includes(asset.asset_type) ? asset.asset_type.toUpperCase() : asset.ip_address || 'No IP'}`, parent: asset.network_id ? `network-${asset.network_id}` : undefined, compromise: asset.compromise_status, rawData: asset } }));
@@ -133,7 +144,7 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
     interfaces.filter((item) => visibleAssetIds.has(item.asset_id) && !item.is_primary && item.network_id).forEach((item) => result.push({ group: 'edges', classes: 'secondary-nic', data: { id: `interface-edge-${item.id}`, source: `asset-${item.asset_id}`, target: `network-${item.network_id}`, label: `${item.name} · ${item.ip_address || 'L2'}`, rawData: item } }));
     firewallInterfaces.filter((item) => item.network_id && (!item.is_primary || !firewalls.find((firewall) => firewall.id === item.firewall_id)?.network_id)).forEach((item) => result.push({ group: 'edges', classes: 'firewall-nic', data: { id: `firewall-interface-edge-${item.id}`, source: `firewall-${item.firewall_id}`, target: `network-${item.network_id}`, label: `${item.name} · ${item.ip_addresses.join(', ')}`, rawData: item } }));
     return result;
-  }, [networks, visibleAssets, firewalls, connections, interfaces, firewallInterfaces]);
+  }, [layout, caseInfo, networks, visibleAssets, firewalls, connections, interfaces, firewallInterfaces]);
 
   const applyPositions = useCallback((savedView?: TopologyViewState | null, fit = true) => {
     const cy = cyRef.current;
@@ -235,6 +246,57 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
     const link = document.createElement('a'); link.download = 'network-topology.png'; link.href = cyRef.current.png({ bg: 'white', full: true, scale: 2 }); link.click();
   };
 
+  /** Snapshot of the canvas as it looks right now, including manual drags. */
+  const snapshotExportModel = (): TopologyExportModel | null => {
+    const cy = cyRef.current;
+    if (!cy || cy.elements().length === 0) return null;
+    const nodes: TopologyExportNode[] = [];
+    cy.nodes().not('.layout-anchor').forEach((node) => {
+      const data = node.data();
+      const box = node.boundingBox({ includeLabels: false, includeOverlays: false });
+      const kind: TopologyExportNodeKind = node.hasClass('mindmap-root') ? 'root' : node.hasClass('network') ? 'zone' : node.hasClass('firewall') ? 'firewall' : 'asset';
+      const tone = typeof data.kind === 'string' && ['dmz', 'dms', 'wan'].includes(data.kind) ? data.kind as TopologyExportNode['zoneTone'] : 'default';
+      const parentId = typeof data.parent === 'string' ? data.parent : undefined;
+      nodes.push({
+        id: node.id(), label: String(data.label ?? ''), kind,
+        x: box.x1 + box.w / 2, y: box.y1 + box.h / 2, width: box.w, height: box.h,
+        parent: parentId,
+        status: kind === 'asset' && typeof data.compromise === 'string' ? data.compromise : undefined,
+        zoneTone: kind === 'zone' ? tone : undefined,
+        shape: node.hasClass('router') ? 'router' : node.hasClass('switch') ? 'switch' : kind === 'firewall' ? 'firewall' : 'box',
+      });
+    });
+    const edges: TopologyExportEdge[] = [];
+    cy.edges().forEach((edge) => {
+      edges.push({
+        id: edge.id(), source: edge.source().id(), target: edge.target().id(),
+        label: String(edge.data('label') ?? '') || undefined,
+        kind: edge.hasClass('mindmap-branch') ? 'branch' : edge.hasClass('network-link') ? 'connection' : 'nic',
+      });
+    });
+    return { title: caseInfo?.name ?? 'Network topology', nodes, edges };
+  };
+
+  const exportStem = () => (caseInfo?.name ?? 'case').trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'case';
+
+  const exportDrawio = async () => {
+    const model = snapshotExportModel();
+    if (!model) { toast.info('Add a network or asset before exporting'); return; }
+    try {
+      await downloadText(`${exportStem()}-topology.drawio`, buildDrawioXml(model));
+      toast.success('draw.io diagram saved');
+    } catch (reason) { toast.error(`Could not export the draw.io file: ${String(reason)}`); }
+  };
+
+  const exportXmind = async () => {
+    const model = snapshotExportModel();
+    if (!model) { toast.info('Add a network or asset before exporting'); return; }
+    try {
+      await downloadBytes(`${exportStem()}-subnets.xmind`, buildXmindArchive(model));
+      toast.success('XMind mindmap saved');
+    } catch (reason) { toast.error(`Could not export the XMind file: ${String(reason)}`); }
+  };
+
   const wireCytoscape = (instance: cytoscape.Core) => {
     cyRef.current = instance;
     if (wiredCyRef.current === instance) return;
@@ -291,6 +353,8 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
         <Button size="sm" variant="outline" title="Fit topology" aria-label="Fit topology" onClick={fitView}><Maximize2 size={16} /></Button>
         <Button size="sm" variant="outline" title="Reset automatic layout" aria-label="Reset automatic layout" onClick={resetAutomaticLayout}><RotateCcw size={16} /></Button>
         <Button size="sm" variant="outline" title="Export PNG" aria-label="Export PNG" onClick={exportPng}><Download size={16} /></Button>
+        <Button size="sm" variant="outline" title="Export editable draw.io diagram" aria-label="Export draw.io diagram" onClick={() => void exportDrawio()} disabled={elements.length === 0}><FileDown size={16} /></Button>
+        <Button size="sm" variant="outline" title="Export XMind mindmap (subnet → devices)" aria-label="Export XMind mindmap" onClick={() => void exportXmind()} disabled={elements.length === 0}><Brain size={16} /></Button>
         <Button size="sm" variant="outline" title="Reload topology data" aria-label="Reload topology data" onClick={() => void loadData()} disabled={loading}><RefreshCw size={16} className={loading ? 'animate-spin' : ''} /></Button>
         <Button size="sm" title="Save positions and camera" onClick={() => void saveView()} disabled={saving || elements.length === 0}><Save size={16} />{saving ? 'Saving…' : 'Save view'}</Button>
       </div>

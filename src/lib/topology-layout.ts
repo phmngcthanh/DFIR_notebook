@@ -18,6 +18,11 @@ export interface TopologyLayoutResult {
   networkBounds: Record<string, { x: number; y: number; width: number; height: number }>;
 }
 
+/** Id of the central hub node the mindmap layout radiates zones from. */
+export const MINDMAP_ROOT_ID = 'mindmap-root';
+
+const MINDMAP_HUB_CLEARANCE = 460;
+
 const NODE_X_GAP = 158;
 const NODE_Y_GAP = 104;
 const ZONE_GAP = 220;
@@ -152,6 +157,20 @@ function placeNetworkCenters(layout: TopologyLayoutName, plans: ZonePlan[], conn
   const centers: Record<string, TopologyPoint> = {};
   const maxWidth = Math.max(...plans.map((plan) => plan.width), 330);
   const maxHeight = Math.max(...plans.map((plan) => plan.height), 230);
+  if (layout === 'mindmap') {
+    // Radial arrangement: zones fan out clockwise from 12 o'clock in name
+    // order, with a clear center for the case hub node.
+    const ordered = [...plans].sort((left, right) => left.network.name.localeCompare(right.network.name));
+    if (!ordered.length) return centers;
+    const arcTotal = ordered.reduce((sum, plan) => sum + plan.width + ZONE_GAP, 0);
+    const diagonal = Math.max(...ordered.map((plan) => Math.hypot(plan.width, plan.height)));
+    const radius = Math.max(arcTotal / (Math.PI * 2), diagonal / 2 + ZONE_GAP, MINDMAP_HUB_CLEARANCE);
+    ordered.forEach((plan, index) => {
+      const angle = -Math.PI / 2 + index * ((Math.PI * 2) / ordered.length);
+      centers[plan.network.id] = { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+    });
+    return centers;
+  }
   if (layout === 'dagre' || layout === 'breadthfirst') {
     const levels = breadthLevels(plans.map((plan) => plan.network), connections, layout === 'dagre');
     return placeLinearGroups(levels, new Map(plans.map((plan) => [plan.network.id, plan])), layout === 'dagre');
@@ -203,6 +222,7 @@ export function buildTopologyLayout(layout: TopologyLayoutName, input: TopologyL
       positions[id] = { x: center.x + point.x, y: center.y + point.y };
     });
   });
+  if (layout === 'mindmap') positions[MINDMAP_ROOT_ID] = { x: 0, y: 0 };
 
   const orphanAssets = input.assets.filter((asset) => !asset.network_id || !networkBounds[asset.network_id]);
   const orphanFirewalls = input.firewalls.filter((firewall) => !firewall.network_id || !networkBounds[firewall.network_id]);

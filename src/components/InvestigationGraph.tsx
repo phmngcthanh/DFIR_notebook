@@ -54,7 +54,7 @@ const STYLESHEET: cytoscape.StylesheetJson = [
 ];
 
 const LAYOUT_LABELS: Record<TopologyLayoutName, string> = {
-  dagre: 'Hierarchical', grid: 'Grid', circle: 'Circle', concentric: 'Concentric', breadthfirst: 'Breadth-first',
+  dagre: 'Hierarchical', grid: 'Grid', circle: 'Circle', concentric: 'Concentric', breadthfirst: 'Breadth-first', mindmap: 'Mindmap',
 };
 const COMPROMISE_OPTIONS: CompromiseStatus[] = ['unknown', 'clean', 'suspected', 'infected'];
 const NO_VIEW = '__none__';
