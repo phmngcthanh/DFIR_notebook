@@ -108,6 +108,136 @@ set security policies from-zone trust to-zone untrust policy web-out then permit
     expect(result.aclRules[0]).toMatchObject({ action: 'allow', fromZone: 'trust', toZone: 'untrust' });
   });
 
+  it('parses a FortiOS multi-VDOM backup with zones, policies, and NAT', () => {
+    const result = parseDeviceConfig('fortigate_firewall', `
+#config-version=FG10E1-7.0.12-FW-build0523-230606:opmode=0:vdom=1:user=admin
+#conf_file_ver=390013095338297
+config vdom
+edit root
+next
+edit FW_VPN
+next
+end
+config global
+config system global
+    set alias "FortiGate-1101E"
+    set hostname "HN-22HV-FW-01"
+    set timezone 53
+end
+end
+config vdom
+edit root
+next
+end
+config system interface
+    edit "wan1"
+        set vdom "root"
+        set ip 203.0.113.2 255.255.255.248
+        set allowaccess ping https ssh
+        set role wan
+        set status enable
+    next
+    edit "port2"
+        set vdom "root"
+        set ip 10.30.0.1 255.255.255.0
+        set role lan
+        config secondaryip
+            edit 1
+                set ip 10.30.200.1 255.255.255.0
+            next
+        end
+    next
+end
+config system vlan
+    edit "vlan30"
+        set vdom "root"
+        set vlanid 30
+        set interface "port2"
+        set ip 10.30.30.1 255.255.255.0
+        set role lan
+    next
+end
+config system zone
+    edit "INTERNAL"
+        set member "port2" "vlan30"
+    next
+end
+config router static
+    edit 1
+        set gateway 203.0.113.1
+        set device "wan1"
+    next
+    edit 2
+        set dst 10.99.0.0 255.255.0.0
+        set blackhole enable
+    next
+end
+config firewall address
+    edit "LAN_NET"
+        set subnet 10.30.0.0 255.255.255.0
+    next
+    edit "GEO_JP"
+        set type geography
+        set country "JP"
+    next
+end
+config firewall addrgrp
+    edit "LAN_ALL"
+        set member "LAN_NET"
+    next
+end
+config firewall policy
+    edit 1
+        set name "lan-out"
+        set srcintf "INTERNAL"
+        set dstintf "wan1"
+        set srcaddr "LAN_ALL"
+        set dstaddr "GEO_JP"
+        set action accept
+        set schedule "always"
+        set service "ALL"
+        set nat enable
+    next
+    edit 2
+        set name "block-dmz-in"
+        set srcintf "wan1"
+        set dstintf "INTERNAL"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action deny
+    next
+end
+config firewall vip
+    edit "VIP_WEB"
+        set extip 203.0.113.5
+        set extintf "wan1"
+        set portforward enable
+        set mappedip "10.30.0.10"
+        set extport 443
+        set mappedport 8443
+    next
+end
+`);
+    expect(result.hostname).toBe('HN-22HV-FW-01');
+    expect(result.deviceType).toBe('firewall');
+    expect(result.vendor).toBe('Fortinet');
+    expect(result.model).toBe('FortiGate-1101E');
+    expect(result.interfaces.find((item) => item.name === 'wan1')).toMatchObject({ role: 'wan', zone: 'wan1', addresses: ['203.0.113.2/29'] });
+    expect(result.interfaces.find((item) => item.name === 'port2')).toMatchObject({ zone: 'INTERNAL', addresses: ['10.30.0.1/24', '10.30.200.1/24'] });
+    expect(result.interfaces.find((item) => item.name === 'vlan30')).toMatchObject({ vlanId: '30', zone: 'INTERNAL' });
+    expect(result.vlans.find((item) => item.id === '30')?.name).toBe('vlan30');
+    expect(result.routes.find((item) => item.destination === '0.0.0.0/0')).toMatchObject({ nextHop: '203.0.113.1', interface: 'wan1', active: true });
+    expect(result.routes.find((item) => item.destination === '10.99.0.0/16')?.active).toBe(false);
+    expect(result.aclRules[0]).toMatchObject({ name: 'lan-out', action: 'allow', source: '10.30.0.0/24', fromZone: 'INTERNAL', toZone: 'wan1' });
+    expect(result.aclRules[1]).toMatchObject({ name: 'block-dmz-in', action: 'deny' });
+    expect(result.natRules.find((item) => item.natType === 'snat')).toMatchObject({ name: 'nat-lan-out', source: '10.30.0.0/24', outboundInterface: 'wan1' });
+    expect(result.natRules.find((item) => item.natType === 'port_mapping')).toMatchObject({
+      name: 'VIP_WEB', translatedDestination: '10.30.0.10', originalPort: '443', translatedPort: '8443', inboundInterface: 'wan1',
+    });
+    expect(result.warnings.join(' ')).toContain('GEO_JP');
+    expect(result.warnings.join(' ')).toContain('could not be resolved');
+  });
+
   it('parses OpenWrt UCI router and firewall sections', () => {
     const result = parseDeviceConfig('openwrt_network', `
 config system

@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Asset, JsonValue, Network, NetworkInterface } from '@/types';
+import type { XmindTopic } from './topology-export';
 
 export type VmInventoryPlatform = 'esxi' | 'proxmox' | 'hyperv' | 'generic';
 export type VmInventorySourceFormat = 'csv' | 'json' | 'native';
@@ -748,4 +749,75 @@ export function buildVmInventoryImport(
 
 export function platformLabel(platform: VmInventoryPlatform): string {
   return PLATFORM_LABELS[platform];
+}
+
+export interface VmHostEntry {
+  asset: Asset;
+  inventory: ImportedVmInventory;
+}
+
+export interface VmHostGroup {
+  /** Hypervisor / node the VMs run on; empty when none was recorded. */
+  host: string;
+  platforms: VmInventoryPlatform[];
+  entries: VmHostEntry[];
+}
+
+const HOST_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+/**
+ * Groups every asset that carries an imported VM inventory under the
+ * hypervisor it runs on (`hypervisor`, falling back to the inventory scope).
+ * Hosts sort by name with VMs sorted by name inside each host; hosts without
+ * a recorded name collect at the end.
+ */
+export function groupVmsByHost(assets: Asset[]): VmHostGroup[] {
+  const groups = new Map<string, VmHostGroup>();
+  for (const asset of assets) {
+    const inventory = readStoredVmInventory(asset.properties);
+    if (!inventory) continue;
+    const host = (inventory.hypervisor ?? inventory.inventoryScope ?? '').trim();
+    const group = groups.get(host.toLowerCase()) ?? { host, platforms: [], entries: [] };
+    if (!group.platforms.includes(inventory.platform)) group.platforms.push(inventory.platform);
+    group.entries.push({ asset, inventory });
+    groups.set(host.toLowerCase(), group);
+  }
+  return [...groups.values()].map((group) => ({
+    ...group,
+    entries: [...group.entries].sort((left, right) =>
+      HOST_COLLATOR.compare(left.inventory.name || left.asset.name, right.inventory.name || right.asset.name)
+      || left.asset.id.localeCompare(right.asset.id)),
+  })).sort((left, right) =>
+    (left.host ? 0 : 1) - (right.host ? 0 : 1) || HOST_COLLATOR.compare(left.host, right.host));
+}
+
+/**
+ * Builds the XMind topic tree for the VM inventory: one branch per hypervisor
+ * host, one leaf per VM titled `hostname · IP` (plus compromise status), with
+ * the power state as an XMind label. Returns null when no VMs are recorded.
+ */
+export function buildVmHostTree(assets: Asset[]): XmindTopic | null {
+  const groups = groupVmsByHost(assets);
+  if (!groups.length) return null;
+  const total = groups.reduce((sum, group) => sum + group.entries.length, 0);
+  return {
+    id: 'vm-inventory-root',
+    title: `VM inventory · ${total} ${total === 1 ? 'VM' : 'VMs'} on ${groups.length} ${groups.length === 1 ? 'host' : 'hosts'}`,
+    children: groups.map((group) => ({
+      id: `vm-host-${group.host.toLowerCase().replace(/[^a-z0-9._-]+/g, '-') || 'unassigned'}`,
+      title: `${group.host || 'Unassigned host'} · ${group.entries.length} ${group.entries.length === 1 ? 'VM' : 'VMs'}`,
+      labels: group.platforms.map(platformLabel),
+      children: group.entries.map(({ asset, inventory }) => {
+        const addresses = inventory.ipAddresses.length ? inventory.ipAddresses : (asset.ip_address ? [asset.ip_address] : []);
+        const status = asset.compromise_status === 'suspected' || asset.compromise_status === 'infected'
+          ? ` · ${asset.compromise_status}`
+          : '';
+        return {
+          id: `vm-${asset.id}`,
+          title: `${inventory.name || asset.name} · ${addresses.join(', ') || 'No IP'}${status}`,
+          ...(inventory.state ? { labels: [inventory.state] } : {}),
+        };
+      }),
+    })),
+  };
 }
