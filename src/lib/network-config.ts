@@ -2,6 +2,7 @@ export type ConfigProfile =
   | 'palo_alto_firewall'
   | 'opnsense_firewall'
   | 'juniper_firewall'
+  | 'fortigate_firewall'
   | 'openwrt_network'
   | 'cisco_network'
   | 'palo_alto_network';
@@ -17,6 +18,7 @@ export const CONFIG_PROFILES: ConfigProfileOption[] = [
   { value: 'palo_alto_firewall', label: 'Palo Alto firewall', vendor: 'Palo Alto', expectedFormat: 'PAN-OS set commands or XML' },
   { value: 'opnsense_firewall', label: 'OPNsense firewall', vendor: 'OPNsense', expectedFormat: 'config.xml backup' },
   { value: 'juniper_firewall', label: 'Juniper firewall', vendor: 'Juniper', expectedFormat: 'Junos “display set” configuration' },
+  { value: 'fortigate_firewall', label: 'FortiGate firewall', vendor: 'Fortinet', expectedFormat: 'FortiOS configuration backup (config/edit/set CLI)' },
   { value: 'openwrt_network', label: 'OpenWrt router / switch', vendor: 'OpenWrt', expectedFormat: 'UCI configuration export' },
   { value: 'cisco_network', label: 'Cisco router / switch', vendor: 'Cisco', expectedFormat: 'IOS / IOS-XE running configuration' },
   { value: 'palo_alto_network', label: 'Palo Alto router / switch', vendor: 'Palo Alto', expectedFormat: 'PAN-OS set commands or XML' },
@@ -1120,6 +1122,232 @@ function parseJuniper(config: MutableConfig): void {
   }
 }
 
+interface FortiRecord {
+  /** The `config <path>` table the record belongs to, e.g. `system interface`. */
+  path: string;
+  id: string;
+  sets: Map<string, string[]>;
+  /** Enclosing `edit` for nested tables, e.g. per-interface `secondaryip`. */
+  owner: FortiRecord | null;
+}
+
+/**
+ * Flattens a FortiOS CLI hierarchy (`config` / `edit` / `set` / `next` / `end`)
+ * into records keyed by table path. VDOM and `config global` wrappers only
+ * change nesting depth, so the immediate `config` path stays the table name.
+ */
+function fortiRecords(rawConfig: string): FortiRecord[] {
+  const records: FortiRecord[] = [];
+  const pathStack: string[] = [];
+  const open: FortiRecord[] = [];
+  // Some tables (notably `config system global`) hold `set` keys directly
+  // without any `edit` block; collect those as anonymous records per path.
+  const tableLevel = new Map<string, FortiRecord>();
+  for (const rawLine of rawConfig.split(/\r?\n/)) {
+    const tokens = words(rawLine);
+    const head = tokens[0]?.toLowerCase();
+    if (!head || head.startsWith('#')) continue;
+    if (head === 'config') {
+      pathStack.push(tokens.slice(1).join(' '));
+    } else if (head === 'edit' && tokens[1]) {
+      open.push({ path: pathStack[pathStack.length - 1] ?? '', id: stripQuotes(tokens[1]), sets: new Map(), owner: open[open.length - 1] ?? null });
+    } else if ((head === 'set' || head === 'unset') && tokens[1]) {
+      const path = pathStack[pathStack.length - 1];
+      const record = open.length
+        ? open[open.length - 1]
+        : path ? (tableLevel.get(path) ?? { path, id: '', sets: new Map(), owner: null }) : null;
+      if (!record) continue;
+      if (head === 'set') record.sets.set(tokens[1], tokens.slice(2));
+      else record.sets.delete(tokens[1]);
+      if (!open.length && path) tableLevel.set(path, record);
+    } else if (head === 'next' && open.length) {
+      records.push(open.pop()!);
+    } else if (head === 'end' && pathStack.length) {
+      pathStack.pop();
+    }
+  }
+  records.push(...open.reverse());
+  records.push(...tableLevel.values());
+  return records;
+}
+
+function parseFortigate(config: MutableConfig): void {
+  const records = fortiRecords(config.rawConfig);
+  const values = (record: FortiRecord, key: string) => record.sets.get(key) ?? [];
+  const text = (record: FortiRecord, key: string) => values(record, key).join(' ').trim();
+  const disabled = (record: FortiRecord) => values(record, 'status').some((value) => value.toLowerCase() === 'disable');
+  const table = (name: string) => records.filter((item) => item.path === name);
+
+  const global = table('system global')[0];
+  const alias = global ? text(global, 'alias') : '';
+  if (global && text(global, 'hostname')) config.hostname = text(global, 'hostname');
+  const platform = (config.rawConfig.split(/\r?\n/, 1)[0] ?? '').match(/#config-version=FG([^-]+)/i)?.[1];
+  config.model = alias || (platform ? `FortiGate ${platform}` : undefined);
+
+  const zoneMembers = new Map<string, string[]>();
+  for (const record of table('system zone')) {
+    zoneMembers.set(record.id, unique([...values(record, 'member'), ...values(record, 'interface')]));
+  }
+
+  const interfaceRecords = [...table('system interface'), ...table('system vlan')];
+  for (const record of interfaceRecords) {
+    const item = ensureInterface(config, record.id);
+    const ip = values(record, 'ip');
+    if (ip[0]) item.addresses.push(ip[1] ? ipWithMask(ip[0], ip[1]) : ip[0]);
+    const vlanId = values(record, 'vlanid')[0];
+    if (vlanId) {
+      item.vlanId = vlanId;
+      ensureVlan(config, vlanId, record.path === 'system vlan' ? record.id : undefined).interfaces.push(item.name);
+    }
+    const role = values(record, 'role')[0]?.toLowerCase();
+    if (role === 'wan' || role === 'lan' || role === 'dmz' || role === 'ha' || role === 'tunnel' || role === 'vpn') {
+      item.role = role === 'tunnel' ? 'vpn' : role;
+    }
+    if (disabled(record)) item.enabled = false;
+    const vdom = text(record, 'vdom');
+    const description = text(record, 'description');
+    item.description = [vdom ? `vdom ${vdom}` : '', description].filter(Boolean).join('; ') || undefined;
+  }
+  for (const record of table('secondaryip')) {
+    const owner = record.owner && interfaceRecords.includes(record.owner) ? ensureInterface(config, record.owner.id) : null;
+    const ip = values(record, 'ip');
+    if (owner && ip[0] && ip[1]) owner.addresses.push(ipWithMask(ip[0], ip[1]));
+  }
+  // FortiGate policies reference ingress/egress by zone name or interface
+  // name interchangeably; carrying both as the interface's zone lets the
+  // analyzer match srcintf/dstintf either way.
+  for (const [zone, members] of zoneMembers) {
+    for (const member of members) ensureInterface(config, member).zone = zone;
+  }
+  for (const item of config.interfaces) {
+    if (!item.zone) item.zone = item.name;
+  }
+
+  const addressObjects = new Map<string, string>();
+  for (const record of table('firewall address')) {
+    const subnet = values(record, 'subnet');
+    if (subnet[0] && subnet[1]) addressObjects.set(record.id, ipWithMask(subnet[0], subnet[1]));
+  }
+  const addressGroups = new Map<string, string[]>();
+  for (const record of table('firewall addrgrp')) {
+    addressGroups.set(record.id, values(record, 'member'));
+  }
+  const resolveAddresses = (names: string[], seen: Set<string> = new Set()): string[] =>
+    names.flatMap((name) => {
+      if (['all', 'any'].includes(name.toLowerCase())) return ['any'];
+      const object = addressObjects.get(name);
+      if (object) return [object];
+      const group = addressGroups.get(name);
+      if (group && !seen.has(name)) {
+        seen.add(name);
+        return resolveAddresses(group, seen);
+      }
+      // FQDN / geographic objects stay as names; analysis treats them as unknown.
+      return [name];
+    });
+
+  for (const record of table('router static')) {
+    const destination = values(record, 'dst');
+    // A static route without `set dst` is the default route.
+    const cidr = destination[0] ? (destination[1] ? ipWithMask(destination[0], destination[1]) : destination[0]) : '0.0.0.0/0';
+    const distance = Number(values(record, 'distance')[0]);
+    config.routes.push({
+      name: `static-${record.id}`,
+      destination: cidr,
+      nextHop: values(record, 'gateway')[0],
+      interface: values(record, 'device')[0],
+      metric: Number.isFinite(distance) ? distance : undefined,
+      protocol: 'static',
+      active: !disabled(record) && !values(record, 'blackhole').some((value) => value.toLowerCase() === 'enable'),
+      description: text(record, 'comment') || undefined,
+    });
+  }
+
+  const ippools = new Map<string, string>();
+  for (const record of table('firewall ippool')) {
+    const start = values(record, 'startip')[0];
+    if (start) ippools.set(record.id, start);
+  }
+
+  const unresolvedNames = new Set<string>();
+  table('firewall policy').forEach((record, index) => {
+    const numericId = Number(record.id);
+    const sequence = Number.isFinite(numericId) ? numericId * 10 : (index + 1) * 10;
+    const name = text(record, 'name') || `policy-${record.id}`;
+    const source = unique(resolveAddresses(values(record, 'srcaddr')));
+    const destination = unique(resolveAddresses(values(record, 'dstaddr')));
+    [...source, ...destination].forEach((value) => {
+      if (value !== 'any' && !value.includes('/')) unresolvedNames.add(value);
+    });
+    const services = values(record, 'service').filter((value) => value.toUpperCase() !== 'ALL');
+    const enabled = !disabled(record);
+    const action = values(record, 'action')[0]?.toLowerCase() === 'accept' ? 'allow' : 'deny';
+    config.aclRules.push({
+      name,
+      sequence,
+      action,
+      protocol: services.length ? normalizeProtocol(services.join(',')) : 'any',
+      source: source.join(',') || 'any',
+      destination: destination.join(',') || 'any',
+      fromZone: unique(values(record, 'srcintf')).join(',') || undefined,
+      toZone: unique(values(record, 'dstintf')).join(',') || undefined,
+      enabled,
+      description: text(record, 'comments') || undefined,
+    });
+    // An accepting policy NATs outbound unless NAT is explicitly disabled,
+    // hiding the source behind the egress interface or a referenced IP pool.
+    if (action === 'allow' && enabled && !values(record, 'nat').some((value) => value.toLowerCase() === 'disable')) {
+      const pool = values(record, 'nat-ippool')[0];
+      config.natRules.push({
+        name: `nat-${name}`,
+        natType: 'snat',
+        protocol: 'any',
+        source: source.join(',') || 'any',
+        translatedSource: pool && ippools.has(pool) ? ippools.get(pool)! : 'interface-address',
+        outboundInterface: values(record, 'dstintf')[0],
+        enabled: true,
+        description: `From policy ${record.id}`,
+      });
+    }
+  });
+
+  for (const record of [...table('firewall central-snat-map'), ...table('firewall central-snat')]) {
+    const pool = values(record, 'pool')[0];
+    config.natRules.push({
+      name: `central-snat-${record.id}`,
+      natType: 'snat',
+      protocol: 'any',
+      source: unique(resolveAddresses(values(record, 'orig-addr'))).join(',') || 'any',
+      translatedSource: pool && ippools.has(pool) ? ippools.get(pool)! : 'interface-address',
+      outboundInterface: values(record, 'dstintf')[0],
+      enabled: !disabled(record),
+      description: text(record, 'comments') || undefined,
+    });
+  }
+
+  for (const record of table('firewall vip')) {
+    const portforward = values(record, 'portforward').some((value) => value.toLowerCase() === 'enable');
+    const mapped = values(record, 'mappedip')[0]?.split('-')[0]?.trim();
+    config.natRules.push({
+      name: record.id,
+      natType: portforward ? 'port_mapping' : 'vip',
+      protocol: values(record, 'protocol')[0]?.toLowerCase() ?? 'any',
+      originalDestination: values(record, 'extip')[0],
+      originalPort: values(record, 'extport')[0],
+      translatedDestination: mapped,
+      translatedPort: values(record, 'mappedport')[0],
+      inboundInterface: values(record, 'extintf')[0],
+      enabled: !disabled(record),
+      description: text(record, 'comment') || undefined,
+    });
+  }
+
+  config.deviceType = 'firewall';
+  if (unresolvedNames.size) {
+    config.warnings.push(`${unresolvedNames.size} policy address reference(s) (${[...unresolvedNames].slice(0, 5).join(', ')}) could not be resolved to subnets; affected paths remain “possible” rather than confirmed.`);
+  }
+}
+
 function finalize(config: MutableConfig, hostnameOverride?: string): ParsedDeviceConfig {
   if (hostnameOverride?.trim()) config.hostname = hostnameOverride.trim();
   config.hostname = config.hostname.trim() || 'Imported network device';
@@ -1157,6 +1385,7 @@ export function parseDeviceConfig(
   if (profile === 'openwrt_network') parseOpenWrt(config);
   if (profile === 'opnsense_firewall') parseOpnsense(config);
   if (profile === 'juniper_firewall') parseJuniper(config);
+  if (profile === 'fortigate_firewall') parseFortigate(config);
   if (profile === 'palo_alto_firewall' || profile === 'palo_alto_network') {
     if (rawConfig.trimStart().startsWith('<')) parsePanosXml(config);
     else parsePanosSet(config);
