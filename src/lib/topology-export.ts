@@ -131,11 +131,73 @@ export function buildDrawioXml(model: TopologyExportModel): string {
     `    </mxGraphModel>\n  </diagram>\n</mxfile>\n`;
 }
 
-interface XmindTopic {
+/** Topic tree other features (e.g. the VM inventory export) can build directly. */
+export interface XmindTopic {
+  id: string;
+  title: string;
+  labels?: string[];
+  children?: XmindTopic[];
+}
+
+export interface XmindRelationship {
+  id: string;
+  end1Id: string;
+  end2Id: string;
+  title: string;
+}
+
+function xmindTopic(node: XmindTopic): {
   id: string;
   class: 'topic';
   title: string;
-  children?: { attached: XmindTopic[] };
+  labels?: string[];
+  children?: { attached: ReturnType<typeof xmindTopic>[] };
+} {
+  return {
+    id: node.id,
+    class: 'topic',
+    title: node.title,
+    ...(node.labels?.length ? { labels: node.labels } : {}),
+    ...(node.children?.length ? { children: { attached: node.children.map(xmindTopic) } } : {}),
+  };
+}
+
+/** Serializes one sheet with its root topic tree as XMind `content.json`. */
+export function buildXmindContentFromTree(
+  sheetId: string,
+  sheetTitle: string,
+  root: XmindTopic,
+  relationships: XmindRelationship[] = [],
+): string {
+  const sheet = {
+    id: sheetId,
+    class: 'sheet',
+    title: sheetTitle,
+    rootTopic: xmindTopic(root),
+    ...(relationships.length
+      ? { relationships: relationships.map((edge) => ({ ...edge, class: 'relationship' })) }
+      : {}),
+  };
+  return JSON.stringify([sheet]);
+}
+
+function xmindArchive(contentJson: string): Uint8Array {
+  const encoder = new TextEncoder();
+  const entries: ZipEntry[] = [
+    { name: 'content.json', data: encoder.encode(contentJson) },
+    { name: 'metadata.json', data: encoder.encode(JSON.stringify({ creator: { name: branding.productName, version: branding.version } })) },
+    { name: 'manifest.json', data: encoder.encode(JSON.stringify({ 'file-entries': { 'content.json': {}, 'metadata.json': {} } })) },
+  ];
+  return buildZip(entries);
+}
+
+/** A complete `.xmind` file built straight from a topic tree. */
+export function buildXmindArchiveFromTree(
+  sheetTitle: string,
+  root: XmindTopic,
+  relationships: XmindRelationship[] = [],
+): Uint8Array {
+  return xmindArchive(buildXmindContentFromTree('sheet-xmind-export', sheetTitle, root, relationships));
 }
 
 function xmindTitle(node: TopologyExportNode): string {
@@ -155,48 +217,32 @@ export function buildXmindContent(model: TopologyExportModel): string {
   });
   const topicFor = (node: TopologyExportNode): XmindTopic => ({
     id: node.id,
-    class: 'topic',
     title: xmindTitle(node),
   });
   const zoneTopics: XmindTopic[] = zones.map((zone) => {
     const attached = (leavesByParent.get(zone.id) ?? []).map(topicFor);
-    return { id: zone.id, class: 'topic', title: xmindTitle(zone), ...(attached.length ? { children: { attached } } : {}) };
+    return { id: zone.id, title: xmindTitle(zone), ...(attached.length ? { children: attached } : {}) };
   });
   const unassigned = leavesByParent.get('') ?? [];
   if (unassigned.length) {
     zoneTopics.push({
       id: 'unassigned-devices',
-      class: 'topic',
       title: `Unassigned · ${unassigned.length} ${unassigned.length === 1 ? 'device' : 'devices'}`,
-      children: { attached: unassigned.map(topicFor) },
+      children: unassigned.map(topicFor),
     });
   }
   const root = model.nodes.find((node) => node.kind === 'root');
-  const relationships = model.edges
+  const relationships: XmindRelationship[] = model.edges
     .filter((edge) => edge.kind === 'connection')
-    .map((edge) => ({ id: edge.id, class: 'relationship', end1Id: edge.source, end2Id: edge.target, title: edge.label ?? '' }));
-  const sheet = {
-    id: 'sheet-network-topology',
-    class: 'sheet',
-    title: model.title,
-    rootTopic: {
-      id: root?.id ?? 'network-topology',
-      class: 'topic',
-      title: root ? xmindTitle(root) : model.title,
-      ...(zoneTopics.length ? { children: { attached: zoneTopics } } : {}),
-    },
-    ...(relationships.length ? { relationships } : {}),
-  };
-  return JSON.stringify([sheet]);
+    .map((edge) => ({ id: edge.id, end1Id: edge.source, end2Id: edge.target, title: edge.label ?? '' }));
+  return buildXmindContentFromTree('sheet-network-topology', model.title, {
+    id: root?.id ?? 'network-topology',
+    title: root ? xmindTitle(root) : model.title,
+    ...(zoneTopics.length ? { children: zoneTopics } : {}),
+  }, relationships);
 }
 
 /** A complete `.xmind` file: content, metadata, and manifest in a stored zip. */
 export function buildXmindArchive(model: TopologyExportModel): Uint8Array {
-  const encoder = new TextEncoder();
-  const entries: ZipEntry[] = [
-    { name: 'content.json', data: encoder.encode(buildXmindContent(model)) },
-    { name: 'metadata.json', data: encoder.encode(JSON.stringify({ creator: { name: branding.productName, version: branding.version } })) },
-    { name: 'manifest.json', data: encoder.encode(JSON.stringify({ 'file-entries': { 'content.json': {}, 'metadata.json': {} } })) },
-  ];
-  return buildZip(entries);
+  return xmindArchive(buildXmindContent(model));
 }

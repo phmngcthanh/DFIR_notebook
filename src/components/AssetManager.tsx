@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { invoke } from '@/lib/api';
-import { ArrowUpDown, Boxes, Cable, ChevronDown, ChevronRight, ChevronUp, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react';
+import { downloadBytes, invoke } from '@/lib/api';
+import { ArrowUpDown, Boxes, Brain, Cable, ChevronDown, ChevronRight, ChevronUp, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import VmInventoryImportPanel from '@/components/VmInventoryImportPanel';
 import { Badge } from '@/components/ui/badge';
@@ -12,7 +12,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { sortAssets, type AssetSort, type AssetSortKey } from '@/lib/asset-sort';
-import { platformLabel, readStoredVmInventory } from '@/lib/vm-inventory';
+import { buildXmindArchiveFromTree } from '@/lib/topology-export';
+import { buildVmHostTree, platformLabel, readStoredVmInventory } from '@/lib/vm-inventory';
 import type { ApiResponse, Asset, Case, CompromiseStatus, ExpertIdentity, InfectionSummary, InvestigationStatus, Network, NetworkInterface } from '@/types';
 
 interface Props { refreshTrigger: number; expert: ExpertIdentity }
@@ -154,12 +155,24 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
   }, [filteredAssets, interfacesByAsset, sort]);
   const toggleSort = (key: AssetSortKey) => setSort((current) =>
     current?.key === key ? (current.direction === 'asc' ? { key, direction: 'desc' } : null) : { key, direction: 'asc' });
+  const vmAssets = useMemo(() => assets.filter((asset) => readStoredVmInventory(asset.properties)), [assets]);
+
+  const exportVmXmind = async () => {
+    const tree = buildVmHostTree(assets);
+    if (!tree) { toast.info('No imported VM inventory to export yet'); return; }
+    const stem = (currentCase?.name ?? 'case').trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'case';
+    try {
+      await downloadBytes(`${stem}-vms.xmind`, buildXmindArchiveFromTree(currentCase?.name ?? 'VM inventory', tree));
+      toast.success(`XMind VM inventory saved (${vmAssets.length} VMs grouped by host)`);
+    } catch (reason) { toast.error(`Could not export the XMind file: ${String(reason)}`); }
+  };
 
   return (
     <div className="space-y-4 p-6">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-2xl font-bold text-slate-800">Assets and PC Configuration</h2><p className="text-sm text-slate-500">Primary configuration, investigation status, multi-homed interfaces, and virtual-machine inventory</p></div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={() => setShowVmImport((value) => !value)}><Boxes size={16} className="mr-2" />Import VM inventory</Button>
+          <Button variant="outline" onClick={() => void exportVmXmind()} disabled={vmAssets.length === 0} title="Export the imported VM inventory as an XMind mindmap grouped by hypervisor host"><Brain size={16} className="mr-2" />Export VMs (XMind)</Button>
           <Button onClick={() => { resetAssetForm(); setShowForm(true); }} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add Asset</Button>
         </div>
       </div>

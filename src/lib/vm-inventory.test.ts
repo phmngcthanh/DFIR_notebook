@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
+import type { Asset } from '@/types';
 import {
+  buildVmHostTree,
   buildVmInventoryImport,
   classifyGuestOs,
+  groupVmsByHost,
   parseCsv,
   parseVmInventory,
+  VM_INVENTORY_SCHEMA,
+  type ImportedVmInventory,
   type VmImportInventory,
 } from './vm-inventory';
 
@@ -296,5 +301,74 @@ describe('mobile and generic batch imports', () => {
     ]), { inventoryScope: 'site-a' });
     const values = assetChanges(refreshed, inventory);
     expect(values[0].asset_type).toBe('server');
+  });
+});
+
+describe('VM host grouping and XMind export', () => {
+  function vmAsset(id: string, name: string, overrides: {
+    host?: string; scope?: string; platform?: ImportedVmInventory['platform']; ips?: string[]; state?: string;
+    status?: Asset['compromise_status']; assetIp?: string;
+  } = {}): Asset {
+    const inventory: ImportedVmInventory = {
+      schema: VM_INVENTORY_SCHEMA,
+      platform: overrides.platform ?? 'esxi',
+      kind: 'virtual-machine',
+      identityKey: `key-${id}`,
+      name,
+      ...(overrides.scope ? { inventoryScope: overrides.scope } : {}),
+      ...(overrides.host ? { hypervisor: overrides.host } : {}),
+      ...(overrides.state ? { state: overrides.state } : {}),
+      ipAddresses: overrides.ips ?? [],
+      macAddresses: [],
+      sourceFormat: 'csv',
+      raw: {},
+    };
+    return {
+      id, name, ip_address: overrides.assetIp ?? '', asset_type: 'vm', suspicious: false,
+      compromise_status: overrides.status ?? 'unknown', investigation_status: 'not_started', created_at: '',
+      properties: JSON.stringify(inventory),
+    };
+  }
+
+  it('groups VMs under their hypervisor host, sorted, with unassigned last', () => {
+    const groups = groupVmsByHost([
+      vmAsset('a', 'web-02', { host: 'esx-10', ips: ['10.0.0.2'] }),
+      vmAsset('b', 'app-01', { host: 'esx-02', ips: ['10.0.1.2'] }),
+      vmAsset('c', 'app-02', { host: 'ESX-02', ips: ['10.0.1.3'] }),
+      vmAsset('d', 'orphan-vm', { scope: undefined, ips: [] }),
+      { id: 'e', name: 'plain-laptop', ip_address: '10.9.9.9', asset_type: 'laptop', suspicious: false, compromise_status: 'unknown', investigation_status: 'not_started', created_at: '' },
+    ]);
+    expect(groups.map((group) => group.host)).toEqual(['esx-02', 'esx-10', '']);
+    expect(groups[0].entries.map((entry) => entry.inventory.name)).toEqual(['app-01', 'app-02']);
+    expect(groups[0].entries).toHaveLength(2);
+    expect(groups[2].entries.map((entry) => entry.inventory.name)).toEqual(['orphan-vm']);
+  });
+
+  it('falls back to the inventory scope when no hypervisor was recorded', () => {
+    const groups = groupVmsByHost([vmAsset('a', 'dc-01', { scope: 'esx-99', ips: ['10.5.0.10'] })]);
+    expect(groups[0].host).toBe('esx-99');
+  });
+
+  it('builds the XMind tree with hosts as branches and hostname · IP leaves', () => {
+    const tree = buildVmHostTree([
+      vmAsset('a', 'web-01', { host: 'esx-02', ips: ['10.0.0.2', '10.0.0.3'], state: 'PoweredOn' }),
+      vmAsset('b', 'sql-01', { host: 'esx-02', ips: [], assetIp: '10.0.0.50', status: 'infected' }),
+      vmAsset('c', 'mail-01', { host: 'esx-10', platform: 'proxmox', ips: ['10.1.0.7'] }),
+    ]);
+    expect(tree).not.toBeNull();
+    expect(tree!.title).toBe('VM inventory · 3 VMs on 2 hosts');
+    const hosts = tree!.children ?? [];
+    expect(hosts.map((host) => host.title)).toEqual(['esx-02 · 2 VMs', 'esx-10 · 1 VM']);
+    expect(hosts[0].labels).toEqual(['VMware ESXi / vSphere']);
+    expect(hosts[0].children?.map((leaf) => leaf.title)).toEqual(['sql-01 · 10.0.0.50 · infected', 'web-01 · 10.0.0.2, 10.0.0.3']);
+    expect(hosts[0].children?.[1].labels).toEqual(['PoweredOn']);
+    expect(hosts[1].labels).toEqual(['Proxmox VE']);
+  });
+
+  it('returns null when no assets carry a VM inventory', () => {
+    expect(buildVmHostTree([])).toBeNull();
+    expect(buildVmHostTree([
+      { id: 'x', name: 'laptop', ip_address: '', asset_type: 'laptop', suspicious: false, compromise_status: 'unknown', investigation_status: 'not_started', created_at: '' },
+    ])).toBeNull();
   });
 });
