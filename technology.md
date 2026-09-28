@@ -191,6 +191,7 @@ An investigator can use the application to:
 
 - create, unlock, rekey, lock, and reopen encrypted case databases;
 - record networks, endpoints, multi-homed interfaces, firewalls, NAT, and asserted connectivity;
+- leave the zone unset on an endpoint or interface and have it follow its IP: it joins the most specific subnet containing the address when recorded, and endpoints recorded before their subnet link to it automatically once the subnet is created or corrected (explicit assignments are never overridden);
 - import Palo Alto, OPNsense, Juniper, FortiGate (FortiOS CLI backups, including multi-VDOM), OpenWrt, and Cisco device configurations through seven initial role profiles;
 - import ESXi/vSphere, Proxmox VE, and Hyper-V VM lists, plus generic batch device lists and `adb devices` output (mobile and PC/other-OS guests) from supported native text, JSON, or CSV into Assets and PC Configuration;
 - export the imported VM inventory as an XMind mindmap with VMs sorted and grouped under their hypervisor host;
