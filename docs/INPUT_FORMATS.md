@@ -194,11 +194,11 @@ Fields listed as required are required when creating a record. Updates may conta
 | `entity_type` | Required create fields | Optional/update fields and accepted values |
 |---|---|---|
 | `case` | Update only | `name`, `description`, `client_name`, `status` (`active`, `closed`, `archived`), `metadata`; legacy `investigator` values are preserved but ignored |
-| `network` | `name` | `subnet` (CIDR, or empty while an L2 VLAN subnet is unresolved), `network_type` (`LAN`, `DMZ`, `DMS`, `WAN`, `GUEST`, `MANAGEMENT`, `OTHER`), `description`, `vlan_id` |
-| `asset` | `name`, `ip_address` | `network_id`, `mac_address`, `asset_type` (`workstation`, `server`, `vm`, `laptop`, `router`, `switch`, `other`), `os`, `user_name`, `compromise_status` (`unknown`, `clean`, `suspected`, `infected`), `investigation_status` (`not_started`, `in_progress`, `completed`), `properties`, `scan_results` |
+| `network` | `name` | `subnet` (CIDR, or empty while an L2 VLAN subnet is unresolved), `network_type` (`LAN`, `DMZ`, `DMS`, `WAN`, `GUEST`, `MANAGEMENT`, `OTHER`), `description`, `vlan_id`, `quick_note` (short investigator remark) |
+| `asset` | `name`, `ip_address` | `network_id`, `mac_address`, `asset_type` (`workstation`, `server`, `vm`, `laptop`, `router`, `switch`, `other`), `os`, `user_name`, `compromise_status` (`unknown`, `clean`, `suspected`, `infected`), `investigation_status` (`not_started`, `in_progress`, `completed`), `properties`, `scan_results`, `quick_note` (short investigator remark) |
 | `network_interface` | `asset_id`, `name`, `ip_address` | `network_id`, `mac_address`, `is_primary`; at most one primary NIC per asset |
 | `clock_profile` | `name`, `server_reference_raw`, `correct_reference_raw` | `description`, `server_timezone`, `correct_timezone`; UTC values and offset are derived by the app |
-| `firewall` | `name` | `network_id`, `vendor`, `model`, `rules`, `config_text` |
+| `firewall` | `name` | `network_id`, `vendor`, `model`, `rules`, `config_text`, `quick_note` (short investigator remark) |
 | `firewall_interface` | `firewall_id`, `name` | `ip_addresses` array (IPv4/IPv6 addresses or CIDRs), `mac_address`, `network_id`, `vlan_id`, `role` (`wan`, `lan`, `dmz`, `management`, `ha`, `vpn`, `other`), `is_primary`, `description` |
 | `firewall_nat_rule` | `firewall_id`, `name`, `nat_type` | `enabled`, `protocol`, `source_cidr`, `original_destination`, `original_port`, `translated_source`, `translated_destination`, `translated_port`, `inbound_interface_id`, `outbound_interface_id`, `description`; types: `vip`, `dnat`, `snat`, `port_mapping` |
 | `network_connection` | `source_network_id`, `target_network_id`, `connection_type` | `description`, `device_name`; source and target must differ |

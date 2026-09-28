@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { downloadBytes, invoke } from '@/lib/api';
 import { ArrowUpDown, Boxes, Brain, Cable, ChevronDown, ChevronRight, ChevronUp, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
+import QuickNoteCell from '@/components/QuickNoteCell';
 import VmInventoryImportPanel from '@/components/VmInventoryImportPanel';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -144,7 +145,7 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
       return scopeMatch && networkMatch && (compromiseFilter === 'all' || asset.compromise_status === compromiseFilter)
         && (investigationFilter === 'all' || asset.investigation_status === investigationFilter)
         && (!term || [
-          asset.name, asset.ip_address, asset.mac_address, asset.os, asset.user_name, asset.network_name,
+          asset.name, asset.ip_address, asset.mac_address, asset.os, asset.user_name, asset.network_name, asset.quick_note,
           vmInventory?.platform, vmInventory?.hypervisor, vmInventory?.inventoryScope, vmInventory?.nativeId,
         ].some((value) => value?.toLowerCase().includes(term)));
     });
@@ -202,15 +203,17 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
         <SortHead label="Compromise" sortKey="compromise" sort={sort} onChange={toggleSort} />
         <SortHead label="Progress" sortKey="progress" sort={sort} onChange={toggleSort} />
         <SortHead label="NICs" sortKey="nics" sort={sort} onChange={toggleSort} />
+        <TableHead>Note</TableHead>
         <TableHead /></TableRow></TableHeader><TableBody>
-        {sortedAssets.length === 0 ? <TableRow><TableCell colSpan={9} className="py-10 text-center text-slate-400">No matching assets.</TableCell></TableRow> : sortedAssets.map((asset) => {
+        {sortedAssets.length === 0 ? <TableRow><TableCell colSpan={10} className="py-10 text-center text-slate-400">No matching assets.</TableCell></TableRow> : sortedAssets.map((asset) => {
           const assetInterfaces = interfacesByAsset.get(asset.id) ?? [];
           const sightingCount = infection.entities.find((entry) => entry.entity_kind === 'asset' && entry.entity_id === asset.id)?.sighting_count ?? 0;
           return <AssetRows key={asset.id} asset={asset} sightingCount={sightingCount} interfaces={assetInterfaces} expanded={expandedAssetId === asset.id}
             onToggle={() => { setExpandedAssetId(expandedAssetId === asset.id ? null : asset.id); setShowInterfaceForm(false); }} onEdit={() => startEdit(asset)} onDelete={() => void deleteAsset(asset.id)}
             interfaceForm={interfaceForm} setInterfaceForm={setInterfaceForm} showInterfaceForm={showInterfaceForm && expandedAssetId === asset.id}
             editingInterfaceId={editingInterfaceId} networks={networks} onBeginInterface={beginInterface} onSaveInterface={() => void saveInterface()}
-            onCancelInterface={() => setShowInterfaceForm(false)} onPrimary={(id) => void setPrimary(id)} onDeleteInterface={(id) => void deleteInterface(id)} />;
+            onCancelInterface={() => setShowInterfaceForm(false)} onPrimary={(id) => void setPrimary(id)} onDeleteInterface={(id) => void deleteInterface(id)}
+            onNoteSaved={() => void loadData()} />;
         })}
       </TableBody></Table></CardContent></Card>
     </div>
@@ -259,14 +262,14 @@ function AssetForm({ form, setForm, networks, editing, onSave, onCancel }: { for
   </CardContent></Card>;
 }
 
-interface AssetRowsProps { asset: Asset; sightingCount: number; interfaces: NetworkInterface[]; expanded: boolean; onToggle: () => void; onEdit: () => void; onDelete: () => void; interfaceForm: InterfaceFormState; setInterfaceForm: (value: InterfaceFormState) => void; showInterfaceForm: boolean; editingInterfaceId: string | null; networks: Network[]; onBeginInterface: (item?: NetworkInterface) => void; onSaveInterface: () => void; onCancelInterface: () => void; onPrimary: (id: string) => void; onDeleteInterface: (id: string) => void }
+interface AssetRowsProps { asset: Asset; sightingCount: number; interfaces: NetworkInterface[]; expanded: boolean; onToggle: () => void; onEdit: () => void; onDelete: () => void; interfaceForm: InterfaceFormState; setInterfaceForm: (value: InterfaceFormState) => void; showInterfaceForm: boolean; editingInterfaceId: string | null; networks: Network[]; onBeginInterface: (item?: NetworkInterface) => void; onSaveInterface: () => void; onCancelInterface: () => void; onPrimary: (id: string) => void; onDeleteInterface: (id: string) => void; onNoteSaved: () => void }
 function AssetRows(props: AssetRowsProps) {
   const { asset, interfaces, expanded } = props;
   const vmInventory = readStoredVmInventory(asset.properties);
   return <><TableRow className={asset.compromise_status === 'infected' ? 'bg-red-50' : asset.compromise_status === 'suspected' ? 'bg-amber-50' : ''}>
     <TableCell><Button size="sm" variant="ghost" onClick={props.onToggle}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</Button></TableCell><TableCell className="font-medium">{asset.name}<div className="text-xs text-slate-400">{asset.user_name}</div></TableCell><TableCell>{asset.network_name || 'Unassigned'}</TableCell><TableCell className="font-mono text-xs">{asset.ip_address || '—'}</TableCell><TableCell><Badge variant="outline">{asset.asset_type}</Badge><div className="mt-1 text-xs text-slate-500">{asset.os}</div></TableCell>
-    <TableCell><StatusBadge value={asset.compromise_status} />{props.sightingCount > 0 && <span className="ml-1 rounded bg-red-600 px-1.5 py-0.5 text-xs text-white" title={`${props.sightingCount} IOC sighting(s) recorded on this asset`}>⚠{props.sightingCount}</span>}</TableCell><TableCell><StatusBadge value={asset.investigation_status} /></TableCell><TableCell>{interfaces.length}</TableCell><TableCell><div className="flex"><Button size="sm" variant="ghost" onClick={props.onEdit}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={props.onDelete}><Trash2 size={14} className="text-red-500" /></Button></div></TableCell>
-  </TableRow>{expanded && <TableRow><TableCell colSpan={9} className="bg-slate-50 p-4">
+    <TableCell><StatusBadge value={asset.compromise_status} />{props.sightingCount > 0 && <span className="ml-1 rounded bg-red-600 px-1.5 py-0.5 text-xs text-white" title={`${props.sightingCount} IOC sighting(s) recorded on this asset`}>⚠{props.sightingCount}</span>}</TableCell><TableCell><StatusBadge value={asset.investigation_status} /></TableCell><TableCell>{interfaces.length}</TableCell><TableCell className="min-w-40"><QuickNoteCell entityType="asset" id={asset.id} note={asset.quick_note} onSaved={props.onNoteSaved} /></TableCell><TableCell><div className="flex"><Button size="sm" variant="ghost" onClick={props.onEdit}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={props.onDelete}><Trash2 size={14} className="text-red-500" /></Button></div></TableCell>
+  </TableRow>{expanded && <TableRow><TableCell colSpan={10} className="bg-slate-50 p-4">
     {vmInventory && <div className="mb-4 rounded border border-violet-200 bg-violet-50 p-3">
       <div className="mb-2 flex flex-wrap items-center gap-2"><Boxes size={15} className="text-violet-600" /><strong className="text-sm">Imported virtualization inventory</strong><Badge variant="outline">{platformLabel(vmInventory.platform)}</Badge><Badge variant="outline">{vmInventory.kind}</Badge></div>
       <div className="grid gap-2 text-xs sm:grid-cols-3 lg:grid-cols-6">

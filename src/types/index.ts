@@ -19,6 +19,7 @@ export interface Network {
   network_type: string;
   description: string;
   vlan_id?: string;
+  quick_note?: string | null;
   created_at: string;
 }
 
@@ -40,6 +41,7 @@ export interface Asset {
   investigation_status: InvestigationStatus;
   properties?: string;
   scan_results?: string;
+  quick_note?: string | null;
   created_at: string;
 }
 
@@ -246,6 +248,7 @@ export interface Firewall {
   model?: string;
   rules?: string;
   config_text?: string;
+  quick_note?: string | null;
   created_at: string;
 }
 

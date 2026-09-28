@@ -34,6 +34,8 @@ pub struct Network {
     pub network_type: String,
     pub description: String,
     pub vlan_id: Option<String>,
+    #[serde(default)]
+    pub quick_note: Option<String>,
     pub created_at: String,
 }
 
@@ -58,6 +60,8 @@ pub struct Asset {
     pub investigation_status: String,
     pub properties: Option<String>,
     pub scan_results: Option<String>,
+    #[serde(default)]
+    pub quick_note: Option<String>,
     pub created_at: String,
 }
 
@@ -172,6 +176,8 @@ pub struct Firewall {
     pub model: Option<String>,
     pub rules: Option<String>,
     pub config_text: Option<String>,
+    #[serde(default)]
+    pub quick_note: Option<String>,
     pub created_at: String,
 }
 
@@ -461,6 +467,7 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             network_type TEXT NOT NULL DEFAULT 'LAN',
             description TEXT NOT NULL DEFAULT '',
             vlan_id TEXT,
+            quick_note TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS assets (
@@ -477,6 +484,7 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             investigation_status TEXT NOT NULL DEFAULT 'not_started',
             properties TEXT,
             scan_results TEXT,
+            quick_note TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS network_interfaces (
@@ -504,6 +512,7 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             model TEXT,
             rules TEXT,
             config_text TEXT,
+            quick_note TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS firewall_interfaces (
@@ -878,6 +887,15 @@ pub fn validate_and_migrate_case(conn: &mut Connection) -> AppResult<()> {
         .map_err(|e| e.to_string())?;
     }
     init_database(conn)?;
+    // Quick notes are per-row investigator remarks on the primary entity
+    // tables. Runs after init_database so legacy files that predate a table
+    // entirely see it created (with the column) before the ALTER is attempted.
+    for table in ["assets", "networks", "firewalls"] {
+        if !column_exists(conn, table, "quick_note")? {
+            conn.execute(&format!("ALTER TABLE {table} ADD COLUMN quick_note TEXT"), [])
+                .map_err(|e| e.to_string())?;
+        }
+    }
     repair_legacy_references(conn)?;
     backfill_primary_interfaces(conn)?;
     initialize_history(conn)?;
@@ -1217,8 +1235,8 @@ fn map_case(row: &rusqlite::Row<'_>) -> rusqlite::Result<Case> {
 }
 
 pub fn get_networks(conn: &Connection) -> AppResult<Vec<Network>> {
-    query_vec(conn, "SELECT id,name,subnet,network_type,description,vlan_id,created_at FROM networks ORDER BY name", [], |row| {
-        Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, created_at: row.get(6)? })
+    query_vec(conn, "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,created_at FROM networks ORDER BY name", [], |row| {
+        Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, quick_note: row.get(6)?, created_at: row.get(7)? })
     })
 }
 
@@ -1321,14 +1339,14 @@ pub fn save_topology_view(
 pub fn get_assets(conn: &Connection) -> AppResult<Vec<Asset>> {
     query_vec(conn,
         "SELECT a.id,a.network_id,n.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,
-                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.created_at
+                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.created_at
          FROM assets a LEFT JOIN networks n ON n.id=a.network_id ORDER BY a.name", [], map_asset)
 }
 
 pub fn get_assets_by_network(conn: &Connection, network_id: &str) -> AppResult<Vec<Asset>> {
     query_vec(conn,
         "SELECT DISTINCT a.id,a.network_id,pn.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,
-                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.created_at
+                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.created_at
          FROM assets a LEFT JOIN networks pn ON pn.id=a.network_id
          LEFT JOIN network_interfaces ni ON ni.asset_id=a.id
          WHERE a.network_id=?1 OR ni.network_id=?1 ORDER BY a.name", params![network_id], map_asset)
@@ -1350,7 +1368,8 @@ fn map_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
         investigation_status: row.get(11)?,
         properties: row.get(12)?,
         scan_results: row.get(13)?,
-        created_at: row.get(14)?,
+        quick_note: row.get(14)?,
+        created_at: row.get(15)?,
     })
 }
 
@@ -1476,7 +1495,7 @@ pub fn get_iocs(conn: &Connection) -> AppResult<Vec<Ioc>> {
 pub fn get_firewalls(conn: &Connection) -> AppResult<Vec<Firewall>> {
     query_vec(
         conn,
-        "SELECT f.id,f.network_id,n.name,f.name,f.vendor,f.model,f.rules,f.config_text,f.created_at
+        "SELECT f.id,f.network_id,n.name,f.name,f.vendor,f.model,f.rules,f.config_text,f.quick_note,f.created_at
          FROM firewalls f LEFT JOIN networks n ON n.id=f.network_id ORDER BY f.name",
         [],
         |row| {
@@ -1489,7 +1508,8 @@ pub fn get_firewalls(conn: &Connection) -> AppResult<Vec<Firewall>> {
                 model: row.get(5)?,
                 rules: row.get(6)?,
                 config_text: row.get(7)?,
-                created_at: row.get(8)?,
+                quick_note: row.get(8)?,
+                created_at: row.get(9)?,
             })
         },
     )
@@ -2753,12 +2773,12 @@ where
 pub fn get_entity_json(conn: &Connection, entity_type: &str, id: &str) -> AppResult<Option<Value>> {
     match entity_type {
         "case" => get_case(conn)?.filter(|v| v.id == id).map(|v| to_value(&v)).transpose(),
-        "network" => get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,created_at FROM networks WHERE id=?1", id, |row| {
-            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, created_at: row.get(6)? })
+        "network" => get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,created_at FROM networks WHERE id=?1", id, |row| {
+            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, quick_note: row.get(6)?, created_at: row.get(7)? })
         })?.map(|v| to_value(&v)).transpose(),
         "asset" => get_row_optional(conn,
             "SELECT a.id,a.network_id,n.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,a.suspicious,
-                    a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.created_at
+                    a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.created_at
              FROM assets a LEFT JOIN networks n ON n.id=a.network_id WHERE a.id=?1", id, map_asset)?.map(|v| to_value(&v)).transpose(),
         "network_interface" => get_row_optional(conn,
             "SELECT ni.id,ni.asset_id,ni.name,ni.ip_address,ni.mac_address,ni.network_id,n.name,ni.is_primary
@@ -2781,9 +2801,9 @@ pub fn get_entity_json(conn: &Connection, entity_type: &str, id: &str) -> AppRes
             Ok(Ioc { id: row.get(0)?, ioc_type: row.get(1)?, value: row.get(2)?, description: row.get(3)?, threat_level: row.get(4)?, first_seen: row.get(5)?, last_seen: row.get(6)?, created_at: row.get(7)? })
         })?.map(|v| to_value(&v)).transpose(),
         "firewall" => get_row_optional(conn,
-            "SELECT f.id,f.network_id,n.name,f.name,f.vendor,f.model,f.rules,f.config_text,f.created_at
+            "SELECT f.id,f.network_id,n.name,f.name,f.vendor,f.model,f.rules,f.config_text,f.quick_note,f.created_at
              FROM firewalls f LEFT JOIN networks n ON n.id=f.network_id WHERE f.id=?1", id, |row| {
-            Ok(Firewall { id: row.get(0)?, network_id: row.get(1)?, network_name: row.get(2)?, name: row.get(3)?, vendor: row.get(4)?, model: row.get(5)?, rules: row.get(6)?, config_text: row.get(7)?, created_at: row.get(8)? })
+            Ok(Firewall { id: row.get(0)?, network_id: row.get(1)?, network_name: row.get(2)?, name: row.get(3)?, vendor: row.get(4)?, model: row.get(5)?, rules: row.get(6)?, config_text: row.get(7)?, quick_note: row.get(8)?, created_at: row.get(9)? })
         })?.map(|v| to_value(&v)).transpose(),
         "firewall_interface" => get_firewall_interfaces(conn, None)?
             .into_iter()
@@ -2961,6 +2981,7 @@ pub fn create_network(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(String::from),
+        quick_note: None,
         created_at: Utc::now().to_rfc3339(),
     };
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -3004,8 +3025,8 @@ pub fn update_network(
         &["LAN", "DMZ", "DMS", "WAN", "GUEST", "MANAGEMENT", "OTHER"],
     )?;
     let before: Network = require_existing(
-        get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,created_at FROM networks WHERE id=?1", id, |row| {
-            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, created_at: row.get(6)? })
+        get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,created_at FROM networks WHERE id=?1", id, |row| {
+            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, quick_note: row.get(6)?, created_at: row.get(7)? })
         })?, "Network")?;
     let after = Network {
         name: name.trim().into(),
@@ -3182,6 +3203,7 @@ pub fn create_asset(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(String::from),
+        quick_note: None,
         created_at: Utc::now().to_rfc3339(),
     };
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -3439,6 +3461,61 @@ pub fn update_asset_suspicious(
             "update",
             Some(to_value(&before)?),
             Some(to_value(&after)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+/// Sets or clears the per-row investigator remark on an asset, network, or
+/// firewall. The note is a column on the entity row itself, so it flows through
+/// snapshots, expert merges, and history like any other field.
+pub fn set_quick_note(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    entity_type: &str,
+    id: &str,
+    quick_note: Option<&str>,
+) -> AppResult<()> {
+    let (table, label) = match entity_type {
+        "asset" => ("assets", "Asset"),
+        "network" => ("networks", "Network"),
+        "firewall" => ("firewalls", "Firewall"),
+        other => return Err(format!("Quick notes are not supported for {other}s")),
+    };
+    let note = quick_note
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from);
+    let before = require_existing(get_entity_json(conn, entity_type, id)?, label)?;
+    let mut after = before.clone();
+    after["quick_note"] = note.clone().map(Value::String).unwrap_or(Value::Null);
+    let name = before["name"].as_str().unwrap_or_default().to_string();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let changed = tx
+        .execute(
+            &format!("UPDATE {table} SET quick_note=?1 WHERE id=?2"),
+            params![note, id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err(format!("{label} was not found"));
+    }
+    let message = if after["quick_note"].is_null() {
+        format!("Cleared quick note on {entity_type} {name}")
+    } else {
+        format!("Set quick note on {entity_type} {name}")
+    };
+    record_commit_tx(
+        &tx,
+        actor,
+        &message,
+        vec![single_change(
+            entity_type,
+            id,
+            "update",
+            Some(before),
+            Some(after),
         )],
         &[],
     )?;
@@ -5281,6 +5358,7 @@ pub fn create_firewall(
             .filter(|v| !v.is_empty())
             .map(String::from),
         config_text: config_text.map(String::from),
+        quick_note: None,
         created_at: Utc::now().to_rfc3339(),
     };
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -6122,10 +6200,10 @@ pub fn import_case_data(
         }};
     }
     for v in &data.networks {
-        insert_item!("networks","network",&v.id,"INSERT OR IGNORE INTO networks(id,name,subnet,network_type,description,vlan_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.created_at],v);
+        insert_item!("networks","network",&v.id,"INSERT OR IGNORE INTO networks(id,name,subnet,network_type,description,vlan_id,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.quick_note,v.created_at],v);
     }
     for v in &data.assets {
-        insert_item!("assets","asset",&v.id,"INSERT OR IGNORE INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.created_at],v);
+        insert_item!("assets","asset",&v.id,"INSERT OR IGNORE INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.quick_note,v.created_at],v);
     }
     for v in &data.network_interfaces {
         insert_item!("network_interfaces","network_interface",&v.id,"INSERT OR IGNORE INTO network_interfaces(id,asset_id,name,ip_address,mac_address,network_id,is_primary) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![v.id,v.asset_id,v.name,v.ip_address,v.mac_address,v.network_id,if v.is_primary{1}else{0}],v);
@@ -6134,7 +6212,7 @@ pub fn import_case_data(
         insert_item!("clock_profiles","clock_profile",&v.id,"INSERT OR IGNORE INTO clock_profiles(id,name,description,server_reference_raw,server_timezone,server_reference_utc,correct_reference_raw,correct_timezone,correct_reference_utc,offset_ms,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![v.id,v.name,v.description,v.server_reference_raw,v.server_timezone,v.server_reference_utc,v.correct_reference_raw,v.correct_timezone,v.correct_reference_utc,v.offset_ms,v.created_at,v.updated_at],v);
     }
     for v in &data.firewalls {
-        insert_item!("firewalls","firewall",&v.id,"INSERT OR IGNORE INTO firewalls(id,network_id,name,vendor,model,rules,config_text,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![v.id,v.network_id,v.name,v.vendor,v.model,v.rules,v.config_text,v.created_at],v);
+        insert_item!("firewalls","firewall",&v.id,"INSERT OR IGNORE INTO firewalls(id,network_id,name,vendor,model,rules,config_text,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![v.id,v.network_id,v.name,v.vendor,v.model,v.rules,v.config_text,v.quick_note,v.created_at],v);
     }
     for v in &data.firewall_interfaces {
         let addresses = serde_json::to_string(&v.ip_addresses).map_err(|e| e.to_string())?;
@@ -6228,12 +6306,12 @@ pub fn upsert_entity_json(tx: &Transaction<'_>, entity_type: &str, value: &Value
         "network" => {
             let v: Network = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             validate_network_model(&v)?;
-            tx.execute("INSERT INTO networks(id,name,subnet,network_type,description,vlan_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET name=excluded.name,subnet=excluded.subnet,network_type=excluded.network_type,description=excluded.description,vlan_id=excluded.vlan_id",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.created_at]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO networks(id,name,subnet,network_type,description,vlan_id,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET name=excluded.name,subnet=excluded.subnet,network_type=excluded.network_type,description=excluded.description,vlan_id=excluded.vlan_id,quick_note=excluded.quick_note",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.quick_note,v.created_at]).map_err(|e|e.to_string())?;
         }
         "asset" => {
             let v: Asset = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             validate_asset_model(&v)?;
-            tx.execute("INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,ip_address=excluded.ip_address,mac_address=excluded.mac_address,asset_type=excluded.asset_type,os=excluded.os,user_name=excluded.user_name,suspicious=excluded.suspicious,compromise_status=excluded.compromise_status,investigation_status=excluded.investigation_status,properties=excluded.properties,scan_results=excluded.scan_results",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.created_at]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,ip_address=excluded.ip_address,mac_address=excluded.mac_address,asset_type=excluded.asset_type,os=excluded.os,user_name=excluded.user_name,suspicious=excluded.suspicious,compromise_status=excluded.compromise_status,investigation_status=excluded.investigation_status,properties=excluded.properties,scan_results=excluded.scan_results,quick_note=excluded.quick_note",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.quick_note,v.created_at]).map_err(|e|e.to_string())?;
         }
         "network_interface" => {
             let v: NetworkInterface =
@@ -6300,7 +6378,7 @@ pub fn upsert_entity_json(tx: &Transaction<'_>, entity_type: &str, value: &Value
         "firewall" => {
             let v: Firewall = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             validate_firewall_model(&v)?;
-            tx.execute("INSERT INTO firewalls(id,network_id,name,vendor,model,rules,config_text,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,vendor=excluded.vendor,model=excluded.model,rules=excluded.rules,config_text=excluded.config_text",params![v.id,v.network_id,v.name,v.vendor,v.model,v.rules,v.config_text,v.created_at]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO firewalls(id,network_id,name,vendor,model,rules,config_text,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,vendor=excluded.vendor,model=excluded.model,rules=excluded.rules,config_text=excluded.config_text,quick_note=excluded.quick_note",params![v.id,v.network_id,v.name,v.vendor,v.model,v.rules,v.config_text,v.quick_note,v.created_at]).map_err(|e|e.to_string())?;
         }
         "firewall_interface" => {
             let v: FirewallInterface =
@@ -6770,6 +6848,109 @@ mod tests {
     }
 
     #[test]
+    fn quick_notes_attach_to_assets_networks_and_firewalls() {
+        let (mut conn, case, active_expert) = fresh_case();
+        let network = add_network(&mut conn, &active_expert, "Office", "10.0.0.0/24");
+        let asset = create_asset(
+            &mut conn,
+            &active_expert,
+            Some(&network.id),
+            "PC-1",
+            "10.0.0.5",
+            None,
+            "workstation",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        let firewall = create_firewall(
+            &mut conn,
+            &active_expert,
+            Some(&network.id),
+            "Edge",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        set_quick_note(&mut conn, &active_expert, "asset", &asset.id, Some("Reimaged on site"))
+            .unwrap();
+        set_quick_note(&mut conn, &active_expert, "network", &network.id, Some("Client HQ segment"))
+            .unwrap();
+        set_quick_note(&mut conn, &active_expert, "firewall", &firewall.id, Some("Terminates the site VPN"))
+            .unwrap();
+
+        assert_eq!(
+            get_assets(&conn)
+                .unwrap()
+                .iter()
+                .find(|item| item.id == asset.id)
+                .and_then(|item| item.quick_note.as_deref()),
+            Some("Reimaged on site")
+        );
+        assert_eq!(
+            get_networks(&conn)
+                .unwrap()
+                .iter()
+                .find(|item| item.id == network.id)
+                .and_then(|item| item.quick_note.as_deref()),
+            Some("Client HQ segment")
+        );
+        assert_eq!(
+            get_firewalls(&conn)
+                .unwrap()
+                .iter()
+                .find(|item| item.id == firewall.id)
+                .and_then(|item| item.quick_note.as_deref()),
+            Some("Terminates the site VPN")
+        );
+        let history = get_history(&conn, 1).unwrap();
+        assert_eq!(history[0].message, "Set quick note on firewall Edge");
+        assert_eq!(history[0].changes[0].entity_type, "firewall");
+        assert_eq!(
+            history[0].changes[0].after.as_ref().unwrap()["quick_note"],
+            "Terminates the site VPN"
+        );
+
+        // A whitespace-only note clears the field instead of storing blanks,
+        // and unsupported entities are rejected.
+        set_quick_note(&mut conn, &active_expert, "asset", &asset.id, Some("   "))
+            .unwrap();
+        assert!(get_assets(&conn)
+            .unwrap()
+            .iter()
+            .find(|item| item.id == asset.id)
+            .is_none_or(|item| item.quick_note.is_none()));
+        assert!(set_quick_note(&mut conn, &active_expert, "note", "nope", Some("x")).is_err());
+
+        // Full snapshots carry the notes to another case file.
+        let data = export_case_data(&conn).unwrap();
+        let mut target = Connection::open_in_memory().unwrap();
+        init_database(&target).unwrap();
+        target.execute(
+            "INSERT INTO cases(id,name,description,client_name,investigator,status,created_at,updated_at,metadata) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![case.id, case.name, case.description, case.client_name, case.investigator, case.status, case.created_at, case.updated_at, case.metadata],
+        )
+        .unwrap();
+        initialize_history(&target).unwrap();
+        import_case_data(&mut target, &active_expert, &data).unwrap();
+        assert_eq!(
+            get_networks(&target)
+                .unwrap()
+                .iter()
+                .find(|item| item.id == network.id)
+                .and_then(|item| item.quick_note.as_deref()),
+            Some("Client HQ segment")
+        );
+    }
+
+    #[test]
     fn migrates_legacy_orphans_and_backfills_primary_interface() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -7203,6 +7384,7 @@ mod tests {
             network_type: "LAN".into(),
             description: String::new(),
             vlan_id: None,
+            quick_note: None,
             created_at: Utc::now().to_rfc3339(),
         });
         malformed.assets.push(Asset {
@@ -7220,6 +7402,7 @@ mod tests {
             investigation_status: "not_started".into(),
             properties: None,
             scan_results: None,
+            quick_note: None,
             created_at: Utc::now().to_rfc3339(),
         });
         assert!(import_case_data(&mut target, &target_actor, &malformed).is_err());

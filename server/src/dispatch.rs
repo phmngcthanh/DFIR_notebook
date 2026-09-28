@@ -38,11 +38,11 @@ use crate::db::{
     get_investigation_views, get_ioc_sightings, get_iocs, get_network_connections,
     get_network_interfaces, get_networks, get_notes, get_timeline_events, get_topology_view,
     import_case_data, parse_timestamp_preview, save_investigation_view, save_topology_view,
-    set_primary_interface, update_asset, update_asset_suspicious, update_attack_edge, update_case,
-    update_clock_profile, update_firewall, update_firewall_interface, update_firewall_nat_rule,
-    update_ioc, update_ioc_sighting, update_network, update_network_connection,
-    update_network_interface, update_note, update_timeline_event, ExportData, Ioc,
-    TopologyNodePosition,
+    set_primary_interface, set_quick_note, update_asset, update_asset_suspicious,
+    update_attack_edge, update_case, update_clock_profile, update_firewall,
+    update_firewall_interface, update_firewall_nat_rule, update_ioc, update_ioc_sighting,
+    update_network, update_network_connection, update_network_interface, update_note,
+    update_timeline_event, ExportData, Ioc, TopologyNodePosition,
 };
 use crate::event_logs::{
     delete_batch, import_syslog_text, import_windows_json_text, list_batches, open_store,
@@ -414,6 +414,10 @@ pub(crate) fn run(
         )),
         "set_asset_suspicious" => write_cmd!(SuspiciousParams, |conn, actor, p| {
             update_asset_suspicious(conn, actor, &p.id, p.suspicious).map(|_| true)
+        }),
+        "set_entity_quick_note" => write_cmd!(QuickNoteParams, |conn, actor, p| {
+            set_quick_note(conn, actor, &p.entity_type, &p.id, p.quick_note.as_deref())
+                .map(|_| true)
         }),
         "remove_asset" => write_cmd!(IdParams, |conn, actor, p| delete_asset(conn, actor, &p.id)
             .map(|_| true)),
@@ -1179,6 +1183,11 @@ params! {
         #[serde(default)] scan_results: Option<String>,
     }
     struct SuspiciousParams { id: String, suspicious: bool }
+    struct QuickNoteParams {
+        entity_type: String,
+        id: String,
+        #[serde(default)] quick_note: Option<String>,
+    }
     struct AssetFilterParams { #[serde(default)] asset_id: Option<String> }
 
     struct InterfaceParams {

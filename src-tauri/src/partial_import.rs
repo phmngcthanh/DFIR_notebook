@@ -268,10 +268,10 @@ fn stringify_json_fields(entity_type: &str, object: &mut Map<String, Value>) -> 
 fn new_entity(entity_type: &str, id: &str, now: &str) -> AppResult<Map<String, Value>> {
     let value = match entity_type {
         "network" => {
-            json!({"id":id,"name":"","subnet":"","network_type":"LAN","description":"","vlan_id":null,"created_at":now})
+            json!({"id":id,"name":"","subnet":"","network_type":"LAN","description":"","vlan_id":null,"quick_note":null,"created_at":now})
         }
         "asset" => {
-            json!({"id":id,"network_id":null,"network_name":null,"name":"","ip_address":"","mac_address":null,"asset_type":"workstation","os":null,"user_name":null,"suspicious":false,"compromise_status":"unknown","investigation_status":"not_started","properties":null,"scan_results":null,"created_at":now})
+            json!({"id":id,"network_id":null,"network_name":null,"name":"","ip_address":"","mac_address":null,"asset_type":"workstation","os":null,"user_name":null,"suspicious":false,"compromise_status":"unknown","investigation_status":"not_started","properties":null,"scan_results":null,"quick_note":null,"created_at":now})
         }
         "network_interface" => {
             json!({"id":id,"asset_id":"","name":"","ip_address":"","mac_address":null,"network_id":null,"network_name":null,"is_primary":false})
@@ -280,7 +280,7 @@ fn new_entity(entity_type: &str, id: &str, now: &str) -> AppResult<Map<String, V
             json!({"id":id,"name":"","description":"","server_reference_raw":"","server_timezone":"UTC","server_reference_utc":"","correct_reference_raw":"","correct_timezone":"UTC","correct_reference_utc":"","offset_ms":0,"created_at":now,"updated_at":now})
         }
         "firewall" => {
-            json!({"id":id,"network_id":null,"network_name":null,"name":"","vendor":null,"model":null,"rules":null,"config_text":null,"created_at":now})
+            json!({"id":id,"network_id":null,"network_name":null,"name":"","vendor":null,"model":null,"rules":null,"config_text":null,"quick_note":null,"created_at":now})
         }
         "firewall_interface" => {
             json!({"id":id,"firewall_id":"","name":"","ip_addresses":[],"mac_address":null,"network_id":null,"network_name":null,"vlan_id":null,"role":"other","is_primary":false,"description":""})
@@ -1008,11 +1008,11 @@ pub fn partial_import_template(conn: &Connection) -> AppResult<String> {
             "selection": "The app validates and previews every record. The investigator chooses Skip, Add only, or Use incoming before confirmation.",
             "entity_types": ["case","network","asset","network_interface","clock_profile","firewall","firewall_interface","firewall_nat_rule","network_connection","timeline_event","ioc","ioc_sighting","attack_edge","note"],
             "field_notes": {
-                "network": "name, subnet, network_type, description, vlan_id",
-                "asset": "network_id, name, ip_address, mac_address, asset_type, os, user_name, compromise_status, investigation_status, properties, scan_results",
+                "network": "name, subnet, network_type, description, vlan_id, quick_note (short investigator remark)",
+                "asset": "network_id, name, ip_address, mac_address, asset_type, os, user_name, compromise_status, investigation_status, properties, scan_results, quick_note (short investigator remark)",
                 "network_interface": "asset_id, name, ip_address, mac_address, network_id, is_primary",
                 "clock_profile": "name, description, server_reference_raw, server_timezone, correct_reference_raw, correct_timezone",
-                "firewall": "network_id, name, vendor, model, rules, config_text",
+                "firewall": "network_id, name, vendor, model, rules, config_text, quick_note (short investigator remark)",
                 "firewall_interface": "firewall_id, name, ip_addresses (array of IPv4/IPv6 addresses or CIDRs), mac_address, network_id, vlan_id, role (wan/lan/dmz/management/ha/vpn/other), is_primary, description",
                 "firewall_nat_rule": "firewall_id, name, nat_type (vip/dnat/snat/port_mapping), enabled, protocol, source_cidr, original_destination, original_port, translated_source, translated_destination, translated_port, inbound_interface_id, outbound_interface_id, description",
                 "network_connection": "source_network_id, target_network_id, connection_type, description, device_name",
