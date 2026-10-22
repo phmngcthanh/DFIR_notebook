@@ -25,6 +25,12 @@ use crate::secure_db::{open_encrypted_connection, verify_cipher_integrity};
 const MAX_UNLOCK_FAILURES: u32 = 5;
 /// Window in which failures accumulate, and the lockout length once tripped.
 const THROTTLE_WINDOW: Duration = Duration::from_secs(15 * 60);
+/// Windows device names that Win32 resolves to hardware even with an
+/// extension, so `con.db` cannot be a usable case file there.
+const WINDOWS_RESERVED_STEMS: [&str; 22] = [
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
 
 /// Same envelope the desktop app returns from every `#[tauri::command]`, so the
 /// frontend's `ApiResponse<T>` handling is unchanged.
@@ -85,15 +91,23 @@ pub struct OpenCase {
     pub pending_partial_imports: Mutex<HashMap<String, PreparedPartialImport>>,
 }
 
+/// Take a lock, recovering it when a previous request panicked while holding
+/// it. The guarded data (a SQLite connection, a HashMap) stays structurally
+/// valid across a panic — SQLite rolls back any open transaction once the
+/// dropped guard releases it — so one failing request must not make the case
+/// unusable for everyone until restart.
+pub fn lock_recovered<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl OpenCase {
     pub fn with_conn<T>(
         &self,
         operation: impl FnOnce(&mut Connection) -> AppResult<T>,
     ) -> AppResult<T> {
-        let mut guard = self
-            .conn
-            .lock()
-            .map_err(|_| "Database lock poisoned".to_string())?;
+        let mut guard = lock_recovered(&self.conn);
         operation(&mut guard)
     }
 
@@ -153,6 +167,14 @@ impl AppState {
             || id.contains("..")
             || id.starts_with('.')
         {
+            return Err("Invalid case identifier".to_string());
+        }
+        let stem = id
+            .split('.')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if WINDOWS_RESERVED_STEMS.contains(&stem.as_str()) {
             return Err("Invalid case identifier".to_string());
         }
         let path = self.config.cases_dir.join(format!("{id}.db"));
@@ -358,14 +380,28 @@ impl AppState {
 
     // ---- unlock throttling ------------------------------------------------
 
+    /// Drop entries whose lockout window has fully elapsed. Without this the
+    /// map grows without bound — one small entry for every address that ever
+    /// failed an unlock, which an IPv6-capable attacker can spin at will.
+    /// Entries whose clock comparison misbehaves (skewed backwards) are kept,
+    /// erring toward retaining a lockout rather than lifting it early.
+    fn prune_throttle(guard: &mut HashMap<IpAddr, Failures>) {
+        let now = SystemTime::now();
+        guard.retain(|_, entry| {
+            entry.first.is_some_and(|first| {
+                now.duration_since(first)
+                    .map(|elapsed| elapsed <= THROTTLE_WINDOW)
+                    .unwrap_or(true)
+            })
+        });
+    }
+
     /// The case password is a six-character-minimum *presence* control offline.
     /// On a network it is reachable by anyone who can see the port, so repeated
     /// guesses from one address are cut off.
     pub fn check_throttle(&self, ip: IpAddr) -> AppResult<()> {
-        let mut guard = self
-            .throttle
-            .lock()
-            .map_err(|_| "Throttle lock poisoned".to_string())?;
+        let mut guard = lock_recovered(&self.throttle);
+        Self::prune_throttle(&mut guard);
         let entry = guard.entry(ip).or_default();
         if let Some(first) = entry.first {
             if SystemTime::now()
@@ -385,17 +421,15 @@ impl AppState {
     }
 
     pub fn record_unlock_failure(&self, ip: IpAddr) {
-        if let Ok(mut guard) = self.throttle.lock() {
-            let entry = guard.entry(ip).or_default();
-            entry.count += 1;
-            entry.first.get_or_insert_with(SystemTime::now);
-        }
+        let mut guard = lock_recovered(&self.throttle);
+        Self::prune_throttle(&mut guard);
+        let entry = guard.entry(ip).or_default();
+        entry.count += 1;
+        entry.first.get_or_insert_with(SystemTime::now);
     }
 
     pub fn record_unlock_success(&self, ip: IpAddr) {
-        if let Ok(mut guard) = self.throttle.lock() {
-            guard.remove(&ip);
-        }
+        lock_recovered(&self.throttle).remove(&ip);
     }
 }
 
