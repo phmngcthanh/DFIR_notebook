@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { downloadText, invoke } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import { Download, Pencil, Plus, Search, ShieldAlert, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -17,9 +18,9 @@ const EMPTY: FormState = { iocType: 'IP', value: '', description: '', threatLeve
 
 export default function IocManager({ refreshTrigger }: Props) {
   const [iocs, setIocs] = useState<Ioc[]>([]);
-  const [form, setForm] = useState<FormState>(EMPTY);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [showForm, setShowForm] = useState(false);
+  const [form, setForm] = useDraft<FormState>('iocs.form', EMPTY);
+  const [editingId, setEditingId] = useDraft<string | null>('iocs.editingId', null);
+  const [showForm, setShowForm] = useDraft('iocs.showForm', false);
   const [search, setSearch] = useState('');
   const [typeFilter, setTypeFilter] = useState('all');
   const [threatFilter, setThreatFilter] = useState('all');

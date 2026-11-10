@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import CytoscapeComponent from 'react-cytoscapejs';
 import type cytoscape from 'cytoscape';
 import { Crosshair, Download, Eye, Filter, Maximize2, RefreshCw, Route, Save, Trash2, ZoomIn, ZoomOut } from 'lucide-react';
@@ -93,8 +94,9 @@ export default function InvestigationGraph({ refreshTrigger }: Props) {
   const [drawMode, setDrawMode] = useState(false);
   const [drawSource, setDrawSource] = useState<SelectedEntity | null>(null);
   const [selected, setSelected] = useState<SelectedEntity | null>(null);
-  const [sightingTarget, setSightingTarget] = useState<SelectedEntity | null>(null);
-  const [edgeForm, setEdgeForm] = useState<EdgeFormState>(null);
+  // An open sighting or attack-edge form comes back after leaving the screen.
+  const [sightingTarget, setSightingTarget] = useDraft<SelectedEntity | null>('investigation.sightingTarget', null);
+  const [edgeForm, setEdgeForm] = useDraft<EdgeFormState>('investigation.edgeForm', null);
   const [inspectorToken, setInspectorToken] = useState(0);
 
   const [views, setViews] = useState<InvestigationViewSummary[]>([]);
@@ -277,7 +279,7 @@ export default function InvestigationGraph({ refreshTrigger }: Props) {
       return;
     }
     setSelected(entity);
-  }, []);
+  }, [setEdgeForm]);
 
   const wireCytoscape = (instance: cytoscape.Core) => {
     cyRef.current = instance;
@@ -403,10 +405,10 @@ export default function InvestigationGraph({ refreshTrigger }: Props) {
   }));
 
   const sidePanel = sightingTarget
-    ? <SightingForm entityKind={sightingTarget.kind as SightingEntityKind} entityId={sightingTarget.id} entityName={sightingTarget.label} iocs={iocs}
+    ? <SightingForm key={`${sightingTarget.kind}:${sightingTarget.id}`} entityKind={sightingTarget.kind as SightingEntityKind} entityId={sightingTarget.id} entityName={sightingTarget.label} iocs={iocs}
         onSaved={() => { setSightingTarget(null); void reloadEvidence(); }} onCancel={() => setSightingTarget(null)} />
     : edgeForm
-      ? <AttackEdgeForm edge={edgeForm.edge} prefill={edgeForm.prefill} networks={networks} assets={assets} firewalls={firewalls} iocs={iocs} timelineEvents={timelineEvents}
+      ? <AttackEdgeForm key={edgeForm.edge?.id ?? `new:${edgeForm.prefill?.source?.kind ?? ''}:${edgeForm.prefill?.source?.id ?? ''}:${edgeForm.prefill?.target?.kind ?? ''}:${edgeForm.prefill?.target?.id ?? ''}`} edge={edgeForm.edge} prefill={edgeForm.prefill} networks={networks} assets={assets} firewalls={firewalls} iocs={iocs} timelineEvents={timelineEvents}
           onSaved={() => { setEdgeForm(null); void reloadEvidence(); }} onCancel={() => setEdgeForm(null)} />
       : selected
         ? <EntityInspector entity={selected} attackEdges={attackEdges} timelineEvents={timelineEvents} refreshToken={inspectorToken}

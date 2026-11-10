@@ -1824,6 +1824,21 @@ where
     Ok(rows)
 }
 
+/// Asset types every write path accepts: the Assets form, snapshot and bundle
+/// upserts, and reviewed imports. Keep in step with `BATCH_ASSET_TYPES` in
+/// `src/lib/vm-inventory.ts` and the type dropdown in `AssetManager.tsx`.
+const ASSET_TYPES: &[&str] = &[
+    "workstation",
+    "server",
+    "vm",
+    "mobile",
+    "laptop",
+    "router",
+    "switch",
+    "firewall",
+    "other",
+];
+
 fn validate_required(label: &str, value: &str) -> AppResult<()> {
     if value.trim().is_empty() {
         Err(format!("{label} is required"))
@@ -1912,38 +1927,58 @@ fn cidr_contains(cidr: SubnetCidr, ip: IpAddr) -> bool {
     }
 }
 
-/// The network whose subnet most specifically contains `ip_text`; ties keep the
-/// earliest-created network. An explicit assignment always wins over this.
-fn best_network_for_ip(
-    conn: &Connection,
-    ip_text: &str,
-) -> AppResult<Option<(String, Option<String>)>> {
+/// Result of placing one address among the recorded subnets.
+enum SubnetMatch<'a> {
+    None,
+    /// Exactly one network is the most specific container.
+    Unique(&'a Network),
+    /// Two or more equally specific networks contain the address — isolated
+    /// sites or departments reusing the same private range. Choosing one would
+    /// silently merge them, so the endpoint is left for the investigator.
+    Ambiguous,
+}
+
+fn match_network_for_ip<'a>(networks: &'a [Network], ip_text: &str) -> SubnetMatch<'a> {
     let Ok(ip) = ip_text.trim().parse::<IpAddr>() else {
-        return Ok(None);
+        return SubnetMatch::None;
     };
-    let mut best: Option<(u8, String, String)> = None;
-    for network in get_networks(conn)? {
+    let mut best_prefix: Option<u8> = None;
+    let mut best: Vec<&Network> = Vec::new();
+    for network in networks {
         let Some(cidr) = parse_subnet_cidr(&network.subnet) else {
             continue;
         };
         if !cidr_contains(cidr, ip) {
             continue;
         }
-        let is_better = match &best {
-            Some((prefix, _, _)) => cidr.1 > *prefix,
-            None => true,
-        };
-        if is_better {
-            best = Some((cidr.1, network.id, network.name));
+        match best_prefix {
+            Some(prefix) if cidr.1 < prefix => {}
+            Some(prefix) if cidr.1 == prefix => best.push(network),
+            _ => {
+                best_prefix = Some(cidr.1);
+                best = vec![network];
+            }
         }
     }
-    Ok(best.map(|(_, id, name)| (id, Some(name))))
+    match best.as_slice() {
+        [] => SubnetMatch::None,
+        [only] => SubnetMatch::Unique(only),
+        _ => SubnetMatch::Ambiguous,
+    }
 }
 
-fn ip_falls_in_subnet(ip_text: &str, subnet: &str) -> bool {
-    parse_subnet_cidr(subnet)
-        .zip(ip_text.trim().parse::<IpAddr>().ok())
-        .is_some_and(|(cidr, ip)| cidr_contains(cidr, ip))
+/// The network whose subnet most specifically contains `ip_text`. Equally
+/// specific candidates are ambiguous and yield no network, so the endpoint
+/// stays unassigned instead of joining whichever was recorded first. An
+/// explicit assignment always wins over this.
+fn best_network_for_ip(
+    conn: &Connection,
+    ip_text: &str,
+) -> AppResult<Option<(String, Option<String>)>> {
+    Ok(match match_network_for_ip(&get_networks(conn)?, ip_text) {
+        SubnetMatch::Unique(network) => Some((network.id.clone(), Some(network.name.clone()))),
+        SubnetMatch::None | SubnetMatch::Ambiguous => None,
+    })
 }
 
 fn validate_mac(value: Option<&str>) -> AppResult<()> {
@@ -2276,19 +2311,7 @@ fn validate_asset_model(value: &Asset) -> AppResult<()> {
     validate_required("Asset name", &value.name)?;
     validate_ip(&value.ip_address)?;
     validate_mac(value.mac_address.as_deref())?;
-    validate_enum(
-        "asset type",
-        &value.asset_type,
-        &[
-            "workstation",
-            "server",
-            "vm",
-            "laptop",
-            "router",
-            "switch",
-            "other",
-        ],
-    )?;
+    validate_enum("asset type", &value.asset_type, ASSET_TYPES)?;
     validate_enum(
         "compromise status",
         &value.compromise_status,
@@ -2299,7 +2322,6 @@ fn validate_asset_model(value: &Asset) -> AppResult<()> {
         &value.investigation_status,
         &["not_started", "in_progress", "completed"],
     )?;
-    validate_optional_json("Asset properties", value.properties.as_deref())?;
     validate_optional_json("Scan results", value.scan_results.as_deref())
 }
 
@@ -2885,10 +2907,11 @@ pub fn update_case(
     Ok(after)
 }
 
-/// Links interfaces and assets whose IP falls inside `network.subnet` but that
-/// carry no network assignment yet. Explicit assignments are never overridden;
-/// history changes for every touched row are returned so callers can record
-/// them in the same commit.
+/// Links interfaces and assets that carry no network assignment yet and whose
+/// IP has `network` as its single most specific subnet. Explicit assignments
+/// are never overridden, and an address that an equally specific network also
+/// contains stays unassigned. History changes for every touched row are
+/// returned so callers can record them in the same commit.
 fn link_unassigned_endpoints_to_network(
     tx: &Transaction<'_>,
     network: &Network,
@@ -2897,11 +2920,15 @@ fn link_unassigned_endpoints_to_network(
     if parse_subnet_cidr(&network.subnet).is_none() {
         return Ok(changes);
     }
+    // `network` has already been written in this transaction, so the list
+    // holds its new subnet alongside every competing one.
+    let networks = get_networks(tx)?;
+    let belongs_here = |ip: &str| {
+        matches!(match_network_for_ip(&networks, ip), SubnetMatch::Unique(best) if best.id == network.id)
+    };
     let mut primary_asset_ids = Vec::new();
     for mut interface in get_network_interfaces(tx, None)? {
-        if interface.network_id.is_some()
-            || !ip_falls_in_subnet(&interface.ip_address, &network.subnet)
-        {
+        if interface.network_id.is_some() || !belongs_here(&interface.ip_address) {
             continue;
         }
         let before = interface.clone();
@@ -2930,7 +2957,7 @@ fn link_unassigned_endpoints_to_network(
     for asset_before in get_assets(tx)? {
         if asset_before.network_id.is_some()
             || (!primary_asset_ids.contains(&asset_before.id)
-                && !ip_falls_in_subnet(&asset_before.ip_address, &network.subnet))
+                && !belongs_here(&asset_before.ip_address))
         {
             continue;
         }
@@ -3125,19 +3152,7 @@ pub fn create_asset(
     validate_required("Asset name", name)?;
     validate_ip(ip_address.trim())?;
     validate_mac(mac_address)?;
-    validate_enum(
-        "asset type",
-        asset_type,
-        &[
-            "workstation",
-            "server",
-            "vm",
-            "laptop",
-            "router",
-            "switch",
-            "other",
-        ],
-    )?;
+    validate_enum("asset type", asset_type, ASSET_TYPES)?;
     validate_enum(
         "compromise status",
         compromise_status,
@@ -3148,7 +3163,6 @@ pub fn create_asset(
         investigation_status,
         &["not_started", "in_progress", "completed"],
     )?;
-    validate_optional_json("Asset properties", properties)?;
     validate_optional_json("Scan results", scan_results)?;
     // Same rule as interfaces: an asset recorded with an IP but no zone joins
     // the subnet that contains the address, so it never dangles ungrouped
@@ -3272,19 +3286,7 @@ pub fn update_asset(
     validate_required("Asset name", name)?;
     validate_ip(ip_address.trim())?;
     validate_mac(mac_address)?;
-    validate_enum(
-        "asset type",
-        asset_type,
-        &[
-            "workstation",
-            "server",
-            "vm",
-            "laptop",
-            "router",
-            "switch",
-            "other",
-        ],
-    )?;
+    validate_enum("asset type", asset_type, ASSET_TYPES)?;
     validate_enum(
         "compromise status",
         compromise_status,
@@ -3295,7 +3297,6 @@ pub fn update_asset(
         investigation_status,
         &["not_started", "in_progress", "completed"],
     )?;
-    validate_optional_json("Asset properties", properties)?;
     validate_optional_json("Scan results", scan_results)?;
     if let Some(network_id) = network_id {
         if !exists(conn, "networks", network_id)? {
@@ -6845,6 +6846,179 @@ mod tests {
         )
         .unwrap();
         assert_eq!(moved.network_id.as_deref(), Some(office.id.as_str()));
+    }
+
+    #[test]
+    fn equally_specific_subnets_leave_endpoints_unassigned() {
+        let (mut conn, _, active_expert) = fresh_case();
+        // Two isolated departments that both use 10.0.0.0/24.
+        let site_a = add_network(&mut conn, &active_expert, "Site A users", "10.0.0.0/24");
+        let site_b = add_network(&mut conn, &active_expert, "Site B users", "10.0.0.0/24");
+        let asset = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "APP01",
+            "10.0.0.15",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(asset.network_id.is_none());
+        let extra = create_network_interface(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            "Eth1",
+            "10.0.0.16",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(extra.network_id.is_none());
+
+        // Editing one twin does not let it claim the shared range either.
+        update_network(
+            &mut conn,
+            &active_expert,
+            &site_b.id,
+            "Site B users",
+            "10.0.0.0/24",
+            "LAN",
+            "Branch office",
+            None,
+        )
+        .unwrap();
+        assert!(get_assets_by_network(&conn, &site_a.id).unwrap().is_empty());
+        assert!(get_assets_by_network(&conn, &site_b.id).unwrap().is_empty());
+        assert!(get_network_interfaces(&conn, Some(&asset.id))
+            .unwrap()
+            .iter()
+            .all(|item| item.network_id.is_none()));
+
+        // A strictly more specific subnet is still an unambiguous home.
+        let servers = add_network(&mut conn, &active_expert, "Site A servers", "10.0.0.0/25");
+        let stored = get_assets(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == asset.id)
+            .unwrap();
+        assert_eq!(stored.network_id.as_deref(), Some(servers.id.as_str()));
+    }
+
+    #[test]
+    fn mobile_and_firewall_assets_with_free_text_findings_are_accepted() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let finding = "Finance says they own it. Ask infrastructure for logs.";
+        let phone = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "CEO-PHONE",
+            "",
+            None,
+            "mobile",
+            Some("Android 14"),
+            None,
+            "unknown",
+            "not_started",
+            Some(finding),
+            None,
+        )
+        .unwrap();
+        assert_eq!(phone.asset_type, "mobile");
+        assert_eq!(phone.properties.as_deref(), Some(finding));
+
+        let edge = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "EDGE-FW",
+            "203.0.113.2",
+            None,
+            "firewall",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        let updated = update_asset(
+            &mut conn,
+            &active_expert,
+            &edge.id,
+            None,
+            "EDGE-FW",
+            "203.0.113.2",
+            None,
+            "firewall",
+            None,
+            None,
+            "unknown",
+            "in_progress",
+            Some("Seen in the VPN logs"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(updated.properties.as_deref(), Some("Seen in the VPN logs"));
+
+        // Scan results stay structured, and unknown types are still refused.
+        let not_json = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "SCAN",
+            "",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            Some("open ports: 22"),
+        );
+        assert!(not_json.unwrap_err().contains("Scan results must be valid JSON"));
+        let unknown = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "TOASTER",
+            "",
+            None,
+            "toaster",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        );
+        assert!(unknown.unwrap_err().contains("Invalid asset type"));
+
+        // Reviewed imports and merged bundles accept the same types and text.
+        let mut value = to_value(&phone).unwrap();
+        value["asset_type"] = Value::String("firewall".into());
+        value["properties"] = Value::String("Plain text, not JSON".into());
+        let tx = conn.transaction().unwrap();
+        upsert_entity_json(&tx, "asset", &value).unwrap();
+        tx.commit().unwrap();
+        let stored = get_assets(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == phone.id)
+            .unwrap();
+        assert_eq!(stored.asset_type, "firewall");
+        assert_eq!(stored.properties.as_deref(), Some("Plain text, not JSON"));
     }
 
     #[test]

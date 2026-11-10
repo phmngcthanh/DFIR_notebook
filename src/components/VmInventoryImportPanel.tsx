@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useDraft } from '@/lib/drafts';
 import { Boxes, FileUp, Loader2, ShieldCheck, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -50,13 +51,15 @@ const EXPORT_GUIDANCE: Record<VmInventoryPlatform, { native: string; csv: string
 };
 
 export default function VmInventoryImportPanel({ inventory, onApplied, onClose }: Props) {
-  const [platform, setPlatform] = useState<VmInventoryPlatform>('esxi');
-  const [inventoryScope, setInventoryScope] = useState('');
-  const [sourceFile, setSourceFile] = useState('');
-  const [text, setText] = useState('');
-  const [parsed, setParsed] = useState<ParsedVmInventory | null>(null);
-  const [preview, setPreview] = useState<PartialImportPreview | null>(null);
-  const [warnings, setWarnings] = useState<string[]>([]);
+  // A pasted list and its pending review survive switching screens; the
+  // reviewed preview is re-validated against the case before it is applied.
+  const [platform, setPlatform] = useDraft<VmInventoryPlatform>('assetImport.platform', 'generic');
+  const [inventoryScope, setInventoryScope] = useDraft('assetImport.scope', '');
+  const [sourceFile, setSourceFile] = useDraft('assetImport.sourceFile', '');
+  const [text, setText] = useDraft('assetImport.text', '');
+  const [parsed, setParsed] = useDraft<ParsedVmInventory | null>('assetImport.parsed', null);
+  const [preview, setPreview] = useDraft<PartialImportPreview | null>('assetImport.preview', null);
+  const [warnings, setWarnings] = useDraft<string[]>('assetImport.warnings', []);
   const [busy, setBusy] = useState(false);
 
   const selectedChanges = useMemo(
@@ -101,7 +104,7 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
         jsonData: built.document,
       });
       if (!response.success || !response.data) {
-        throw new Error(response.error || 'Could not prepare the VM inventory import');
+        throw new Error(response.error || 'Could not prepare the asset import');
       }
       setParsed(value);
       setWarnings(built.warnings);
@@ -119,7 +122,7 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
 
   const apply = async () => {
     if (!preview || selectedChanges.length === 0) return;
-    if (!confirm(`Apply ${selectedChanges.length} reviewed VM inventory record(s) in one transaction?`)) return;
+    if (!confirm(`Apply ${selectedChanges.length} reviewed asset record(s) in one transaction?`)) return;
     setBusy(true);
     try {
       const validation = await invoke<ApiResponse<PartialSelectionValidation>>('validate_pending_partial_import', {
@@ -133,9 +136,13 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
         previewId: preview.preview_id,
         selectedChangeIds: selectedChanges,
       });
-      if (!response.success || !response.data) throw new Error(response.error || 'Could not apply the VM inventory');
-      toast.success(`Imported ${response.data.created} new and ${response.data.updated} updated VM inventory records`);
+      if (!response.success || !response.data) throw new Error(response.error || 'Could not apply the asset import');
+      toast.success(`Imported ${response.data.created} new and ${response.data.updated} updated asset records`);
       setPreview(null);
+      setParsed(null);
+      setWarnings([]);
+      setText('');
+      setSourceFile('');
       await onApplied();
     } catch (reason) {
       toast.error(String(reason));
@@ -154,14 +161,14 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
     <Card className="border-violet-200 bg-violet-50/30">
       <CardHeader className="flex flex-row items-start justify-between space-y-0">
         <div>
-          <CardTitle className="flex items-center gap-2 text-base"><Boxes size={18} />Import VM / device inventory</CardTitle>
-          <p className="mt-1 text-xs text-slate-500">Hypervisor inventories, generic lists, and adb device output become reviewed, audited assets. Mobile guests (Android, iOS, …) are typed <code>mobile</code>; PC/other-OS guests stay <code>vm</code>.</p>
+          <CardTitle className="flex items-center gap-2 text-base"><Boxes size={18} />Paste / import assets</CardTitle>
+          <p className="mt-1 text-xs text-slate-500">Paste hostnames, IP lists, spreadsheet rows, or adb output, or load a VMware, Hyper-V, or Proxmox inventory. Everything is previewed and applied as reviewed, audited assets. Mobile guests (Android, iOS, …) are typed <code>mobile</code>; PC/other-OS guests stay <code>vm</code>.</p>
         </div>
-        <Button size="sm" variant="ghost" aria-label="Close VM inventory importer" onClick={close}><X size={16} /></Button>
+        <Button size="sm" variant="ghost" aria-label="Close asset importer" onClick={close}><X size={16} /></Button>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-3 md:grid-cols-[220px_minmax(260px,1fr)_auto]">
-          <Field label="Virtualization platform">
+          <Field label="Source">
             <Select value={platform} onValueChange={(value: VmInventoryPlatform) => {
               setPlatform(value);
               setParsed(null);
@@ -169,14 +176,14 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
             }}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
+                <SelectItem value="generic">Pasted list (hostnames, IPs, CSV, adb)</SelectItem>
                 <SelectItem value="esxi">VMware ESXi / vSphere</SelectItem>
                 <SelectItem value="proxmox">Proxmox VE</SelectItem>
                 <SelectItem value="hyperv">Microsoft Hyper-V</SelectItem>
-                <SelectItem value="generic">Generic list — mobile &amp; PC/other OS</SelectItem>
               </SelectContent>
             </Select>
           </Field>
-          <Field label="Inventory scope (recommended)">
+          <Field label="Scope (site or host, recommended)">
             <Input
               value={inventoryScope}
               onChange={(event) => {
@@ -184,7 +191,7 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
                 setParsed(null);
                 void clearPreview();
               }}
-              placeholder="ESXi host, Proxmox cluster, or Hyper-V host"
+              placeholder="Site, ESXi host, Proxmox cluster, or Hyper-V host"
             />
           </Field>
           <div className="flex items-end"><Button variant="outline" onClick={() => void selectFile()} disabled={busy}><FileUp size={16} />Select file</Button></div>

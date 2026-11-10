@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { downloadBytes, downloadText, invoke } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import CytoscapeComponent from 'react-cytoscapejs';
 import type cytoscape from 'cytoscape';
 import { Brain, Download, FileDown, FileUp, GitGraph, Maximize2, RefreshCw, RotateCcw, Save, SearchCheck, ZoomIn, ZoomOut } from 'lucide-react';
@@ -83,8 +84,8 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
   const [saving, setSaving] = useState(false);
   const [viewDirty, setViewDirty] = useState(false);
   const [hasSavedView, setHasSavedView] = useState(false);
-  const [showImporter, setShowImporter] = useState(false);
-  const [showVerifier, setShowVerifier] = useState(false);
+  const [showImporter, setShowImporter] = useDraft('topology.showImporter', false);
+  const [showVerifier, setShowVerifier] = useDraft('topology.showVerifier', false);
   const [infrastructureOnly, setInfrastructureOnly] = useState(false);
 
   const loadData = useCallback(async () => {

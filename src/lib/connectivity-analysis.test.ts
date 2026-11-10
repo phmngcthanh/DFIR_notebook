@@ -99,6 +99,45 @@ describe('connectivity analysis', () => {
     expect(result.analyses[0].paths.some((path) => path.certainty === 'confirmed')).toBe(true);
   });
 
+  it('reports insufficient evidence instead of an isolation pass when nothing is modeled', () => {
+    const bare: ConnectivityInventory = { ...inventory(), firewalls: [], firewallInterfaces: [] };
+    const policy: ConnectivityPolicy = {
+      id: 'policy-2',
+      name: 'Users isolated from WAN',
+      sourceNetworkId: 'lan',
+      targetKind: 'network',
+      targetNetworkId: 'wan',
+      direction: 'bidirectional',
+      mode: 'logical',
+      expectation: 'blocked',
+      enabled: true,
+      description: '',
+    };
+    const blocked = evaluatePolicy(bare, policy);
+    expect(blocked.status).toBe('insufficient');
+    expect(blocked.coverageGaps.join(' ')).toContain('No router, switch, or firewall configuration');
+    // A required connection is not declared missing on no evidence either.
+    expect(evaluatePolicy(bare, { ...policy, expectation: 'allowed' }).status).toBe('insufficient');
+  });
+
+  it('names the network the model knows nothing about', () => {
+    const partial = inventory();
+    partial.networks = [...partial.networks, { id: 'ot', name: 'Plant OT', subnet: '10.50.0.0/24', network_type: 'LAN', description: '', created_at: '' }];
+    const result = evaluatePolicy(partial, {
+      id: 'policy-3',
+      name: 'OT has no Internet',
+      sourceNetworkId: 'ot',
+      targetKind: 'internet',
+      direction: 'outbound',
+      mode: 'logical',
+      expectation: 'blocked',
+      enabled: true,
+      description: '',
+    });
+    expect(result.status).toBe('insufficient');
+    expect(result.coverageGaps).toEqual([expect.stringContaining('Plant OT')]);
+  });
+
   it('preserves unrelated case metadata when policies are serialized', () => {
     const policy: ConnectivityPolicy = {
       id: 'policy-1',
@@ -227,6 +266,22 @@ end
   it('keeps VLAN 30 off the Internet when no policy covers its subnet', () => {
     const result = analyzeConnectivity(fortiInventory(), 'vlan30', INTERNET_NODE_ID, 'outbound', 'logical');
     expect(result.paths).toHaveLength(0);
+  });
+
+  it('passes VLAN 30 isolation because the firewall serving it was imported', () => {
+    const result = evaluatePolicy(fortiInventory(), {
+      id: 'policy-vlan30',
+      name: 'Servers have no Internet',
+      sourceNetworkId: 'vlan30',
+      targetKind: 'internet',
+      direction: 'outbound',
+      mode: 'logical',
+      expectation: 'blocked',
+      enabled: true,
+      description: '',
+    });
+    expect(result.status).toBe('pass');
+    expect(result.coverageGaps).toEqual([]);
   });
 
   it('confirms inbound reachability only through the published VIP', () => {

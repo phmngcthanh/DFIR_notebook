@@ -78,6 +78,58 @@ describe('offline expert bundle review', () => {
     await user.click(screen.getByRole('button', { name: 'Download snapshot' }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('export_case_json', { password: 'portable-secret' }));
-    expect(downloadTextMock).toHaveBeenCalledWith('case-backup.dfirx', '{"dfirx":true}');
+    expect(downloadTextMock).toHaveBeenCalledWith('case-snapshot.dfirx', '{"dfirx":true}');
+  });
+
+  it('refreshes the preview when a reviewed record changed before apply', async () => {
+    const editedLocally: MergePreview = {
+      ...preview,
+      changes: [{ ...preview.changes[0], classification: 'auto_mergeable', local: { id: 'n1', name: 'Office', description: 'Edited after review' } }, preview.changes[1]],
+    };
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'list_case_history') return { success: true, data: [] };
+      if (command === 'load_change_bundle_text') return { success: true, data: preview };
+      if (command === 'apply_pending_change_bundle') {
+        return { success: false, error: "1 reviewed record changed after this bundle was previewed: network 'Office'. Nothing was applied; refresh the preview and review those records again." };
+      }
+      if (command === 'refresh_pending_change_bundle') return { success: true, data: editedLocally };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const user = userEvent.setup(); const onImport = vi.fn();
+    pickTextFileMock.mockResolvedValue({ name: 'changes-Bob.json', text: '{"bundle":true}' });
+    render(<ExportImport refreshTrigger={0} onImport={onImport} />);
+    await user.click(screen.getByRole('button', { name: 'Load for review' }));
+    await screen.findByText(/2 entity changes/);
+    await user.click(screen.getByRole('button', { name: 'Apply 1 selected' }));
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('refresh_pending_change_bundle', { bundleId: 'bundle-1' }));
+    expect(onImport).not.toHaveBeenCalled();
+    // The refreshed review is still on screen, with the changed record ready to re-check.
+    expect(await screen.findByText('auto mergeable')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply 1 selected' })).toBeEnabled();
+  });
+
+  it('keeps a loaded bundle and its decisions when the screen is left and reopened', async () => {
+    const user = userEvent.setup();
+    pickTextFileMock.mockResolvedValue({ name: 'changes-Bob.json', text: '{"bundle":true}' });
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === 'list_case_history') return { success: true, data: [] };
+      if (command === 'load_change_bundle_text') return { success: true, data: preview };
+      if (command === 'refresh_pending_change_bundle') return { success: true, data: preview };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const first = render(<ExportImport refreshTrigger={0} onImport={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Load for review' }));
+    await screen.findByText(/2 entity changes/);
+    const reviewBoxes = () => screen.getAllByRole('checkbox').filter((element) => !element.closest('label'));
+    await user.click(reviewBoxes()[1]);
+    expect(reviewBoxes()[1]).toBeChecked();
+    first.unmount();
+
+    render(<ExportImport refreshTrigger={0} onImport={vi.fn()} />);
+    expect(await screen.findByText(/2 entity changes/)).toBeInTheDocument();
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('refresh_pending_change_bundle', { bundleId: 'bundle-1' }));
+    expect(reviewBoxes()[0]).toBeChecked();
+    expect(reviewBoxes()[1]).toBeChecked();
   });
 });

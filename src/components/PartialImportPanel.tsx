@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { downloadText, invoke, pickTextFile } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import { AlertTriangle, CheckCircle2, FileJson2, FileUp, ListChecks, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -21,10 +22,12 @@ const SECTION_ORDER = [
 ];
 
 export default function PartialImportPanel({ disabled, onApplied }: Props) {
-  const [jsonText, setJsonText] = useState('');
-  const [preview, setPreview] = useState<PartialImportPreview | null>(null);
-  const [selected, setSelected] = useState<Selection>({});
-  const [validation, setValidation] = useState<PartialSelectionValidation | null>(null);
+  // Pasted JSON and a pending review survive switching screens; apply still
+  // re-validates every selected record against the case.
+  const [jsonText, setJsonText] = useDraft('partialImport.text', '');
+  const [preview, setPreview] = useDraft<PartialImportPreview | null>('partialImport.preview', null);
+  const [selected, setSelected] = useDraft<Selection>('partialImport.selected', {});
+  const [validation, setValidation] = useDraft<PartialSelectionValidation | null>('partialImport.validation', null);
   const [busy, setBusy] = useState(false);
 
   const groups = useMemo(() => {

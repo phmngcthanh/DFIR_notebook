@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import { Cable, Network as NetworkIcon, Pencil, Plus, Search, Shield, Trash2, Wifi } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -22,17 +23,18 @@ const emptyConnection = { sourceNetworkId: '', targetNetworkId: '', connectionTy
 const emptyFirewall = { networkId: '', name: '', vendor: '', model: '', rules: '', configText: '' };
 
 export default function NetworkManager({ refreshTrigger }: Props) {
-  const [section, setSection] = useState<Section>('zones');
+  // The open tab and any half-filled form survive switching screens.
+  const [section, setSection] = useDraft<Section>('networks.section', 'zones');
   const [networks, setNetworks] = useState<Network[]>([]);
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
   const [firewalls, setFirewalls] = useState<Firewall[]>([]);
   const [search, setSearch] = useState('');
-  const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [networkForm, setNetworkForm] = useState(emptyNetwork);
-  const [connectionForm, setConnectionForm] = useState(emptyConnection);
-  const [firewallForm, setFirewallForm] = useState(emptyFirewall);
-  const [selectedFirewallId, setSelectedFirewallId] = useState<string | null>(null);
+  const [showForm, setShowForm] = useDraft('networks.showForm', false);
+  const [editingId, setEditingId] = useDraft<string | null>('networks.editingId', null);
+  const [networkForm, setNetworkForm] = useDraft('networks.networkForm', emptyNetwork);
+  const [connectionForm, setConnectionForm] = useDraft('networks.connectionForm', emptyConnection);
+  const [firewallForm, setFirewallForm] = useDraft('networks.firewallForm', emptyFirewall);
+  const [selectedFirewallId, setSelectedFirewallId] = useDraft<string | null>('networks.selectedFirewallId', null);
 
   const loadData = useCallback(async () => {
     try {

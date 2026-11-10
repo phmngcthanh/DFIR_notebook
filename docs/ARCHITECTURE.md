@@ -410,7 +410,7 @@ Network configuration imports produce `dfir-network-config-v1` device evidence p
 
 VM inventory imports produce ordinary `vm` assets and optional `Inventory NIC N` rows. The stored `dfir-vm-inventory-v1` object preserves platform, source format/file, native identifier, inventory scope, host/node, runtime/resource fields, source row, and any pre-existing non-inventory properties. Identity resolution is restricted to earlier normalized VM imports: exact normalized key, then a unique same-platform native ID with compatible scope, then a unique same-platform imported name/scope. A same-named manual asset is not overwritten.
 
-The VM builder preserves analyst-controlled compromise/investigation state and never treats absence from a later inventory as deletion. IPv4 NICs attach only to the most-specific existing subnet; it neither creates a network from a guest address nor guesses an IPv6 prefix. These are evidence-conservative choices: collection staleness, inaccessible guests, host-local ESXi IDs, migration, and incomplete guest tools can all make one inventory incomplete.
+The VM builder preserves analyst-controlled compromise/investigation state and never treats absence from a later inventory as deletion. NICs attach only when exactly one existing subnet is the most specific fit (equally specific candidates are reported and left unassigned); it neither creates a network from a guest address nor guesses an IPv6 prefix. These are evidence-conservative choices: collection staleness, inaccessible guests, host-local ESXi IDs, migration, and incomplete guest tools can all make one inventory incomplete.
 
 ## 9. Text parser architecture
 

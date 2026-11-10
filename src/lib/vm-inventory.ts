@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Asset, JsonValue, Network, NetworkInterface } from '@/types';
+import { matchNetworkForIp } from './subnet-match';
 import type { XmindTopic } from './topology-export';
 
 export type VmInventoryPlatform = 'esxi' | 'proxmox' | 'hyperv' | 'generic';
@@ -598,24 +599,17 @@ export function readStoredVmInventory(properties: string | null | undefined): Im
   }
 }
 
-function ipv4Number(address: string): number | null {
-  const octets = address.split('.');
-  if (octets.length !== 4 || octets.some((octet) => !/^\d{1,3}$/.test(octet) || Number(octet) > 255)) return null;
-  return octets.reduce((value, octet) => (value * 256) + Number(octet), 0) >>> 0;
-}
-
-function networkForIp(networks: Network[], address: string): Network | undefined {
-  const ip = ipv4Number(address);
-  if (ip === null) return undefined;
-  const matches = networks.filter((network) => {
-    const [baseText, prefixText] = network.subnet.split('/');
-    const base = ipv4Number(baseText);
-    const prefix = Number(prefixText);
-    if (base === null || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
-    const size = 2 ** (32 - prefix);
-    return Math.floor(ip / size) === Math.floor(base / size);
-  });
-  return matches.sort((left, right) => Number(right.subnet.split('/')[1]) - Number(left.subnet.split('/')[1]))[0];
+/**
+ * The network an imported address joins. Equally specific candidates (two
+ * isolated sites reusing one range) are reported and left unassigned — the
+ * same rule the core applies when it links endpoints itself.
+ */
+function networkForIp(networks: Network[], address: string, recordName: string, warnings: Set<string>): Network | undefined {
+  const match = matchNetworkForIp(networks, address);
+  if (match.kind === 'ambiguous') {
+    warnings.add(`${recordName}: ${address} fits ${match.candidates.length} networks with the same subnet (${match.candidates.map((item) => item.name).join(', ')}); left unassigned for review.`);
+  }
+  return match.kind === 'unique' ? match.network : undefined;
 }
 
 function existingAssetFor(
@@ -677,7 +671,7 @@ export function buildVmInventoryImport(
   inventory: VmImportInventory,
 ): BuiltVmInventoryImport {
   const changes: PartialChange[] = [];
-  const warnings = [...parsed.warnings];
+  const warnings = new Set(parsed.warnings);
   for (const record of parsed.records) {
     const matched = existingAssetFor(record, inventory.assets);
     const existing = matched?.asset;
@@ -694,7 +688,7 @@ export function buildVmInventoryImport(
     const primaryMac = preserveManualPrimary || retainStaleProjection
       ? existing?.mac_address ?? null
       : record.macAddresses[0] ?? null;
-    const primaryNetwork = primaryIp ? networkForIp(inventory.networks, primaryIp) : undefined;
+    const primaryNetwork = primaryIp ? networkForIp(inventory.networks, primaryIp, record.name, warnings) : undefined;
     change(changes, 'asset', assetId, {
       network_id: primaryNetwork?.id ?? existing?.network_id ?? null,
       name: record.name,
@@ -716,7 +710,7 @@ export function buildVmInventoryImport(
       const name = `Inventory NIC ${index + 1}`;
       const existingInterface = existingInventoryNics.find((item) => item.name === name);
       const ipAddress = record.ipAddresses[index] ?? '';
-      const network = ipAddress ? networkForIp(inventory.networks, ipAddress) : undefined;
+      const network = ipAddress ? networkForIp(inventory.networks, ipAddress, record.name, warnings) : undefined;
       change(changes, 'network_interface', existingInterface?.id ?? uuidv4(), {
         asset_id: assetId,
         name,
@@ -727,7 +721,7 @@ export function buildVmInventoryImport(
       });
     }
     if (existingInventoryNics.length > desiredNics) {
-      warnings.push(`${record.name}: ${existingInventoryNics.length - desiredNics} older inventory NIC(s) were retained because reviewed partial imports never delete evidence.`);
+      warnings.add(`${record.name}: ${existingInventoryNics.length - desiredNics} older inventory NIC(s) were retained because reviewed partial imports never delete evidence.`);
     }
   }
   if (!changes.length) throw new Error('The VM inventory did not produce any importable assets');
@@ -742,7 +736,7 @@ export function buildVmInventoryImport(
       source: sourceLabel,
       changes,
     }, null, 2),
-    warnings,
+    warnings: [...warnings],
     changeCount: changes.length,
   };
 }

@@ -9,6 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 import { StickyNote } from 'lucide-react';
 import { toast } from 'sonner';
 import { invoke } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import type { ApiResponse } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -23,8 +24,8 @@ interface QuickNoteCellProps {
 }
 
 export default function QuickNoteCell({ entityType, id, note, onSaved }: QuickNoteCellProps) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState('');
+  const [editing, setEditing] = useDraft(`quickNote.${entityType}.${id}.editing`, false);
+  const [draft, setDraft] = useDraft(`quickNote.${entityType}.${id}.text`, '');
   const [saving, setSaving] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 

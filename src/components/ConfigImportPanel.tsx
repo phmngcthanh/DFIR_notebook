@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Textarea } from '@/components/ui/textarea';
 import { buildConfigImport, type ConfigImportInventory } from '@/lib/config-import';
 import { invoke, pickTextFile } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import {
   CONFIG_PROFILES,
   type ConfigProfile,
@@ -30,14 +31,15 @@ interface Props {
 }
 
 export default function ConfigImportPanel({ inventory, onApplied, onClose }: Props) {
-  const [profile, setProfile] = useState<ConfigProfile>('palo_alto_firewall');
-  const [roleOverride, setRoleOverride] = useState<'auto' | 'router' | 'switch'>('auto');
-  const [deviceName, setDeviceName] = useState('');
-  const [sourceFile, setSourceFile] = useState('');
-  const [text, setText] = useState('');
-  const [parsed, setParsed] = useState<ParsedDeviceConfig | null>(null);
-  const [preview, setPreview] = useState<PartialImportPreview | null>(null);
-  const [warnings, setWarnings] = useState<string[]>([]);
+  // A pasted configuration and its pending review survive switching screens.
+  const [profile, setProfile] = useDraft<ConfigProfile>('configImport.profile', 'palo_alto_firewall');
+  const [roleOverride, setRoleOverride] = useDraft<'auto' | 'router' | 'switch'>('configImport.roleOverride', 'auto');
+  const [deviceName, setDeviceName] = useDraft('configImport.deviceName', '');
+  const [sourceFile, setSourceFile] = useDraft('configImport.sourceFile', '');
+  const [text, setText] = useDraft('configImport.text', '');
+  const [parsed, setParsed] = useDraft<ParsedDeviceConfig | null>('configImport.parsed', null);
+  const [preview, setPreview] = useDraft<PartialImportPreview | null>('configImport.preview', null);
+  const [warnings, setWarnings] = useDraft<string[]>('configImport.warnings', []);
   const [busy, setBusy] = useState(false);
 
   const selectedChanges = useMemo(

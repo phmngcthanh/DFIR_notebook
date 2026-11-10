@@ -56,7 +56,7 @@ Re-export from the vendor's documented native format when a warning reports unsu
 
 ### 1.2 Virtual-machine and device inventories
 
-Open **Assets → Import VM inventory** and choose the source platform. The importer auto-detects JSON, CSV, or supported native table text. The **Generic list** platform is the batch path for everything that is not a hypervisor export: manual device lists and `adb devices` output covering both mobile devices and PC/other-OS machines.
+Open **Assets → Paste / import assets** and choose the source. The importer auto-detects JSON, CSV, or supported native table text. The default **Pasted list** source (the generic list) is the batch path for everything that is not a hypervisor export: hostnames and IP lists, manual device lists, and `adb devices` output covering both mobile devices and PC/other-OS machines.
 
 | Platform | Supported native/structured input | Recommended stable identity | Useful normalized fields |
 |---|---|---|---|
@@ -98,7 +98,7 @@ The optional **Inventory scope** should identify the ESXi host, Proxmox cluster,
 
 Each recognized guest is created as an ordinary asset row, so it appears immediately in **Assets and PC Configuration** and in normal snapshots/history. The asset type covers both device classes: a guest OS that identifies as mobile (Android, iOS/iPadOS, watchOS, HarmonyOS, KaiOS, Tizen, Wear OS, Fuchsia) becomes `asset_type: "mobile"`; every PC/other-OS guest stays `asset_type: "vm"`. An explicit `Type` column (generic lists) wins over OS detection, and re-imports preserve an analyst-retyped asset type unless the classified OS says otherwise. Proxmox LXC guests remain `asset_type: "vm"` for the current schema but carry `kind: "container"` in their normalized properties. `adb` records use the device serial as the stable native ID, keep the adb state (unauthorized/offline rows import too, for transparent review) and model name, and carry `guestOs: "Android"`. Platform, source format/file, native ID, scope, host/node, runtime state, resources, addresses, configuration path, and the source row are stored under `schema: "dfir-vm-inventory-v1"` in encrypted asset `properties`. Existing non-inventory properties are retained as `legacyProperties`.
 
-Discovered IP/MAC pairs become `Inventory NIC N` records. IPv4 addresses attach automatically to the most-specific existing case subnet; IPv6 and unmatched addresses remain unassigned rather than causing a network to be invented. A repeat import reuses those managed NIC IDs and preserves analyst-owned compromise state, investigation progress, user, OS when the inventory has no OS, scan results, and legacy properties.
+Discovered IP/MAC pairs become `Inventory NIC N` records. An IPv4 or IPv6 address attaches automatically to the most specific existing case subnet when exactly one network is that fit. When two or more equally specific networks contain it (isolated sites reusing one range), the address stays unassigned and the preview lists it as a review point; unmatched addresses also stay unassigned rather than causing a network to be invented. A repeat import reuses those managed NIC IDs and preserves analyst-owned compromise state, investigation progress, user, OS when the inventory has no OS, scan results, and legacy properties.
 
 Inventory disappearance is not evidence of deletion. The workflow therefore never deletes an asset or an older inventory NIC merely because it is absent from a later file; it reports retained stale NICs for review. The importer does not query the hypervisor, fetch VM configuration/disks, or prove that reported runtime state is current.
 
@@ -195,7 +195,7 @@ Fields listed as required are required when creating a record. Updates may conta
 |---|---|---|
 | `case` | Update only | `name`, `description`, `client_name`, `status` (`active`, `closed`, `archived`), `metadata`; legacy `investigator` values are preserved but ignored |
 | `network` | `name` | `subnet` (CIDR, or empty while an L2 VLAN subnet is unresolved), `network_type` (`LAN`, `DMZ`, `DMS`, `WAN`, `GUEST`, `MANAGEMENT`, `OTHER`), `description`, `vlan_id`, `quick_note` (short investigator remark) |
-| `asset` | `name`, `ip_address` | `network_id`, `mac_address`, `asset_type` (`workstation`, `server`, `vm`, `laptop`, `router`, `switch`, `other`), `os`, `user_name`, `compromise_status` (`unknown`, `clean`, `suspected`, `infected`), `investigation_status` (`not_started`, `in_progress`, `completed`), `properties`, `scan_results`, `quick_note` (short investigator remark) |
+| `asset` | `name`, `ip_address` | `network_id`, `mac_address`, `asset_type` (`workstation`, `server`, `vm`, `mobile`, `laptop`, `router`, `switch`, `firewall`, `other`), `os`, `user_name`, `compromise_status` (`unknown`, `clean`, `suspected`, `infected`), `investigation_status` (`not_started`, `in_progress`, `completed`), `properties`, `scan_results`, `quick_note` (short investigator remark) |
 | `network_interface` | `asset_id`, `name`, `ip_address` | `network_id`, `mac_address`, `is_primary`; at most one primary NIC per asset |
 | `clock_profile` | `name`, `server_reference_raw`, `correct_reference_raw` | `description`, `server_timezone`, `correct_timezone`; UTC values and offset are derived by the app |
 | `firewall` | `name` | `network_id`, `vendor`, `model`, `rules`, `config_text`, `quick_note` (short investigator remark) |
@@ -210,7 +210,7 @@ Fields listed as required are required when creating a record. Updates may conta
 
 Entity aliases accepted by the parser include common singular/plural forms, `nic` for `network_interface`, `firewall_nic` for `firewall_interface`, and `nat` for `firewall_nat_rule`; canonical generators should use the names in the table.
 
-`properties`, `scan_results`, and firewall `rules` may be supplied as JSON objects/arrays or as valid JSON strings. The app stores them as JSON text in SQLite without losing their nested structure.
+`scan_results` and firewall `rules` may be supplied as JSON objects/arrays or as valid JSON strings. The app stores them as JSON text in SQLite without losing their nested structure. Asset `properties` accepts the same, or plain free text such as ownership notes and findings.
 
 ## 5. Time input
 

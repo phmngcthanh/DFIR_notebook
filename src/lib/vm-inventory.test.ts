@@ -199,6 +199,26 @@ describe('VM inventory import builder', () => {
     };
     expect(document.changes.find((item) => item.entity_type === 'asset')?.target_id).not.toBe('manual-asset');
   });
+
+  it('leaves an address unassigned and says why when two networks share its subnet', () => {
+    const parsed = parseVmInventory('generic', 'APP01, 10.0.0.15');
+    const inventory: VmImportInventory = {
+      ...emptyInventory(),
+      networks: [
+        { id: 'site-a', name: 'Site A users', subnet: '10.0.0.0/24', network_type: 'LAN', description: '', created_at: '' },
+        { id: 'site-b', name: 'Site B users', subnet: '10.0.0.0/24', network_type: 'LAN', description: '', created_at: '' },
+      ],
+    };
+    const built = buildVmInventoryImport(parsed, inventory);
+    const document = JSON.parse(built.document) as {
+      changes: Array<{ entity_type: string; values: Record<string, unknown> }>;
+    };
+    expect(document.changes.map((item) => item.values.network_id)).toEqual([null, null]);
+    // Asset and NIC share the address; the review point is listed once.
+    expect(built.warnings).toEqual([
+      'APP01: 10.0.0.15 fits 2 networks with the same subnet (Site A users, Site B users); left unassigned for review.',
+    ]);
+  });
 });
 
 describe('mobile and generic batch imports', () => {

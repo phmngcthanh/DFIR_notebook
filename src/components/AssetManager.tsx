@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { downloadBytes, invoke } from '@/lib/api';
-import { ArrowUpDown, Boxes, Brain, Cable, ChevronDown, ChevronRight, ChevronUp, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react';
+import { downloadBytes, downloadText, invoke } from '@/lib/api';
+import { ArrowUpDown, Boxes, Brain, Cable, ChevronDown, ChevronRight, ChevronUp, Copy, Download, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
 import QuickNoteCell from '@/components/QuickNoteCell';
 import VmInventoryImportPanel from '@/components/VmInventoryImportPanel';
@@ -13,6 +13,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
 import { sortAssets, type AssetSort, type AssetSortKey } from '@/lib/asset-sort';
+import { useDraft } from '@/lib/drafts';
+import { copyText, exportFileName, toCsv, toTsv, type ListTable } from '@/lib/list-export';
+import { matchNetworkForIp } from '@/lib/subnet-match';
 import { buildXmindArchiveFromTree } from '@/lib/topology-export';
 import { buildVmHostTree, platformLabel, readStoredVmInventory } from '@/lib/vm-inventory';
 import type { ApiResponse, Asset, Case, CompromiseStatus, ExpertIdentity, InfectionSummary, InvestigationStatus, Network, NetworkInterface } from '@/types';
@@ -26,26 +29,31 @@ interface InterfaceFormState { name: string; ipAddress: string; macAddress: stri
 
 const EMPTY_ASSET: AssetFormState = { networkId: '', name: '', ipAddress: '', macAddress: '', assetType: 'workstation', os: '', userName: '', compromiseStatus: 'unknown', investigationStatus: 'not_started', properties: '', scanResults: '' };
 const EMPTY_INTERFACE: InterfaceFormState = { name: '', ipAddress: '', macAddress: '', networkId: '', isPrimary: false };
+/** Asset types the core accepts (`ASSET_TYPES` in db.rs). */
+const ASSET_TYPES = ['workstation', 'server', 'vm', 'mobile', 'laptop', 'router', 'switch', 'firewall', 'other'];
+/** Network filter value for assets with no network on the asset or any NIC. */
+const NO_NETWORK = '__no_network__';
 
 export default function AssetManager({ refreshTrigger, expert }: Props) {
   const [currentCase, setCurrentCase] = useState<Case | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [networks, setNetworks] = useState<Network[]>([]);
   const [interfaces, setInterfaces] = useState<NetworkInterface[]>([]);
-  const [form, setForm] = useState<AssetFormState>(EMPTY_ASSET);
-  const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [expandedAssetId, setExpandedAssetId] = useState<string | null>(null);
-  const [interfaceForm, setInterfaceForm] = useState<InterfaceFormState>(EMPTY_INTERFACE);
-  const [editingInterfaceId, setEditingInterfaceId] = useState<string | null>(null);
-  const [showInterfaceForm, setShowInterfaceForm] = useState(false);
+  // Open forms survive switching screens (see `useDraft`).
+  const [form, setForm] = useDraft<AssetFormState>('assets.form', EMPTY_ASSET);
+  const [showForm, setShowForm] = useDraft('assets.showForm', false);
+  const [editingId, setEditingId] = useDraft<string | null>('assets.editingId', null);
+  const [expandedAssetId, setExpandedAssetId] = useDraft<string | null>('assets.expandedAssetId', null);
+  const [interfaceForm, setInterfaceForm] = useDraft<InterfaceFormState>('assets.interfaceForm', EMPTY_INTERFACE);
+  const [editingInterfaceId, setEditingInterfaceId] = useDraft<string | null>('assets.editingInterfaceId', null);
+  const [showInterfaceForm, setShowInterfaceForm] = useDraft('assets.showInterfaceForm', false);
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<AssetSort | null>(null);
   const [networkFilter, setNetworkFilter] = useState('all');
   const [compromiseFilter, setCompromiseFilter] = useState('all');
   const [investigationFilter, setInvestigationFilter] = useState('all');
   const [focusOnly, setFocusOnly] = useState(expert.scope_network_ids.length > 0);
-  const [showVmImport, setShowVmImport] = useState(false);
+  const [showVmImport, setShowVmImport] = useDraft('assets.showImport', false);
 
   const [infection, setInfection] = useState<InfectionSummary>({ entities: [], iocs: [] });
 
@@ -141,7 +149,10 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
       const assetInterfaces = interfacesByAsset.get(asset.id) ?? [];
       const vmInventory = readStoredVmInventory(asset.properties);
       const scopeMatch = !focusOnly || expert.scope_network_ids.length === 0 || assetInterfaces.some((item) => item.network_id && expert.scope_network_ids.includes(item.network_id));
-      const networkMatch = networkFilter === 'all' || assetInterfaces.some((item) => item.network_id === networkFilter);
+      const networkMatch = networkFilter === 'all'
+        || (networkFilter === NO_NETWORK
+          ? !asset.network_id && assetInterfaces.every((item) => !item.network_id)
+          : assetInterfaces.some((item) => item.network_id === networkFilter));
       return scopeMatch && networkMatch && (compromiseFilter === 'all' || asset.compromise_status === compromiseFilter)
         && (investigationFilter === 'all' || asset.investigation_status === investigationFilter)
         && (!term || [
@@ -158,6 +169,34 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
     current?.key === key ? (current.direction === 'asc' ? { key, direction: 'desc' } : null) : { key, direction: 'asc' });
   const vmAssets = useMemo(() => assets.filter((asset) => readStoredVmInventory(asset.properties)), [assets]);
 
+  // The list exactly as shown (filtered and sorted) leaves the app as CSV or clipboard text.
+  const visibleAssetTable = (): ListTable => ({
+    header: ['Name', 'IP address', 'MAC address', 'Network', 'Type', 'OS', 'User / owner', 'Compromise', 'Progress', 'Other interface IPs', 'Hypervisor / host', 'Quick note'],
+    rows: sortedAssets.map((asset) => {
+      const inventory = readStoredVmInventory(asset.properties);
+      const otherIps = (interfacesByAsset.get(asset.id) ?? [])
+        .filter((item) => !item.is_primary && item.ip_address)
+        .map((item) => item.ip_address);
+      return [asset.name, asset.ip_address, asset.mac_address, asset.network_name, asset.asset_type, asset.os, asset.user_name,
+        label(asset.compromise_status), label(asset.investigation_status), otherIps.join('; '),
+        inventory?.hypervisor ?? inventory?.inventoryScope, asset.quick_note];
+    }),
+  });
+  const exportVisibleAssets = async () => {
+    if (!sortedAssets.length) { toast.info('No assets in the current list'); return; }
+    try {
+      await downloadText(exportFileName(currentCase?.name, 'assets', 'csv'), toCsv(visibleAssetTable()));
+      toast.success(`Exported ${sortedAssets.length} asset${sortedAssets.length === 1 ? '' : 's'} as CSV`);
+    } catch (reason) { toast.error(String(reason)); }
+  };
+  const copyVisibleAssets = async () => {
+    if (!sortedAssets.length) { toast.info('No assets in the current list'); return; }
+    try {
+      await copyText(toTsv(visibleAssetTable()));
+      toast.success(`Copied ${sortedAssets.length} asset${sortedAssets.length === 1 ? '' : 's'}; paste into a spreadsheet or report`);
+    } catch (reason) { toast.error(`Could not copy: ${String(reason)}`); }
+  };
+
   const exportVmXmind = async () => {
     const tree = buildVmHostTree(assets);
     if (!tree) { toast.info('No imported VM inventory to export yet'); return; }
@@ -172,7 +211,7 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
     <div className="space-y-4 p-6">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-2xl font-bold text-slate-800">Assets and PC Configuration</h2><p className="text-sm text-slate-500">Primary configuration, investigation status, multi-homed interfaces, and virtual-machine inventory</p></div>
         <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setShowVmImport((value) => !value)}><Boxes size={16} className="mr-2" />Import VM inventory</Button>
+          <Button variant="outline" onClick={() => setShowVmImport((value) => !value)} title="Paste hostnames, IP lists, CSV rows, adb output, or a VMware / Hyper-V / Proxmox inventory"><Boxes size={16} className="mr-2" />Paste / import assets</Button>
           <Button variant="outline" onClick={() => void exportVmXmind()} disabled={vmAssets.length === 0} title="Export the imported VM inventory as an XMind mindmap grouped by hypervisor host"><Brain size={16} className="mr-2" />Export VMs (XMind)</Button>
           <Button onClick={() => { resetAssetForm(); setShowForm(true); }} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add Asset</Button>
         </div>
@@ -184,10 +223,14 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
       />}
       <Card><CardContent className="flex flex-wrap items-end gap-3 p-3">
         <div className="relative min-w-64 flex-1"><Search size={15} className="absolute left-3 top-2.5 text-slate-400" /><Input className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, IP, MAC, OS, or user…" /></div>
-        <SmallSelect value={networkFilter} onChange={setNetworkFilter} label="Network" items={[['all','All networks'], ...networks.map((item): [string,string] => [item.id,item.name])]} />
+        <SmallSelect value={networkFilter} onChange={setNetworkFilter} label="Network" items={[['all','All networks'], [NO_NETWORK, 'No network (unresolved)'], ...networks.map((item): [string,string] => [item.id,item.name])]} />
         <SmallSelect value={compromiseFilter} onChange={setCompromiseFilter} label="Compromise" items={statusItems('compromise')} />
         <SmallSelect value={investigationFilter} onChange={setInvestigationFilter} label="Progress" items={statusItems('investigation')} />
         {expert.scope_network_ids.length > 0 && <label className="flex h-9 items-center gap-2 rounded border px-3 text-sm"><input type="checkbox" checked={focusOnly} onChange={(e) => setFocusOnly(e.target.checked)} />Focus zones only</label>}
+        <div className="ml-auto flex gap-2">
+          <Button variant="outline" size="sm" onClick={() => void exportVisibleAssets()} disabled={sortedAssets.length === 0} title="Download the assets in this list, as filtered and sorted, as CSV"><Download size={14} className="mr-1" />Export list</Button>
+          <Button variant="outline" size="sm" onClick={() => void copyVisibleAssets()} disabled={sortedAssets.length === 0} title="Copy the assets in this list as tab-separated text"><Copy size={14} className="mr-1" />Copy list</Button>
+        </div>
       </CardContent></Card>
 
       {showForm && <FormDialog title={editingId ? 'Edit asset' : 'New asset'} onClose={resetAssetForm}>
@@ -253,11 +296,11 @@ function AssetForm({ form, setForm, networks, editing, onSave, onCancel }: { for
   return <Card><CardHeader className="flex flex-row items-center justify-between space-y-0"><CardTitle className="text-sm">{editing ? 'Edit asset' : 'New asset'}</CardTitle><Button size="sm" variant="ghost" onClick={onCancel} aria-label="Close"><X size={16} /></Button></CardHeader><CardContent className="space-y-3">
     <div className="grid grid-cols-4 gap-3"><Field label="Name *"><Input autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field><Field label="Primary network"><NetworkSelect value={form.networkId} networks={networks} onChange={(networkId) => setForm({ ...form, networkId })} /></Field>
       <Field label="IP address"><Input value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} /></Field><Field label="MAC address"><Input value={form.macAddress} onChange={(e) => setForm({ ...form, macAddress: e.target.value })} /></Field></div>
-    <div className="grid grid-cols-5 gap-3"><Field label="Type"><Select value={form.assetType} onValueChange={(assetType) => setForm({ ...form, assetType })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['workstation','server','vm','mobile','laptop','router','switch','other'].map((type) => <SelectItem key={type} value={type}>{type}</SelectItem>)}</SelectContent></Select></Field>
+    <div className="grid grid-cols-5 gap-3"><Field label="Type"><Select value={form.assetType} onValueChange={(assetType) => setForm({ ...form, assetType })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{ASSET_TYPES.map((type) => <SelectItem key={type} value={type}>{type}</SelectItem>)}</SelectContent></Select></Field>
       <Field label="OS"><Input value={form.os} onChange={(e) => setForm({ ...form, os: e.target.value })} /></Field><Field label="User / owner"><Input value={form.userName} onChange={(e) => setForm({ ...form, userName: e.target.value })} /></Field>
       <Field label="Compromise"><Select value={form.compromiseStatus} onValueChange={(compromiseStatus: CompromiseStatus) => setForm({ ...form, compromiseStatus })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['unknown','clean','suspected','infected'].map((value) => <SelectItem key={value} value={value}>{label(value)}</SelectItem>)}</SelectContent></Select></Field>
       <Field label="Investigation"><Select value={form.investigationStatus} onValueChange={(investigationStatus: InvestigationStatus) => setForm({ ...form, investigationStatus })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['not_started','in_progress','completed'].map((value) => <SelectItem key={value} value={value}>{label(value)}</SelectItem>)}</SelectContent></Select></Field></div>
-    <div className="grid grid-cols-2 gap-3"><Field label="Properties / findings"><Textarea rows={3} value={form.properties} onChange={(e) => setForm({ ...form, properties: e.target.value })} /></Field><Field label="Scan results (JSON)"><Textarea rows={3} value={form.scanResults} onChange={(e) => setForm({ ...form, scanResults: e.target.value })} /></Field></div>
+    <div className="grid grid-cols-2 gap-3"><Field label="Properties / findings"><Textarea rows={3} value={form.properties} onChange={(e) => setForm({ ...form, properties: e.target.value })} placeholder="Free text: who owns it, where it runs, what was found…" /></Field><Field label="Scan results (JSON)"><Textarea rows={3} value={form.scanResults} onChange={(e) => setForm({ ...form, scanResults: e.target.value })} /></Field></div>
     <div className="flex gap-2"><Button onClick={onSave} className="bg-cyan-600 hover:bg-cyan-700">Save</Button><Button variant="outline" onClick={onCancel}>Cancel</Button></div>
   </CardContent></Card>;
 }
@@ -267,7 +310,7 @@ function AssetRows(props: AssetRowsProps) {
   const { asset, interfaces, expanded } = props;
   const vmInventory = readStoredVmInventory(asset.properties);
   return <><TableRow className={asset.compromise_status === 'infected' ? 'bg-red-50' : asset.compromise_status === 'suspected' ? 'bg-amber-50' : ''}>
-    <TableCell><Button size="sm" variant="ghost" onClick={props.onToggle}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</Button></TableCell><TableCell className="font-medium">{asset.name}<div className="text-xs text-slate-400">{asset.user_name}</div></TableCell><TableCell>{asset.network_name || 'Unassigned'}</TableCell><TableCell className="font-mono text-xs">{asset.ip_address || '—'}</TableCell><TableCell><Badge variant="outline">{asset.asset_type}</Badge><div className="mt-1 text-xs text-slate-500">{asset.os}</div></TableCell>
+    <TableCell><Button size="sm" variant="ghost" onClick={props.onToggle}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</Button></TableCell><TableCell className="font-medium">{asset.name}<div className="text-xs text-slate-400">{asset.user_name}</div></TableCell><TableCell><NetworkPlacement networkId={asset.network_id} networkName={asset.network_name} ipAddress={asset.ip_address} networks={props.networks} /></TableCell><TableCell className="font-mono text-xs">{asset.ip_address || '—'}</TableCell><TableCell><Badge variant="outline">{asset.asset_type}</Badge><div className="mt-1 text-xs text-slate-500">{asset.os}</div></TableCell>
     <TableCell><StatusBadge value={asset.compromise_status} />{props.sightingCount > 0 && <span className="ml-1 rounded bg-red-600 px-1.5 py-0.5 text-xs text-white" title={`${props.sightingCount} IOC sighting(s) recorded on this asset`}>⚠{props.sightingCount}</span>}</TableCell><TableCell><StatusBadge value={asset.investigation_status} /></TableCell><TableCell>{interfaces.length}</TableCell><TableCell className="min-w-40"><QuickNoteCell entityType="asset" id={asset.id} note={asset.quick_note} onSaved={props.onNoteSaved} /></TableCell><TableCell><div className="flex"><Button size="sm" variant="ghost" onClick={props.onEdit}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={props.onDelete}><Trash2 size={14} className="text-red-500" /></Button></div></TableCell>
   </TableRow>{expanded && <TableRow><TableCell colSpan={10} className="bg-slate-50 p-4">
     {vmInventory && <div className="mb-4 rounded border border-violet-200 bg-violet-50 p-3">
@@ -282,9 +325,22 @@ function AssetRows(props: AssetRowsProps) {
       </div>
     </div>}
     <div className="mb-3 flex items-center justify-between"><h3 className="flex items-center gap-2 text-sm font-semibold"><Cable size={15} />Network interfaces</h3><Button size="sm" variant="outline" onClick={() => props.onBeginInterface()}><Plus size={14} className="mr-1" />Add NIC</Button></div>
-    <div className="grid gap-2">{interfaces.map((item) => <div key={item.id} className="flex items-center justify-between rounded border bg-white p-2 text-sm"><div className="flex items-center gap-3">{item.is_primary && <Star size={14} className="fill-amber-400 text-amber-500" />}<strong>{item.name}</strong><span>{item.network_name || 'Unassigned'}</span><code>{item.ip_address}</code><span className="text-slate-500">{item.mac_address}</span></div><div className="flex">{!item.is_primary && <Button size="sm" variant="ghost" onClick={() => props.onPrimary(item.id)} title="Make primary"><Star size={14} /></Button>}<Button size="sm" variant="ghost" onClick={() => props.onBeginInterface(item)}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={() => props.onDeleteInterface(item.id)}><Trash2 size={14} className="text-red-500" /></Button></div></div>)}</div>
+    <div className="grid gap-2">{interfaces.map((item) => <div key={item.id} className="flex items-center justify-between rounded border bg-white p-2 text-sm"><div className="flex items-center gap-3">{item.is_primary && <Star size={14} className="fill-amber-400 text-amber-500" />}<strong>{item.name}</strong><span><NetworkPlacement networkId={item.network_id} networkName={item.network_name} ipAddress={item.ip_address} networks={props.networks} /></span><code>{item.ip_address}</code><span className="text-slate-500">{item.mac_address}</span></div><div className="flex">{!item.is_primary && <Button size="sm" variant="ghost" onClick={() => props.onPrimary(item.id)} title="Make primary"><Star size={14} /></Button>}<Button size="sm" variant="ghost" onClick={() => props.onBeginInterface(item)}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={() => props.onDeleteInterface(item.id)}><Trash2 size={14} className="text-red-500" /></Button></div></div>)}</div>
     {props.showInterfaceForm && <div className="mt-3 grid grid-cols-6 items-end gap-2 rounded border bg-white p-3"><Field label="Name"><Input value={props.interfaceForm.name} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, name: e.target.value })} /></Field><Field label="Network"><NetworkSelect value={props.interfaceForm.networkId} networks={props.networks} onChange={(networkId) => props.setInterfaceForm({ ...props.interfaceForm, networkId })} /></Field><Field label="IP"><Input value={props.interfaceForm.ipAddress} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, ipAddress: e.target.value })} /></Field><Field label="MAC"><Input value={props.interfaceForm.macAddress} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, macAddress: e.target.value })} /></Field><label className="flex h-9 items-center gap-2"><input type="checkbox" checked={props.interfaceForm.isPrimary} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, isPrimary: e.target.checked })} />Primary</label><div className="flex gap-1"><Button size="sm" onClick={props.onSaveInterface}>Save</Button><Button size="sm" variant="outline" onClick={props.onCancelInterface}>Cancel</Button></div></div>}
   </TableCell></TableRow>}</>;
+}
+
+/**
+ * The assigned network, or, for an unassigned address that fits two or more
+ * equally specific subnets, how many candidates there are. The core never
+ * picks one of those automatically; the investigator sets it in Edit.
+ */
+function NetworkPlacement({ networkId, networkName, ipAddress, networks }: { networkId?: string; networkName?: string; ipAddress: string; networks: Network[] }) {
+  if (networkId) return <>{networkName || 'Unassigned'}</>;
+  const match = ipAddress ? matchNetworkForIp(networks, ipAddress) : null;
+  if (match?.kind !== 'ambiguous') return <>Unassigned</>;
+  const names = match.candidates.map((item) => item.name).join(', ');
+  return <>Unassigned <span className="ml-1 whitespace-nowrap rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800" title={`${ipAddress} fits ${names}. Choose the right network in Edit.`}>{match.candidates.length} candidate networks</span></>;
 }
 
 function Field({ label: text, children }: { label: string; children: React.ReactNode }) { return <div className="space-y-1"><Label>{text}</Label>{children}</div>; }

@@ -18,6 +18,7 @@ import {
   getObservedRevision, getServerState, getToken, invoke, isDesktop, logout, noteRevision,
   resetRevision, session, SESSION_EXPIRED_EVENT, setToken, type SessionPayload,
 } from '@/lib/api';
+import { draftScope, pruneDrafts } from '@/lib/drafts';
 import './App.css';
 
 const Dashboard = lazy(() => import('@/components/Dashboard'));
@@ -222,24 +223,34 @@ function App() {
   };
 
   const signedIn = Boolean(currentCase && currentExpert);
+  const caseId = currentCase?.id ?? null;
+
+  // Unsaved forms and pasted text are kept per case in memory while a view is
+  // off screen. Opening another case, locking, or ending the session forgets
+  // every other case's drafts.
+  useEffect(() => {
+    pruneDrafts(caseId);
+  }, [caseId]);
 
   // One route table for every shell. The chrome around it differs — a sidebar on
   // desktop and in the browser, a touch shell on Android — but which screen is
   // shown, and what it is given, never does.
   const viewContent = (
-    <Suspense fallback={<WorkspaceLoading />}>
-      {currentView === 'dashboard' && <Dashboard refreshTrigger={refreshTrigger} onCaseUpdated={() => void reloadCase()} />}
-      {currentView === 'networks' && <NetworkManager refreshTrigger={refreshTrigger} />}
-      {currentView === 'assets' && currentExpert && <AssetManager refreshTrigger={refreshTrigger} expert={currentExpert} />}
-      {currentView === 'topology' && <NetworkTopology refreshTrigger={refreshTrigger} />}
-      {currentView === 'investigation' && <InvestigationGraph refreshTrigger={refreshTrigger} />}
-      {currentView === 'timeline' && <TimelineView refreshTrigger={refreshTrigger} />}
-      {currentView === 'eventlogs' && <EventLogPanel refreshTrigger={refreshTrigger} onChanged={() => setRefreshTrigger((value) => value + 1)} />}
-      {currentView === 'iocs' && <IocManager refreshTrigger={refreshTrigger} />}
-      {currentView === 'notes' && <NoteManager refreshTrigger={refreshTrigger} />}
-      {currentView === 'activity' && <ActivityBoard refreshTrigger={refreshTrigger} />}
-      {currentView === 'export' && <ExportImport refreshTrigger={refreshTrigger} onImport={() => setRefreshTrigger((value) => value + 1)} />}
-    </Suspense>
+    <draftScope.Provider value={caseId ?? ''}>
+      <Suspense fallback={<WorkspaceLoading />}>
+        {currentView === 'dashboard' && <Dashboard refreshTrigger={refreshTrigger} onCaseUpdated={() => void reloadCase()} />}
+        {currentView === 'networks' && <NetworkManager refreshTrigger={refreshTrigger} />}
+        {currentView === 'assets' && currentExpert && <AssetManager refreshTrigger={refreshTrigger} expert={currentExpert} />}
+        {currentView === 'topology' && <NetworkTopology refreshTrigger={refreshTrigger} />}
+        {currentView === 'investigation' && <InvestigationGraph refreshTrigger={refreshTrigger} />}
+        {currentView === 'timeline' && <TimelineView refreshTrigger={refreshTrigger} />}
+        {currentView === 'eventlogs' && <EventLogPanel refreshTrigger={refreshTrigger} onChanged={() => setRefreshTrigger((value) => value + 1)} />}
+        {currentView === 'iocs' && <IocManager refreshTrigger={refreshTrigger} />}
+        {currentView === 'notes' && <NoteManager refreshTrigger={refreshTrigger} />}
+        {currentView === 'activity' && <ActivityBoard refreshTrigger={refreshTrigger} />}
+        {currentView === 'export' && <ExportImport refreshTrigger={refreshTrigger} onImport={() => setRefreshTrigger((value) => value + 1)} />}
+      </Suspense>
+    </draftScope.Provider>
   );
 
   // Android keeps its own chrome: app-private case storage instead of a file
