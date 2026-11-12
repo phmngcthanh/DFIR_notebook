@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { downloadText, invoke, pickTextFile, session } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import {
   AlertTriangle, CheckCircle2, Clock3, Database, Download, GitCompare,
   FileOutput, History, LockKeyhole, Network, RefreshCw, Trash2, Upload, Users,
@@ -22,12 +23,19 @@ type ToggleState = Record<string, boolean>;
 type ResolutionState = Record<string, JsonValue>;
 
 const TOPOLOGY_ENTITIES = new Set(['network', 'asset', 'network_interface', 'firewall', 'firewall_interface', 'firewall_nat_rule', 'network_connection']);
+/** Wording of the core's stale-preview refusal (`STALE_PREVIEW_MESSAGE` in history.rs). */
+const STALE_PREVIEW_MARKER = 'changed after this bundle was previewed';
+/** Joined display names that move when another record is renamed; mirrors `ignored_derived_field`. */
+const DERIVED_FIELDS = new Set(['network_name', 'asset_name', 'source_network_name', 'target_network_name']);
 
 export default function ExportImport({ refreshTrigger, onImport }: Props) {
-  const [previews, setPreviews] = useState<MergePreview[]>([]);
-  const [selected, setSelected] = useState<ToggleState>({});
-  const [resolutions, setResolutions] = useState<ResolutionState>({});
-  const [resolvedFields, setResolvedFields] = useState<Record<string, string[]>>({});
+  // Loaded bundles and the team's half-made decisions survive switching
+  // screens. The core still refuses to apply a decision whose record changed
+  // after the preview, so a restored review can never overwrite newer work.
+  const [previews, setPreviews] = useDraft<MergePreview[]>('transfer.previews', []);
+  const [selected, setSelected] = useDraft<ToggleState>('transfer.selected', {});
+  const [resolutions, setResolutions] = useDraft<ResolutionState>('transfer.resolutions', {});
+  const [resolvedFields, setResolvedFields] = useDraft<Record<string, string[]>>('transfer.resolvedFields', {});
   const [history, setHistory] = useState<HistoryCommit[]>([]);
   const [importSummary, setImportSummary] = useState<ImportSummary | null>(null);
   const [busy, setBusy] = useState(false);
@@ -45,6 +53,48 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
   }, []);
 
   useEffect(() => { void loadHistory(); }, [loadHistory, refreshTrigger]);
+
+  // Re-read a pending bundle against the case as it is now. Decisions are kept
+  // for records nobody has touched since; a record that moved goes back to its
+  // default selection with its manual choices cleared, so it is reviewed again.
+  const refreshPreview = useCallback(async (previous: MergePreview): Promise<void> => {
+    const response = await invoke<ApiResponse<MergePreview>>('refresh_pending_change_bundle', { bundleId: previous.bundle_id });
+    if (!response.success || !response.data) {
+      setPreviews((current) => current.filter((item) => item.bundle_id !== previous.bundle_id));
+      toast.info(`The bundle from ${previous.exported_by} is no longer loaded on this case. Load it again to review it.`);
+      return;
+    }
+    const fresh = response.data;
+    const earlier = new Map(previous.changes.map((change) => [change.id, change]));
+    const moved = new Set(fresh.changes
+      .filter((change) => {
+        const before = earlier.get(change.id);
+        return !before || before.classification !== change.classification || comparableJson(before.local) !== comparableJson(change.local);
+      })
+      .map((change) => changeKey(fresh, change)));
+    const keys = fresh.changes.map((change) => changeKey(fresh, change));
+    setPreviews((current) => current.map((item) => (item.bundle_id === fresh.bundle_id ? fresh : item)));
+    setSelected((current) => {
+      const next = { ...current };
+      for (const [index, change] of fresh.changes.entries()) {
+        const key = keys[index];
+        if (moved.has(key) || !(key in next)) next[key] = defaultSelected(change);
+      }
+      return next;
+    });
+    const forgetMoved = <T,>(current: Record<string, T>) => Object.fromEntries(Object.entries(current).filter(([key]) => !moved.has(key)));
+    setResolutions(forgetMoved);
+    setResolvedFields(forgetMoved);
+  }, [setPreviews, setSelected, setResolutions, setResolvedFields]);
+
+  // Bundles restored from a draft were previewed before this screen was left;
+  // check them against the case once when it opens again.
+  const restoredChecked = useRef(false);
+  useEffect(() => {
+    if (restoredChecked.current) return;
+    restoredChecked.current = true;
+    for (const preview of previews) void refreshPreview(preview).catch((reason) => toast.error(String(reason)));
+  }, [previews, refreshPreview]);
 
   const addPreview = (preview: MergePreview) => {
     setPreviews((current) => [...current.filter((item) => item.bundle_id !== preview.bundle_id), preview]);
@@ -79,9 +129,9 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
       const password = selectedExportPassword(encryptExports, exportPassword, exportPasswordConfirmation);
       const response = await invoke<ApiResponse<string>>('export_case_json', { password });
       if (!response.success || response.data === undefined) throw new Error(response.error || 'Export failed');
-      downloadText(password ? 'case-backup.dfirx' : 'case-backup.json', response.data);
+      await downloadText(password ? 'case-snapshot.dfirx' : 'case-snapshot.json', response.data);
       setExportPassword(''); setExportPasswordConfirmation('');
-      toast.success('Case snapshot downloaded');
+      toast.success('Case data snapshot saved');
     } catch (reason) { toast.error(String(reason)); }
     finally { setBusy(false); }
   };
@@ -107,9 +157,9 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
       if (!file) return;
       const response = await invoke<ApiResponse<string>>('render_export_report', { contents: file.text, password: importPassword || null });
       if (!response.success || response.data === undefined) throw new Error(response.error || 'Could not render export as text');
-      downloadText('dfir-export-report.txt', response.data);
+      await downloadText('dfir-readable-report.txt', response.data);
       setImportPassword('');
-      toast.success('Plain-text report downloaded');
+      toast.success('Readable report saved');
     } catch (reason) { toast.error(String(reason)); }
     finally { setBusy(false); }
   };
@@ -166,7 +216,16 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
       onImport();
       await loadHistory();
       await refreshRemaining(preview.bundle_id);
-    } catch (reason) { toast.error(String(reason)); }
+    } catch (reason) {
+      const message = String(reason);
+      toast.error(message);
+      if (message.includes(STALE_PREVIEW_MARKER)) {
+        try {
+          await refreshPreview(preview);
+          toast.info('Preview refreshed. Records that changed since are back to their default selection; review them before applying.');
+        } catch (refreshReason) { toast.error(String(refreshReason)); }
+      }
+    }
     finally { setBusy(false); }
   };
 
@@ -197,11 +256,7 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
   };
 
   const refreshRemaining = async (appliedBundleId: string) => {
-    const remaining = previews.filter((item) => item.bundle_id !== appliedBundleId);
-    for (const item of remaining) {
-      const response = await invoke<ApiResponse<MergePreview>>('refresh_pending_change_bundle', { bundleId: item.bundle_id });
-      if (response.success && response.data) addPreview(response.data);
-    }
+    for (const item of previews.filter((value) => value.bundle_id !== appliedBundleId)) await refreshPreview(item);
   };
 
   const discard = async (preview: MergePreview) => {
@@ -219,7 +274,7 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><GitCompare className="text-cyan-600" />{session.hasSessions ? 'Case Transfer' : 'Expert Merge'}</h2>
           <p className="mt-1 max-w-3xl text-sm text-slate-500">{session.hasSessions
-            ? "Everyone on this server edits the same case, so routine work needs no merging. Use this page to take a backup out, bring an offline expert's bundle in, and read the audit history."
+            ? "Everyone on this server edits the same case, so routine work needs no merging. Use this page to take a data snapshot out, bring an offline expert's bundle in, and read the audit history."
             : 'Review attributed changes against the shared case baseline. Scope is advisory; every accepted edit remains visible in history.'}</p></div>
         <Badge variant="outline">{pendingCount} pending changes</Badge>
       </div>
@@ -240,10 +295,10 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
 
       <div className="grid gap-4 lg:grid-cols-3 xl:grid-cols-5">
         {!session.hasSessions && <ActionCard icon={<Download />} title="Export my changes" description="Save a plain JSON or encrypted portable change bundle since the shared baseline." action="Save change bundle" disabled={busy} onClick={() => void saveChangeBundle()} />}
-        <ActionCard icon={<Database />} title="Backup snapshot" description={session.hasSessions ? 'Download the full case as interoperable JSON or an encrypted portable export.' : 'Save the full case as interoperable JSON or an encrypted portable export.'} action={session.hasSessions ? 'Download snapshot' : 'Save snapshot'} disabled={busy} onClick={() => void saveSnapshot()} />
+        <ActionCard icon={<Database />} title="Data snapshot" description="Case records as JSON or encrypted .dfirx. Not a full backup: leaves out change history, saved topology layouts, and raw event logs, and imports back only into this same case." action={session.hasSessions ? 'Download snapshot' : 'Save snapshot'} disabled={busy} onClick={() => void saveSnapshot()} />
         <ActionCard icon={<Upload />} title="Review expert bundle" description="Load a plain or encrypted bundle from an expert who worked offline. Loading only creates a preview." action="Load for review" disabled={busy} onClick={() => void loadBundle()} />
         <ActionCard icon={<Database />} title="Add-only snapshot import" description="Password-aware path: add missing UUIDs only. For selective sections or overwrites, use Plain structured partial import above." action="Import add-only" disabled={busy} onClick={() => void loadLegacySnapshot()} />
-        <ActionCard icon={<FileOutput />} title="Text parser" description="Read a snapshot or change bundle and save a display-only plain-text report. The case is not changed." action="Create text report" disabled={busy} onClick={() => void saveTextReport()} />
+        <ActionCard icon={<FileOutput />} title="Export readable report" description="Turn a snapshot or change bundle file into a plain-text report anyone can read. The case is not changed." action="Create report" disabled={busy} onClick={() => void saveTextReport()} />
       </div>
 
       {importSummary && <ImportSummaryPanel summary={importSummary} onClose={() => setImportSummary(null)} />}
@@ -363,6 +418,7 @@ function ClassificationBadge({ value }: { value: string }) { const label = value
 function operationColor(operation: string) { return operation === 'create' ? 'border-emerald-500 bg-emerald-50' : operation === 'delete' ? 'border-red-500 bg-red-50' : 'border-amber-500 bg-amber-50'; }
 function defaultSelected(change: MergePreviewChange) { return change.classification === 'clean' || change.classification === 'auto_mergeable'; }
 function changeKey(preview: MergePreview, change: MergePreviewChange) { return `${preview.bundle_id}:${change.id}`; }
+function comparableJson(value: JsonValue | undefined) { return JSON.stringify(isObject(value) ? Object.fromEntries(Object.entries(value).filter(([key]) => !DERIVED_FIELDS.has(key))) : value ?? null); }
 function humanEntity(value: string) { return value.replaceAll('_', ' '); }
 function localTime(value: string) { const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : date.toLocaleString(); }
 function isObject(value: JsonValue | undefined): value is Record<string, JsonValue> { return Boolean(value) && typeof value === 'object' && !Array.isArray(value); }

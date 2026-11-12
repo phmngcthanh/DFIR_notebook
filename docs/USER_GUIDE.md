@@ -112,25 +112,29 @@ This makes assumptions about routing and control points visible to the team rath
 
 ### Step 3: Register computers and their current status
 
-Open **Assets** and add each workstation, server, VM, appliance, or other system. Record:
+Open **Assets** and add each workstation, server, VM, mobile device, firewall, appliance, or other system. Record:
 
 - primary network, IP, and MAC;
 - operating system and observed user;
 - compromise status: `unknown`, `clean`, `suspected`, or `infected`;
 - investigation status: `not started`, `in progress`, or `completed`;
-- optional JSON properties and scan results.
+- free-text properties/findings (who owns it, where it runs, what was found) and optional JSON scan results.
 
 Use the status filters to identify systems that have not been started or completed. This list should drive physical or remote responder assignments and reduce duplicate visits.
 
-To seed the asset list from virtualization infrastructure, select **Import VM inventory**:
+An address joins the single most specific network whose subnet contains it. When two or more equally specific networks fit (for example two isolated sites that both use `10.0.0.0/24`) the app does not guess: the asset stays unassigned and shows how many candidate networks fit. Choose the right one in **Edit**. The **Network** filter's **No network (unresolved)** option lists every asset still waiting for a network.
 
-1. choose VMware ESXi/vSphere, Proxmox VE, or Microsoft Hyper-V;
-2. enter a stable inventory scope such as an ESXi host, Proxmox cluster, or Hyper-V host;
+**Export list** saves the asset list exactly as filtered and sorted as CSV; **Copy list** puts it on the clipboard as tab-separated text for a spreadsheet, chat, or report. The timeline has the same two buttons.
+
+To add many assets at once, select **Paste / import assets**. The default source, **Pasted list**, takes hostnames, `name, ip, mac, os, type` lines, headered CSV, or `adb devices` output. For virtualization infrastructure:
+
+1. choose VMware ESXi/vSphere, Proxmox VE, or Microsoft Hyper-V as the source;
+2. enter a stable scope such as an ESXi host, Proxmox cluster, or Hyper-V host;
 3. select or paste the CSV, JSON, or supported native command output;
-4. select **Parse and review** and inspect create/update/invalid rows; and
+4. select **Parse and review** and inspect create/update/invalid rows and review points; and
 5. apply the reviewed records in one transaction.
 
-Imported guests are ordinary `vm` assets, not a separate inventory silo. Expand one to see its platform/native ID, host/node, runtime state, CPU, memory, disk, and imported NICs. Known IPv4 subnets are attached automatically; no new network is invented from an address alone. Re-imports preserve investigation/compromise state and reuse importer-managed identities. A VM missing from a later inventory is retained because absence from one export does not prove deletion. See [INPUT_FORMATS.md](INPUT_FORMATS.md#12-virtual-machine-inventories) for copy-ready vendor commands, field aliases, identity rules, and limitations.
+Imported guests are ordinary `vm` assets, not a separate inventory silo. Expand one to see its platform/native ID, host/node, runtime state, CPU, memory, disk, and imported NICs. An address attaches to an existing subnet only when exactly one is the most specific fit; ambiguous addresses are left unassigned and listed as review points. No new network is invented from an address alone. Re-imports preserve investigation/compromise state and reuse importer-managed identities. A VM missing from a later inventory is retained because absence from one export does not prove deletion. See [INPUT_FORMATS.md](INPUT_FORMATS.md#12-virtual-machine-inventories) for copy-ready vendor commands, field aliases, identity rules, and limitations.
 
 ### Step 4: Add every NIC
 
@@ -155,7 +159,7 @@ Select an imported router, switch, or firewall node to inspect its normalized in
 
 Use **Verify connect** for two separate jobs:
 
-1. **Compliance isolation** stores case-level assertions such as “Camera VLAN must have no physical path to Internet” or “DMZ must not have logical inbound reachability to Users.” Physical checks consider attachments and asserted links; logical checks consider imported routes, rule order, zones/interfaces, and NAT evidence. A confirmed violating path fails, an incomplete/symbolic path requires review, and no modeled path passes a blocked assertion.
+1. **Compliance isolation** stores case-level assertions such as “Camera VLAN must have no physical path to Internet” or “DMZ must not have logical inbound reachability to Users.” Physical checks consider attachments and asserted links; logical checks consider imported routes, rule order, zones/interfaces, and NAT evidence. A confirmed violating path fails and an incomplete/symbolic path requires review. Finding no path is only meaningful when the model knows the networks involved, so a blocked assertion passes only if every network it names is attached to an imported device configuration (or, for physical checks, a recorded link) and, for an Internet target, an Internet boundary is modeled. Otherwise the result is **insufficient evidence** and lists what is missing. A required connection that cannot be found is judged the same way.
 2. **Actual path analysis** enumerates up to 50 simple inbound/outbound logical paths from a selected VLAN/network to Internet or another network. Each hop shows the device and route/ACL/NAT evidence. Confirmed means the supported configuration supplied affirmative evidence; possible means unresolved named objects, missing filtering/NAT evidence, or a manually asserted connection still leaves the route plausible.
 
 Compliance policies are saved in the encrypted case metadata and recorded in history. They are not browser-local preferences.
@@ -232,6 +236,7 @@ Important safeguards:
 - Deleting an asset removes its interfaces but keeps timeline evidence and clears the event's asset link.
 - Updates or deletes that match no record return an error.
 - Multi-table changes and imports use SQLite transactions.
+- Unsaved input (an open form, pasted text, a loaded import or bundle review) stays on its screen while you visit other screens. It is kept in memory only, never written to disk until you save, and discarded when the case is locked, another case is opened, or the session ends. Passwords are never kept.
 
 ## 7. Working alongside the rest of the team
 
@@ -262,6 +267,12 @@ server, open **Case Transfer** and:
 Loading a bundle creates an in-memory preview only. Applying accepted changes is
 one transaction and adds a merge commit with both history parents.
 
+Applying first checks every selected record against the case. If anyone edited
+one of them after the preview was made, nothing is applied: the preview
+refreshes, records that changed go back to their default selection, and the team
+reviews them again. A loaded bundle and the choices made so far stay on the Case
+Transfer screen while you visit other screens.
+
 Classifications include:
 
 - **clean**: incoming change can be applied directly;
@@ -286,11 +297,13 @@ Use **Case Transfer → Plain structured partial import** when information comes
 
 Add-only retains current notes/timeline records and adds expert records with different UUIDs. Use incoming versions also updates matching UUIDs but never deletes unrelated local records. See [INPUT_FORMATS.md](INPUT_FORMATS.md) for the complete field contract and examples, and [PARTIAL_IMPORT.md](PARTIAL_IMPORT.md) for the review workflow.
 
-## 8. Snapshot backup and add-only import
+## 8. Data snapshot and add-only import
 
-**Download snapshot** exports the complete case structure to your browser's downloads. **Import add-only** accepts only a matching case ID, inserts missing UUID records, and skips existing UUIDs without overwriting them. The result shows inserted/skipped counts by entity.
+**Data snapshot → Download snapshot** exports the case's records to your browser's downloads: networks, assets and interfaces, firewalls with their interfaces and NAT rules, network connections, clock profiles, timeline events, IOCs and sightings, attack edges, notes, and saved investigation views. It is **not a full backup**: it leaves out the change history, saved topology layouts, and the raw event logs held in the event-log store, and it can be imported back only into the same case.
 
-The authoritative backup is the `.db` file itself, which the operator copies from the server's case directory.
+**Import add-only** accepts only a matching case ID, inserts missing UUID records, and skips existing UUIDs without overwriting them. The result shows inserted/skipped counts by entity.
+
+The authoritative backup is the `.db` file itself, plus its `.dfirlogs` event-log store when one exists, which the operator copies from the server's case directory.
 
 
 ## 9. Plain and encrypted portable files
@@ -320,12 +333,12 @@ Wrong passwords and changed files fail authenticated decryption. Share the passw
 
 See `PORTABLE_EXPORT_FORMAT.md` for implementation details needed by another language.
 
-## 10. Text parser
+## 10. Export readable report
 
-The **Text parser** converts either a snapshot or expert change bundle into a human-readable `.txt` report.
+**Export readable report** converts either a snapshot or expert change bundle into a human-readable `.txt` report.
 
 1. For an encrypted input, enter its password under **Import / decrypt password**. Leave blank for plain JSON.
-2. Select **Create text report**.
+2. Select **Create report**.
 3. Choose the `.json` or `.dfirx` input. Your browser saves the `.txt` report to its downloads folder.
 
 The parser does not open or modify a case database. The output text is display-only and cannot be imported back into the application.

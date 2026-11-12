@@ -114,7 +114,8 @@ All DDL and migrations live in `db.rs`; current schema version is tracked via `P
 `cases`, `networks`, `assets`, `network_interfaces`, `network_connections`, `firewalls`, `firewall_interfaces`, `firewall_nat_rules`, `clock_profiles`, `timeline_events`, `notes`, `iocs`, `topology_views`, plus history tables (`history_commits`, `history_commit_parents`, `history_changes`, `history_entity_heads`, `history_state`).
 
 - Case files live wherever the user chose in the native Save dialog (not a fixed app-data dir).
-- `properties`/`scan_results`/`rules` are JSON strings in TEXT columns.
+- `scan_results`/`rules` are JSON strings in TEXT columns; asset `properties` is JSON (VM inventory, device configuration) or plain free text, so readers must tolerate both.
+- Auto-linking an endpoint to a network by IP (`match_network_for_ip` in `db.rs`, mirrored by `src/lib/subnet-match.ts`) picks the single most specific subnet; equally specific candidates leave it unassigned. Never reintroduce a "first created wins" tie-break.
 - UUIDs (`uuid::Uuid::new_v4()`) for all entity IDs, generated in Rust.
 - Legacy snapshot import uses `INSERT OR IGNORE` (duplicate IDs skipped, never overwritten); expert-merge and partial-import paths are transactional with per-field conflict handling.
 - Foreign keys and a 5-second busy timeout are enabled on every connection.
@@ -135,6 +136,8 @@ All DDL and migrations live in `db.rs`; current schema version is tracked via `P
 ## Code Style
 
 - **Frontend:** functional components, default exports for features; `@/` imports; Tailwind + `cn()`; local state via `useState`/`useEffect` with a `refreshTrigger` counter prop for re-fetch signaling; errors surfaced with sonner `toast.error`.
+- **Unsaved input** (open forms, pasted text, pending import/merge reviews) uses `useDraft` from `src/lib/drafts.ts` instead of `useState`, so it survives switching screens. Drafts are in memory only, scoped to the open case, and pruned when it changes; never put a password in a draft.
+- **Merge apply** refuses any selected record that changed after its preview (`STALE_PREVIEW_MESSAGE` in `history.rs`); the Case Transfer screen refreshes the preview when it sees that message.
 - **Server:** snake_case command names matching the desktop ones; DB access only through `OpenCase::with_conn`; no `unwrap()` in request paths; multi-step writes always inside `conn.transaction()` with a history commit recorded in the same transaction. Adding a command means adding one `match` arm and one params struct with `#[serde(rename_all = "camelCase")]`.
 
 ## Development Notes

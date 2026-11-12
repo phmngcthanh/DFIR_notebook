@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { downloadBytes, downloadText, invoke } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import CytoscapeComponent from 'react-cytoscapejs';
 import type cytoscape from 'cytoscape';
 import { Brain, Download, FileDown, FileUp, GitGraph, Maximize2, RefreshCw, RotateCcw, Save, SearchCheck, ZoomIn, ZoomOut } from 'lucide-react';
@@ -83,8 +84,8 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
   const [saving, setSaving] = useState(false);
   const [viewDirty, setViewDirty] = useState(false);
   const [hasSavedView, setHasSavedView] = useState(false);
-  const [showImporter, setShowImporter] = useState(false);
-  const [showVerifier, setShowVerifier] = useState(false);
+  const [showImporter, setShowImporter] = useDraft('topology.showImporter', false);
+  const [showVerifier, setShowVerifier] = useDraft('topology.showVerifier', false);
   const [infrastructureOnly, setInfrastructureOnly] = useState(false);
 
   const loadData = useCallback(async () => {
@@ -353,8 +354,8 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
         <Button size="sm" variant="outline" title="Fit topology" aria-label="Fit topology" onClick={fitView}><Maximize2 size={16} /></Button>
         <Button size="sm" variant="outline" title="Reset automatic layout" aria-label="Reset automatic layout" onClick={resetAutomaticLayout}><RotateCcw size={16} /></Button>
         <Button size="sm" variant="outline" title="Export PNG" aria-label="Export PNG" onClick={exportPng}><Download size={16} /></Button>
-        <Button size="sm" variant="outline" title="Export editable draw.io diagram" aria-label="Export draw.io diagram" onClick={() => void exportDrawio()} disabled={elements.length === 0}><FileDown size={16} /></Button>
-        <Button size="sm" variant="outline" title="Export XMind mindmap (subnet → devices)" aria-label="Export XMind mindmap" onClick={() => void exportXmind()} disabled={elements.length === 0}><Brain size={16} /></Button>
+        <Button size="sm" variant="outline" title="Export an editable draw.io diagram (opens in diagrams.net)" aria-label="Export draw.io diagram" onClick={() => void exportDrawio()} disabled={elements.length === 0}><FileDown size={16} />draw.io</Button>
+        <Button size="sm" variant="outline" title="Export an XMind mindmap grouped by subnet" aria-label="Export XMind mindmap" onClick={() => void exportXmind()} disabled={elements.length === 0}><Brain size={16} />XMind</Button>
         <Button size="sm" variant="outline" title="Reload topology data" aria-label="Reload topology data" onClick={() => void loadData()} disabled={loading}><RefreshCw size={16} className={loading ? 'animate-spin' : ''} /></Button>
         <Button size="sm" title="Save positions and camera" onClick={() => void saveView()} disabled={saving || elements.length === 0}><Save size={16} />{saving ? 'Saving…' : 'Save view'}</Button>
       </div>

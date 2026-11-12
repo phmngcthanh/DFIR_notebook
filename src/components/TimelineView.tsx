@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@/lib/api';
+import { downloadText, invoke } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
+import { copyText, exportFileName, toCsv, toTsv, type ListTable } from '@/lib/list-export';
 import { DataSet } from 'vis-data';
 import { Timeline as VisTimeline } from 'vis-timeline';
-import { Clock, Pencil, Plus, Search, ServerCog, Trash2 } from 'lucide-react';
+import { Clock, Copy, Download, Pencil, Plus, Search, ServerCog, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -61,10 +63,11 @@ export default function TimelineView({ refreshTrigger }: Props) {
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [profiles, setProfiles] = useState<ClockProfile[]>([]);
-  const [form, setForm] = useState<EventForm>(EMPTY_EVENT);
-  const [showForm, setShowForm] = useState(false);
-  const [showProfiles, setShowProfiles] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  // An event being written, and the clock-profile panel, survive switching screens.
+  const [form, setForm] = useDraft<EventForm>('timeline.form', EMPTY_EVENT);
+  const [showForm, setShowForm] = useDraft('timeline.showForm', false);
+  const [showProfiles, setShowProfiles] = useDraft('timeline.showProfiles', false);
+  const [editingId, setEditingId] = useDraft<string | null>('timeline.editingId', null);
   const [viewMode, setViewMode] = useState<'timeline' | 'table'>('table');
   const [displayTimezone, setDisplayTimezone] = useState(localTimezone);
   const [search, setSearch] = useState('');
@@ -133,6 +136,33 @@ export default function TimelineView({ refreshTrigger }: Props) {
     return () => { timelineInstance.current?.destroy(); timelineInstance.current = null; };
   }, [filteredEvents, viewMode, displayTimezone]);
 
+  // The list exactly as shown leaves the app as CSV or clipboard text, with the
+  // corrected time in the display zone, in UTC, and the raw server evidence time.
+  const visibleEventTable = (): ListTable => ({
+    header: [`Corrected time (${displayTimezone})`, 'Corrected time (UTC)', 'Server time (raw)', 'Server timezone', 'Asset', 'Type', 'Severity', 'Description', 'Source', 'MITRE tactic', 'MITRE technique', 'Clock correction'],
+    rows: filteredEvents.map((event) => [
+      event.timestamp ? formatInZone(event.timestamp, displayTimezone) : '',
+      event.timestamp, event.raw_timestamp, event.raw_timezone, event.asset_name, label(event.event_type), event.severity,
+      event.description, event.source, event.mitre_tactic, event.mitre_technique,
+      event.clock_offset_ms ? `${event.clock_profile_name || 'Direct comparison'} ${formatOffset(event.clock_offset_ms)}` : '',
+    ]),
+  });
+  const exportVisibleEvents = async () => {
+    if (!filteredEvents.length) { toast.info('No events in the current list'); return; }
+    try {
+      const caseResponse = await invoke<ApiResponse<{ name: string } | null>>('get_current_case_info');
+      await downloadText(exportFileName(caseResponse.data?.name, 'timeline', 'csv'), toCsv(visibleEventTable()));
+      toast.success(`Exported ${filteredEvents.length} event${filteredEvents.length === 1 ? '' : 's'} as CSV`);
+    } catch (reason) { toast.error(String(reason)); }
+  };
+  const copyVisibleEvents = async () => {
+    if (!filteredEvents.length) { toast.info('No events in the current list'); return; }
+    try {
+      await copyText(toTsv(visibleEventTable()));
+      toast.success(`Copied ${filteredEvents.length} event${filteredEvents.length === 1 ? '' : 's'}; paste into a spreadsheet or report`);
+    } catch (reason) { toast.error(`Could not copy: ${String(reason)}`); }
+  };
+
   const resetForm = () => { setForm(EMPTY_EVENT); setEditingId(null); setShowForm(false); };
   const startEdit = (event: TimelineEvent) => {
     setEditingId(event.id);
@@ -196,6 +226,10 @@ export default function TimelineView({ refreshTrigger }: Props) {
       <div className="flex flex-wrap items-end gap-3">
         <TimezoneField labelText="Display / filter timezone" value={displayTimezone} onChange={setDisplayTimezone} className="w-72" />
         <p className="pb-2 text-xs text-slate-500">24-hour display: DD-MM-YYYY HH:mm:ss.SSS. UTC is always shown beside the selected zone.</p>
+        <div className="ml-auto flex gap-2 pb-0.5">
+          <Button variant="outline" size="sm" onClick={() => void exportVisibleEvents()} disabled={filteredEvents.length === 0} title="Download the events in this list, as filtered, as CSV"><Download size={14} className="mr-1" />Export list</Button>
+          <Button variant="outline" size="sm" onClick={() => void copyVisibleEvents()} disabled={filteredEvents.length === 0} title="Copy the events in this list as tab-separated text"><Copy size={14} className="mr-1" />Copy list</Button>
+        </div>
       </div>
       {(fromPreview.error || toPreview.error) && <p className="text-xs text-red-600">Filter time: {fromPreview.error || toPreview.error}</p>}
     </CardContent></Card>
@@ -265,8 +299,8 @@ function EventEditor({ form, setForm, assets, profiles, editing, onSave, onCance
 }
 
 function ClockProfileManager({ profiles, onChanged }: { profiles: ClockProfile[]; onChanged: () => Promise<void> }) {
-  const [form, setForm] = useState<ProfileForm>(EMPTY_PROFILE);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useDraft<ProfileForm>('timeline.clockProfileForm', EMPTY_PROFILE);
+  const [editingId, setEditingId] = useDraft<string | null>('timeline.clockProfileEditingId', null);
   const serverPreview = useTimestampPreview(form.serverReferenceRaw, form.serverTimezone, 0);
   const correctPreview = useTimestampPreview(form.correctReferenceRaw, form.correctTimezone, 0);
   const calculatedOffset = serverPreview.value && correctPreview.value

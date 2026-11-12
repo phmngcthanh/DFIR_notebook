@@ -6,7 +6,7 @@ Last reviewed: 2026-07-18
 
 ## 1. Scope
 
-The Text parser is a read-only presentation tool. It converts a supported DFIR snapshot or expert change bundle into a human-readable plain-text file so findings can be displayed, reviewed, printed by another tool, or shared with personnel who do not run the application.
+The Text parser (shown in the app as **Case Transfer → Export readable report**) is a read-only presentation tool. It converts a supported DFIR snapshot or expert change bundle into a human-readable plain-text file so findings can be displayed, reviewed, printed by another tool, or shared with personnel who do not run the application.
 
 It is intentionally not:
 

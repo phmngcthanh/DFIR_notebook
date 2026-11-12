@@ -698,6 +698,40 @@ pub fn apply_bundle(
         });
     }
     let tx = conn.transaction().map_err(|e| e.to_string())?;
+    // Every decision was made against the record as it stood at preview time.
+    // If anyone has edited a selected record since, applying the reviewed
+    // value would silently overwrite that edit, so the whole merge stops
+    // before writing anything and asks for a fresh review.
+    let mut stale = Vec::new();
+    for (change, resolved) in &selected {
+        let current = comparable(&get_entity_json(&tx, &change.entity_type, &change.entity_id)?);
+        if current == comparable(resolved) {
+            continue;
+        }
+        if current != comparable(&change.local) {
+            stale.push(format!(
+                "{} {}",
+                change.entity_type.replace('_', " "),
+                preview_change_label(change)
+            ));
+        }
+    }
+    if !stale.is_empty() {
+        let shown = stale.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+        let more = if stale.len() > 5 {
+            format!(" and {} more", stale.len() - 5)
+        } else {
+            String::new()
+        };
+        return Err(format!(
+            "{} {STALE_PREVIEW_MESSAGE}: {shown}{more}. Nothing was applied; refresh the preview and review those records again.",
+            if stale.len() == 1 {
+                "1 reviewed record".to_string()
+            } else {
+                format!("{} reviewed records", stale.len())
+            }
+        ));
+    }
     let mut local_changes = Vec::new();
     let mut interface_asset_before: HashMap<String, Option<Value>> = HashMap::new();
     let mut interface_firewall_before: HashMap<String, Option<Value>> = HashMap::new();
@@ -823,6 +857,42 @@ pub fn apply_bundle(
     })
 }
 
+/// Shared wording of the stale-preview refusal. The review screen looks for it
+/// to know that refreshing the preview is the way forward.
+pub const STALE_PREVIEW_MESSAGE: &str = "changed after this bundle was previewed";
+
+/// A record as compared for staleness. Joined display names (a network's name
+/// shown on an asset, say) move when a *different* record is renamed, so they
+/// never make a reviewed record stale on their own.
+fn comparable(value: &Option<Value>) -> Option<Value> {
+    value.as_ref().map(|value| match value.as_object() {
+        Some(object) => Value::Object(
+            object
+                .iter()
+                .filter(|(key, _)| !ignored_derived_field(key))
+                .map(|(key, field)| (key.clone(), field.clone()))
+                .collect(),
+        ),
+        None => value.clone(),
+    })
+}
+
+fn preview_change_label(change: &MergePreviewChange) -> String {
+    for value in [&change.local, &change.incoming, &change.before]
+        .into_iter()
+        .flatten()
+    {
+        for key in ["name", "title", "value", "ip_address"] {
+            if let Some(text) = value.get(key).and_then(Value::as_str) {
+                if !text.trim().is_empty() {
+                    return format!("'{}'", text.trim());
+                }
+            }
+        }
+    }
+    format!("'{}'", change.entity_id)
+}
+
 fn interface_asset_ids(current: &Option<Value>, resolved: &Option<Value>) -> Vec<String> {
     let mut ids = Vec::new();
     for value in [current, resolved].into_iter().flatten() {
@@ -877,7 +947,7 @@ mod tests {
     use super::*;
     use crate::db::{
         get_assets, get_network_interfaces, get_networks, init_database, initialize_history,
-        update_network, update_network_interface,
+        update_asset, update_network, update_network_interface,
     };
 
     fn actor(name: &str) -> ActorIdentity {
@@ -1113,5 +1183,115 @@ mod tests {
             .changes
             .iter()
             .any(|change| change.entity_type == "asset"));
+    }
+
+    #[test]
+    fn apply_refuses_records_edited_after_preview() {
+        let mut local = seeded_case();
+        let mut incoming = seeded_case();
+        let bob = actor("Bob");
+        let alice = actor("Alice");
+        update_network(
+            &mut incoming,
+            &bob,
+            "network-1",
+            "Shared",
+            "10.0.0.0/24",
+            "LAN",
+            "Bob's finding",
+            None,
+        )
+        .unwrap();
+        let bundle = export_change_bundle(&incoming, &bob).unwrap();
+        let preview = preview_bundle(&local, &bundle).unwrap();
+        assert_eq!(preview.changes[0].classification, "clean");
+        let decision = MergeDecision {
+            change_id: preview.changes[0].id.clone(),
+            selected: true,
+            resolved_after: None,
+        };
+
+        // Alice edits the same record after the team reviewed the bundle.
+        update_network(
+            &mut local,
+            &alice,
+            "network-1",
+            "Alice rename",
+            "10.0.0.0/24",
+            "LAN",
+            "Base description",
+            None,
+        )
+        .unwrap();
+        let head_before = get_history(&local, 1).unwrap()[0].id.clone();
+        let error =
+            apply_bundle(&mut local, &alice, &bundle, &preview, &[decision.clone()]).unwrap_err();
+        assert!(error.contains(STALE_PREVIEW_MESSAGE), "{error}");
+        assert!(error.contains("network 'Shared'"), "{error}");
+        let network = get_networks(&local).unwrap().pop().unwrap();
+        assert_eq!(network.name, "Alice rename");
+        assert_eq!(network.description, "Base description");
+        assert_eq!(get_history(&local, 1).unwrap()[0].id, head_before);
+
+        // A refreshed preview keeps Alice's edit and still merges Bob's.
+        let refreshed = preview_bundle(&local, &bundle).unwrap();
+        assert_eq!(refreshed.changes[0].classification, "auto_mergeable");
+        apply_bundle(&mut local, &alice, &bundle, &refreshed, &[decision]).unwrap();
+        let merged = get_networks(&local).unwrap().pop().unwrap();
+        assert_eq!(merged.name, "Alice rename");
+        assert_eq!(merged.description, "Bob's finding");
+    }
+
+    #[test]
+    fn renaming_a_linked_network_does_not_make_an_asset_decision_stale() {
+        let mut local = seeded_asset_case();
+        let mut incoming = seeded_asset_case();
+        let bob = actor("Bob");
+        let alice = actor("Alice");
+        update_asset(
+            &mut incoming,
+            &bob,
+            "asset-1",
+            Some("network-1"),
+            "PC",
+            "10.0.0.5",
+            None,
+            "workstation",
+            Some("Windows 11"),
+            None,
+            "unknown",
+            "in_progress",
+            None,
+            None,
+        )
+        .unwrap();
+        let bundle = export_change_bundle(&incoming, &bob).unwrap();
+        let preview = preview_bundle(&local, &bundle).unwrap();
+        let decisions: Vec<MergeDecision> = preview
+            .changes
+            .iter()
+            .map(|change| MergeDecision {
+                change_id: change.id.clone(),
+                selected: change.entity_type == "asset",
+                resolved_after: None,
+            })
+            .collect();
+
+        // Only the joined network name on the asset moves.
+        update_network(
+            &mut local,
+            &alice,
+            "network-1",
+            "Office floor 2",
+            "10.0.0.0/24",
+            "LAN",
+            "Base description",
+            None,
+        )
+        .unwrap();
+        apply_bundle(&mut local, &alice, &bundle, &preview, &decisions).unwrap();
+        let asset = &get_assets(&local).unwrap()[0];
+        assert_eq!(asset.os.as_deref(), Some("Windows 11"));
+        assert_eq!(asset.network_name.as_deref(), Some("Office floor 2"));
     }
 }

@@ -191,8 +191,11 @@ An investigator can use the application to:
 
 - create, unlock, rekey, lock, and reopen encrypted case databases;
 - record networks, endpoints, multi-homed interfaces, firewalls, NAT, and asserted connectivity;
-- import Palo Alto, OPNsense, Juniper, OpenWrt, and Cisco device configurations through six initial role profiles;
+- leave the zone unset on an endpoint or interface and have it follow its IP: it joins the most specific subnet containing the address when recorded, and endpoints recorded before their subnet link to it automatically once the subnet is created or corrected (explicit assignments are never overridden);
+- jot a quick note directly on any asset, subnet, or firewall row — attributed in history and carried through snapshots, expert merges, and partial imports like any other field;
+- import Palo Alto, OPNsense, Juniper, FortiGate (FortiOS CLI backups, including multi-VDOM), OpenWrt, and Cisco device configurations through seven initial role profiles;
 - import ESXi/vSphere, Proxmox VE, and Hyper-V VM lists, plus generic batch device lists and `adb devices` output (mobile and PC/other-OS guests) from supported native text, JSON, or CSV into Assets and PC Configuration;
+- export the imported VM inventory as an XMind mindmap with VMs sorted and grouped under their hypervisor host;
 - track compromise and investigation status across the asset inventory;
 - sort the asset inventory by any table column, including numeric ordering of IPv4 addresses;
 - visualize topology with multiple layouts — hierarchical, grid, circle, concentric, breadth-first, and a radial mindmap that fans subnets out around the case hub — and export it as PNG, an editable draw.io diagram, or an XMind mindmap grouped by subnet;
@@ -217,7 +220,7 @@ The repository currently includes:
 
 - strict TypeScript production compilation;
 - ESLint and Vitest tooling;
-- 86 frontend behavioral and domain tests;
+- 94 frontend behavioral and domain tests;
 - 51 Rust unit and integration-style tests in the shared core/server suite;
 - SQLCipher creation, wrong-password, rekey, and migration tests;
 - cryptographic round-trip and modification-detection tests;

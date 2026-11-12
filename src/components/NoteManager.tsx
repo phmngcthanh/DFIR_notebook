@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { invoke } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import { Eye, FileText, Pencil, Plus, Save, Search, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -13,11 +14,12 @@ interface Props { refreshTrigger: number }
 
 export default function NoteManager({ refreshTrigger }: Props) {
   const [notes, setNotes] = useState<Note[]>([]);
-  const [showForm, setShowForm] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [title, setTitle] = useState('');
-  const [content, setContent] = useState('');
-  const [preview, setPreview] = useState(false);
+  // A note being written survives switching screens.
+  const [showForm, setShowForm] = useDraft('notes.showForm', false);
+  const [editingId, setEditingId] = useDraft<string | null>('notes.editingId', null);
+  const [title, setTitle] = useDraft('notes.title', '');
+  const [content, setContent] = useDraft('notes.content', '');
+  const [preview, setPreview] = useDraft('notes.preview', false);
   const [search, setSearch] = useState('');
 
   const loadNotes = useCallback(async () => {

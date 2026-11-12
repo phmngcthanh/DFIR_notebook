@@ -38,11 +38,11 @@ use crate::db::{
     get_investigation_views, get_ioc_sightings, get_iocs, get_network_connections,
     get_network_interfaces, get_networks, get_notes, get_timeline_events, get_topology_view,
     import_case_data, parse_timestamp_preview, save_investigation_view, save_topology_view,
-    set_primary_interface, update_asset, update_asset_suspicious, update_attack_edge, update_case,
-    update_clock_profile, update_firewall, update_firewall_interface, update_firewall_nat_rule,
-    update_ioc, update_ioc_sighting, update_network, update_network_connection,
-    update_network_interface, update_note, update_timeline_event, ExportData, Ioc,
-    TopologyNodePosition,
+    set_primary_interface, set_quick_note, update_asset, update_asset_suspicious,
+    update_attack_edge, update_case, update_clock_profile, update_firewall,
+    update_firewall_interface, update_firewall_nat_rule, update_ioc, update_ioc_sighting,
+    update_network, update_network_connection, update_network_interface, update_note,
+    update_timeline_event, ExportData, Ioc, TopologyNodePosition,
 };
 use crate::event_logs::{
     delete_batch, import_syslog_text, import_windows_json_text, list_batches, open_store,
@@ -61,7 +61,7 @@ use crate::secure_db::{
     open_encrypted_connection, rekey_connection, validate_database_password,
     verify_cipher_integrity,
 };
-use crate::state::{AppState, PendingBundle};
+use crate::state::{lock_recovered, AppState, PendingBundle};
 
 pub async fn dispatch(
     State(state): State<Arc<AppState>>,
@@ -76,7 +76,25 @@ pub async fn dispatch(
             .map_err(|error| format!("Invalid request body: {error}"))
     };
 
-    let outcome = args.and_then(|args| run(&state, &session, &command, args));
+    // Every command does blocking SQLCipher/SQLite work. Keep it off the async
+    // runtime workers so a heavy import cannot stall `/api/state` polls, and a
+    // JoinError (panic inside a command) becomes a normal error envelope
+    // instead of a dropped connection and a poisoned-lock case.
+    let worker_state = state.clone();
+    let worker_session = SessionContext {
+        token: session.token.clone(),
+        case: session.case.clone(),
+        actor: session.actor.clone(),
+    };
+    let outcome = match args {
+        Ok(args) => tokio::task::spawn_blocking(move || {
+            run(&worker_state, &worker_session, &command, args)
+        })
+        .await
+        .map_err(|join_error| format!("The command worker failed: {join_error}"))
+        .and_then(std::convert::identity),
+        Err(error) => Err(error),
+    };
     let payload = Json(match outcome {
         Ok(data) => json!({ "success": true, "data": data, "error": Value::Null }),
         Err(error) => json!({ "success": false, "data": Value::Null, "error": error }),
@@ -169,10 +187,7 @@ pub(crate) fn run(
             let sidecar = sidecar_path(&case.path);
             let mut sidecar_error: Option<String> = None;
             {
-                let mut guard = case
-                    .event_logs
-                    .lock()
-                    .map_err(|_| "Event-log store lock poisoned".to_string())?;
+                let mut guard = lock_recovered(&case.event_logs);
                 match guard.as_mut() {
                     Some(conn) => {
                         if let Err(error) = rekey_connection(conn, new.as_str()) {
@@ -211,10 +226,7 @@ pub(crate) fn run(
             let file_name = sidecar_path(&case.path)
                 .file_name()
                 .map(|name| name.to_string_lossy().to_string());
-            let guard = case
-                .event_logs
-                .lock()
-                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let guard = lock_recovered(&case.event_logs);
             let status = match guard.as_ref() {
                 Some(conn) => EventLogStoreStatus {
                     open: true,
@@ -236,10 +248,7 @@ pub(crate) fn run(
             open_encrypted_connection(&case.path, password.as_str())?;
             let conn = open_store(&case.path, password.as_str())?;
             let counts = store_counts(&conn)?;
-            let mut guard = case
-                .event_logs
-                .lock()
-                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let mut guard = lock_recovered(&case.event_logs);
             *guard = Some(conn);
             to_json(counts)
         }
@@ -251,10 +260,7 @@ pub(crate) fn run(
                 timezone: p.timezone.unwrap_or_else(|| "UTC".to_string()),
                 note: p.note,
             };
-            let mut guard = case
-                .event_logs
-                .lock()
-                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let mut guard = lock_recovered(&case.event_logs);
             let Some(conn) = guard.as_mut() else {
                 return Err("The event-log store is not open for this case".into());
             };
@@ -270,10 +276,7 @@ pub(crate) fn run(
             to_json(summary)
         }
         "list_event_log_batches" => {
-            let guard = case
-                .event_logs
-                .lock()
-                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let guard = lock_recovered(&case.event_logs);
             let Some(conn) = guard.as_ref() else {
                 return Err("The event-log store is not open for this case".into());
             };
@@ -291,10 +294,7 @@ pub(crate) fn run(
                 limit: p.limit,
                 offset: p.offset,
             };
-            let guard = case
-                .event_logs
-                .lock()
-                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let guard = lock_recovered(&case.event_logs);
             let Some(conn) = guard.as_ref() else {
                 return Err("The event-log store is not open for this case".into());
             };
@@ -302,10 +302,7 @@ pub(crate) fn run(
         }
         "delete_event_log_batch" => {
             let p: EventLogBatchParams = from_args(args)?;
-            let mut guard = case
-                .event_logs
-                .lock()
-                .map_err(|_| "Event-log store lock poisoned".to_string())?;
+            let mut guard = lock_recovered(&case.event_logs);
             let Some(conn) = guard.as_mut() else {
                 return Err("The event-log store is not open for this case".into());
             };
@@ -321,10 +318,7 @@ pub(crate) fn run(
             };
             // Case connection first, then the sidecar — same order as desktop.
             let value = case.with_conn(|conn| {
-                let guard = case
-                    .event_logs
-                    .lock()
-                    .map_err(|_| "Event-log store lock poisoned".to_string())?;
+                let guard = lock_recovered(&case.event_logs);
                 let Some(log_conn) = guard.as_ref() else {
                     return Err("The event-log store is not open for this case".into());
                 };
@@ -414,6 +408,10 @@ pub(crate) fn run(
         )),
         "set_asset_suspicious" => write_cmd!(SuspiciousParams, |conn, actor, p| {
             update_asset_suspicious(conn, actor, &p.id, p.suspicious).map(|_| true)
+        }),
+        "set_entity_quick_note" => write_cmd!(QuickNoteParams, |conn, actor, p| {
+            set_quick_note(conn, actor, &p.entity_type, &p.id, p.quick_note.as_deref())
+                .map(|_| true)
         }),
         "remove_asset" => write_cmd!(IdParams, |conn, actor, p| delete_asset(conn, actor, &p.id)
             .map(|_| true)),
@@ -883,9 +881,7 @@ pub(crate) fn run(
             let p: PartialTextParams = from_args(args)?;
             let prepared = case.with_conn(|conn| preview_partial_import(conn, &p.json_data))?;
             let preview = prepared.preview.clone();
-            case.pending_partial_imports
-                .lock()
-                .map_err(|_| "Pending partial-import lock poisoned".to_string())?
+            lock_recovered(&case.pending_partial_imports)
                 .insert(preview.preview_id.clone(), prepared);
             to_json(preview)
         }
@@ -907,18 +903,13 @@ pub(crate) fn run(
             let summary = case.with_conn(|conn| {
                 apply_partial_import(conn, actor, &pending, &p.selected_change_ids)
             })?;
-            if let Ok(mut guard) = case.pending_partial_imports.lock() {
-                guard.remove(&p.preview_id);
-            }
+            lock_recovered(&case.pending_partial_imports).remove(&p.preview_id);
             case.bump();
             to_json(summary)
         }
         "discard_pending_partial_import" => {
             let p: PreviewIdParams = from_args(args)?;
-            let removed = case
-                .pending_partial_imports
-                .lock()
-                .map_err(|_| "Pending partial-import lock poisoned".to_string())?
+            let removed = lock_recovered(&case.pending_partial_imports)
                 .remove(&p.preview_id)
                 .is_some();
             to_json(removed)
@@ -937,45 +928,34 @@ pub(crate) fn run(
             let decoded = decode_portable_text(&p.contents, password_ref(&password))?;
             let bundle = parse_change_bundle(&decoded.plaintext)?;
             let preview = case.with_conn(|conn| preview_bundle(conn, &bundle))?;
-            case.pending_bundles
-                .lock()
-                .map_err(|_| "Pending merge lock poisoned".to_string())?
-                .insert(
-                    bundle.bundle_id.clone(),
-                    PendingBundle {
-                        bundle,
-                        preview: preview.clone(),
-                    },
-                );
+            lock_recovered(&case.pending_bundles).insert(
+                bundle.bundle_id.clone(),
+                PendingBundle {
+                    bundle,
+                    preview: preview.clone(),
+                },
+            );
             to_json(preview)
         }
         "refresh_pending_change_bundle" => {
             let p: BundleIdParams = from_args(args)?;
             let bundle = {
-                let guard = case
-                    .pending_bundles
-                    .lock()
-                    .map_err(|_| "Pending merge lock poisoned".to_string())?;
+                let guard = lock_recovered(&case.pending_bundles);
                 guard
                     .get(&p.bundle_id)
                     .map(|pending| pending.bundle.clone())
                     .ok_or_else(|| "Pending bundle was not found".to_string())?
             };
             let preview = case.with_conn(|conn| preview_bundle(conn, &bundle))?;
-            if let Ok(mut guard) = case.pending_bundles.lock() {
-                if let Some(pending) = guard.get_mut(&p.bundle_id) {
-                    pending.preview = preview.clone();
-                }
+            if let Some(pending) = lock_recovered(&case.pending_bundles).get_mut(&p.bundle_id) {
+                pending.preview = preview.clone();
             }
             to_json(preview)
         }
         "apply_pending_change_bundle" => {
             let p: ApplyBundleParams = from_args(args)?;
             let (bundle, preview) = {
-                let guard = case
-                    .pending_bundles
-                    .lock()
-                    .map_err(|_| "Pending merge lock poisoned".to_string())?;
+                let guard = lock_recovered(&case.pending_bundles);
                 let pending = guard
                     .get(&p.bundle_id)
                     .ok_or_else(|| "Pending bundle was not found".to_string())?;
@@ -984,18 +964,13 @@ pub(crate) fn run(
             let actor = &session.actor;
             let summary =
                 case.with_conn(|conn| apply_bundle(conn, actor, &bundle, &preview, &p.decisions))?;
-            if let Ok(mut guard) = case.pending_bundles.lock() {
-                guard.remove(&p.bundle_id);
-            }
+            lock_recovered(&case.pending_bundles).remove(&p.bundle_id);
             case.bump();
             to_json(summary)
         }
         "discard_pending_change_bundle" => {
             let p: BundleIdParams = from_args(args)?;
-            let removed = case
-                .pending_bundles
-                .lock()
-                .map_err(|_| "Pending merge lock poisoned".to_string())?
+            let removed = lock_recovered(&case.pending_bundles)
                 .remove(&p.bundle_id)
                 .is_some();
             to_json(removed)
@@ -1009,11 +984,7 @@ fn pending_partial(
     session: &SessionContext,
     preview_id: &str,
 ) -> Result<crate::partial_import::PreparedPartialImport, String> {
-    session
-        .case
-        .pending_partial_imports
-        .lock()
-        .map_err(|_| "Pending partial-import lock poisoned".to_string())?
+    lock_recovered(&session.case.pending_partial_imports)
         .get(preview_id)
         .cloned()
         .ok_or_else(|| "Pending partial import was not found".to_string())
@@ -1179,6 +1150,11 @@ params! {
         #[serde(default)] scan_results: Option<String>,
     }
     struct SuspiciousParams { id: String, suspicious: bool }
+    struct QuickNoteParams {
+        entity_type: String,
+        id: String,
+        #[serde(default)] quick_note: Option<String>,
+    }
     struct AssetFilterParams { #[serde(default)] asset_id: Option<String> }
 
     struct InterfaceParams {

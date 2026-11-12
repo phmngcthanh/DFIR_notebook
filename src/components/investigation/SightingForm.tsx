@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { invoke } from '@/lib/api';
+import { useDraft, useDraftDiscard } from '@/lib/drafts';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -19,14 +20,17 @@ interface Props {
 }
 
 export default function SightingForm({ entityKind, entityId, entityName, iocs, onSaved, onCancel }: Props) {
-  const [iocId, setIocId] = useState(iocs[0]?.id ?? '');
-  const [sightedAt, setSightedAt] = useState('');
-  const [location, setLocation] = useState('');
-  const [note, setNote] = useState('');
+  // Typed work survives leaving the Investigation screen; Save and Cancel forget it.
+  const draftKey = `investigation.sighting.${entityKind}.${entityId}.`;
+  const discardDraft = useDraftDiscard();
+  const [iocId, setIocId] = useDraft(`${draftKey}iocId`, iocs[0]?.id ?? '');
+  const [sightedAt, setSightedAt] = useDraft(`${draftKey}sightedAt`, '');
+  const [location, setLocation] = useDraft(`${draftKey}location`, '');
+  const [note, setNote] = useDraft(`${draftKey}note`, '');
   const selected = iocs.find((ioc) => ioc.id === iocId);
   const highThreat = selected ? ['high', 'critical'].includes(selected.threat_level) : false;
-  const [escalate, setEscalate] = useState(false);
-  const [escalateTo, setEscalateTo] = useState<'suspected' | 'infected'>(highThreat ? 'infected' : 'suspected');
+  const [escalate, setEscalate] = useDraft(`${draftKey}escalate`, false);
+  const [escalateTo, setEscalateTo] = useDraft<'suspected' | 'infected'>(`${draftKey}escalateTo`, highThreat ? 'infected' : 'suspected');
   const [saving, setSaving] = useState(false);
 
   const save = async () => {
@@ -44,6 +48,7 @@ export default function SightingForm({ entityKind, entityId, entityName, iocs, o
       });
       if (!response.success) throw new Error(response.error || 'Could not record sighting');
       toast.success(`IOC sighting recorded on ${entityName}`);
+      discardDraft(draftKey);
       onSaved();
     } catch (reason) { toast.error(String(reason)); } finally { setSaving(false); }
   };
@@ -71,7 +76,7 @@ export default function SightingForm({ entityKind, entityId, entityName, iocs, o
         </div>}
         <div className="flex gap-2">
           <Button size="sm" onClick={() => void save()} disabled={saving}>{saving ? 'Saving…' : 'Record sighting'}</Button>
-          <Button size="sm" variant="outline" onClick={onCancel}>Cancel</Button>
+          <Button size="sm" variant="outline" onClick={() => { discardDraft(draftKey); onCancel(); }}>Cancel</Button>
         </div>
       </>}
     </CardContent>

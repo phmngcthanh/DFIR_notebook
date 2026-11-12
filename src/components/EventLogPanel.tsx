@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke, isDesktop, pickTextFile } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import { useIsAndroid } from '@/hooks/use-platform';
 import { ArrowUpFromLine, FileInput, LockKeyhole, Search, ScrollText, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -36,24 +37,26 @@ export default function EventLogPanel({ refreshTrigger, onChanged }: Props) {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const [kind, setKind] = useState<ImportKind>('syslog');
-  const [timezone, setTimezone] = useState('UTC');
-  const [hostHint, setHostHint] = useState('');
-  const [note, setNote] = useState('');
-  const [text, setText] = useState('');
+  // Pasted log text, search terms, and promotion settings survive switching
+  // screens. The store password is deliberately not kept.
+  const [kind, setKind] = useDraft<ImportKind>('eventLogs.kind', 'syslog');
+  const [timezone, setTimezone] = useDraft('eventLogs.timezone', 'UTC');
+  const [hostHint, setHostHint] = useDraft('eventLogs.hostHint', '');
+  const [note, setNote] = useDraft('eventLogs.note', '');
+  const [text, setText] = useDraft('eventLogs.text', '');
 
   const [batches, setBatches] = useState<EventLogBatch[]>([]);
-  const [query, setQuery] = useState('');
-  const [batchFilter, setBatchFilter] = useState('all');
-  const [hostFilter, setHostFilter] = useState('');
-  const [eventIdFilter, setEventIdFilter] = useState('');
+  const [query, setQuery] = useDraft('eventLogs.query', '');
+  const [batchFilter, setBatchFilter] = useDraft('eventLogs.batchFilter', 'all');
+  const [hostFilter, setHostFilter] = useDraft('eventLogs.hostFilter', '');
+  const [eventIdFilter, setEventIdFilter] = useDraft('eventLogs.eventIdFilter', '');
   const [outcome, setOutcome] = useState<EventLogSearchOutcome>({ rows: [], total: 0 });
   const [selected, setSelected] = useState<number[]>([]);
 
   const [assets, setAssets] = useState<Asset[]>([]);
-  const [assetId, setAssetId] = useState('none');
-  const [severity, setSeverity] = useState('medium');
-  const [eventType, setEventType] = useState('event_log');
+  const [assetId, setAssetId] = useDraft('eventLogs.promoteAssetId', 'none');
+  const [severity, setSeverity] = useDraft('eventLogs.promoteSeverity', 'medium');
+  const [eventType, setEventType] = useDraft('eventLogs.promoteEventType', 'event_log');
 
   const refreshStatus = useCallback(async () => {
     try {

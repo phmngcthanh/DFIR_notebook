@@ -8,7 +8,7 @@ import {
   type ConnectivityInventory,
   type ConnectivityPolicy,
 } from './connectivity-analysis';
-import type { ParsedDeviceConfig } from './network-config';
+import { parseDeviceConfig, type ParsedDeviceConfig } from './network-config';
 
 const firewallConfig: ParsedDeviceConfig = {
   schema: 'dfir-network-config-v1',
@@ -99,6 +99,45 @@ describe('connectivity analysis', () => {
     expect(result.analyses[0].paths.some((path) => path.certainty === 'confirmed')).toBe(true);
   });
 
+  it('reports insufficient evidence instead of an isolation pass when nothing is modeled', () => {
+    const bare: ConnectivityInventory = { ...inventory(), firewalls: [], firewallInterfaces: [] };
+    const policy: ConnectivityPolicy = {
+      id: 'policy-2',
+      name: 'Users isolated from WAN',
+      sourceNetworkId: 'lan',
+      targetKind: 'network',
+      targetNetworkId: 'wan',
+      direction: 'bidirectional',
+      mode: 'logical',
+      expectation: 'blocked',
+      enabled: true,
+      description: '',
+    };
+    const blocked = evaluatePolicy(bare, policy);
+    expect(blocked.status).toBe('insufficient');
+    expect(blocked.coverageGaps.join(' ')).toContain('No router, switch, or firewall configuration');
+    // A required connection is not declared missing on no evidence either.
+    expect(evaluatePolicy(bare, { ...policy, expectation: 'allowed' }).status).toBe('insufficient');
+  });
+
+  it('names the network the model knows nothing about', () => {
+    const partial = inventory();
+    partial.networks = [...partial.networks, { id: 'ot', name: 'Plant OT', subnet: '10.50.0.0/24', network_type: 'LAN', description: '', created_at: '' }];
+    const result = evaluatePolicy(partial, {
+      id: 'policy-3',
+      name: 'OT has no Internet',
+      sourceNetworkId: 'ot',
+      targetKind: 'internet',
+      direction: 'outbound',
+      mode: 'logical',
+      expectation: 'blocked',
+      enabled: true,
+      description: '',
+    });
+    expect(result.status).toBe('insufficient');
+    expect(result.coverageGaps).toEqual([expect.stringContaining('Plant OT')]);
+  });
+
   it('preserves unrelated case metadata when policies are serialized', () => {
     const policy: ConnectivityPolicy = {
       id: 'policy-1',
@@ -114,5 +153,145 @@ describe('connectivity analysis', () => {
     const metadata = metadataWithConnectivityPolicies('{"owner":"IR"}', [policy]);
     expect(JSON.parse(metadata)).toMatchObject({ owner: 'IR' });
     expect(parseConnectivityPolicies(metadata)).toEqual([policy]);
+  });
+});
+
+describe('FortiGate configuration analysis', () => {
+  const fortios = parseDeviceConfig('fortigate_firewall', `
+#config-version=FG10E1-7.0.12-FW-build0523-230606:opmode=0:vdom=1:user=admin
+config system global
+    set hostname "HN-22HV-FW-01"
+end
+config system interface
+    edit "wan1"
+        set ip 203.0.113.2 255.255.255.248
+        set role wan
+    next
+    edit "port2"
+        set ip 10.30.0.1 255.255.255.0
+        set role lan
+    next
+end
+config system vlan
+    edit "vlan30"
+        set vlanid 30
+        set interface "port2"
+        set ip 10.30.30.1 255.255.255.0
+        set role lan
+    next
+end
+config system zone
+    edit "INTERNAL"
+        set member "port2" "vlan30"
+    next
+end
+config router static
+    edit 1
+        set gateway 203.0.113.1
+        set device "wan1"
+    next
+end
+config firewall address
+    edit "LAN_NET"
+        set subnet 10.30.0.0 255.255.255.0
+    next
+end
+config firewall policy
+    edit 1
+        set name "lan-out"
+        set srcintf "INTERNAL"
+        set dstintf "wan1"
+        set srcaddr "LAN_NET"
+        set dstaddr "all"
+        set action accept
+        set service "ALL"
+        set nat enable
+    next
+    edit 2
+        set name "vip-in"
+        set srcintf "wan1"
+        set dstintf "INTERNAL"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action accept
+    next
+    edit 3
+        set name "block-rest"
+        set srcintf "wan1"
+        set dstintf "INTERNAL"
+        set srcaddr "all"
+        set dstaddr "all"
+        set action deny
+    next
+end
+config firewall vip
+    edit "VIP_WEB"
+        set extip 203.0.113.5
+        set extintf "wan1"
+        set portforward enable
+        set mappedip "10.30.0.10"
+        set extport 443
+        set mappedport 8443
+    next
+end
+`);
+
+  function fortiInventory(): ConnectivityInventory {
+    return {
+      networks: [
+        { id: 'lan', name: 'Users', subnet: '10.30.0.0/24', network_type: 'LAN', description: '', created_at: '' },
+        { id: 'vlan30', name: 'Servers', subnet: '10.30.30.0/24', network_type: 'LAN', vlan_id: '30', description: '', created_at: '' },
+        { id: 'wan', name: 'WAN', subnet: '203.0.113.0/29', network_type: 'WAN', description: '', created_at: '' },
+      ],
+      connections: [],
+      assets: [],
+      networkInterfaces: [],
+      firewalls: [{ id: 'fw', name: fortios.hostname, vendor: 'Fortinet', rules: JSON.stringify(fortios), config_text: 'fixture', created_at: '' }],
+      firewallInterfaces: [
+        { id: 'fi-wan', firewall_id: 'fw', name: 'wan1', ip_addresses: ['203.0.113.2/29'], network_id: 'wan', role: 'wan', is_primary: true, description: '' },
+        { id: 'fi-lan', firewall_id: 'fw', name: 'port2', ip_addresses: ['10.30.0.1/24'], network_id: 'lan', role: 'lan', is_primary: false, description: '' },
+        { id: 'fi-vlan30', firewall_id: 'fw', name: 'vlan30', ip_addresses: ['10.30.30.1/24'], network_id: 'vlan30', role: 'lan', is_primary: false, description: '' },
+      ],
+      firewallNatRules: [],
+    };
+  }
+
+  it('finds a confirmed LAN-to-Internet path through policy, default route, and NAT', () => {
+    const result = analyzeConnectivity(fortiInventory(), 'lan', INTERNET_NODE_ID, 'outbound', 'logical');
+    expect(result.paths.some((path) => path.certainty === 'confirmed')).toBe(true);
+    expect(result.paths[0].networkIds).toEqual(['lan', 'wan', INTERNET_NODE_ID]);
+    expect(result.paths[0].steps.flatMap((step) => step.evidence).join(' ')).toContain('lan-out');
+  });
+
+  it('keeps VLAN 30 off the Internet when no policy covers its subnet', () => {
+    const result = analyzeConnectivity(fortiInventory(), 'vlan30', INTERNET_NODE_ID, 'outbound', 'logical');
+    expect(result.paths).toHaveLength(0);
+  });
+
+  it('passes VLAN 30 isolation because the firewall serving it was imported', () => {
+    const result = evaluatePolicy(fortiInventory(), {
+      id: 'policy-vlan30',
+      name: 'Servers have no Internet',
+      sourceNetworkId: 'vlan30',
+      targetKind: 'internet',
+      direction: 'outbound',
+      mode: 'logical',
+      expectation: 'blocked',
+      enabled: true,
+      description: '',
+    });
+    expect(result.status).toBe('pass');
+    expect(result.coverageGaps).toEqual([]);
+  });
+
+  it('confirms inbound reachability only through the published VIP', () => {
+    const result = analyzeConnectivity(fortiInventory(), 'lan', INTERNET_NODE_ID, 'inbound', 'logical');
+    expect(result.paths.length).toBeGreaterThan(0);
+    // The generic Internet→WAN ingress edge is always "possible"; the
+    // policy-gated WAN→LAN step is what cites the VIP and its DNAT.
+    const wanToLan = result.paths[0].steps.find((step) => step.fromNetworkId === 'wan' && step.toNetworkId === 'lan');
+    expect(wanToLan).toBeDefined();
+    expect(wanToLan!.evidence.join(' ')).toContain('vip-in');
+    expect(wanToLan!.evidence.join(' ')).toContain('destination NAT');
   });
 });

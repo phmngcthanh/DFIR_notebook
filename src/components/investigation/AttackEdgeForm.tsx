@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { invoke } from '@/lib/api';
+import { useDraft, useDraftDiscard } from '@/lib/drafts';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -33,21 +34,30 @@ const EDGE_TYPES: AttackEdgeType[] = ['initial_access', 'lateral_movement', 'pri
 const CONFIDENCE: AttackEdgeConfidence[] = ['confirmed', 'probable', 'suspected'];
 const NONE = '__none__';
 
+/** Which draft an edge form belongs to: the edge being edited, or the endpoints a new one was drawn between. */
+function attackEdgeDraftId(edge: Props['edge'], prefill: Props['prefill']): string {
+  return edge?.id ?? `new:${prefill?.source?.kind ?? ''}:${prefill?.source?.id ?? ''}:${prefill?.target?.kind ?? ''}:${prefill?.target?.id ?? ''}`;
+}
+
 export default function AttackEdgeForm({ edge, prefill, networks, assets, firewalls, iocs, timelineEvents, onSaved, onCancel }: Props) {
-  const [sourceKind, setSourceKind] = useState<AttackEdgeSourceKind>(edge?.source_kind ?? prefill?.source?.kind ?? 'external');
-  const [sourceId, setSourceId] = useState(edge?.source_id ?? prefill?.source?.id ?? (prefill?.source?.kind ? prefill.source.id : 'Internet'));
-  const [targetKind, setTargetKind] = useState<SightingEntityKind>(edge?.target_kind ?? prefill?.target?.kind ?? 'asset');
-  const [targetId, setTargetId] = useState(edge?.target_id ?? prefill?.target?.id ?? '');
-  const [title, setTitle] = useState(edge?.title ?? '');
-  const [description, setDescription] = useState(edge?.description ?? '');
-  const [edgeType, setEdgeType] = useState<AttackEdgeType>(edge?.edge_type ?? 'lateral_movement');
-  const [confidence, setConfidence] = useState<AttackEdgeConfidence>(edge?.confidence ?? 'suspected');
-  const [mitreTactic, setMitreTactic] = useState(edge?.mitre_tactic ?? '');
-  const [mitreTechnique, setMitreTechnique] = useState(edge?.mitre_technique ?? '');
-  const [occurredAt, setOccurredAt] = useState(edge?.occurred_at ? toLocalInput(edge.occurred_at) : '');
-  const [timelineEventId, setTimelineEventId] = useState(edge?.timeline_event_id ?? NONE);
-  const [sequence, setSequence] = useState(edge ? String(edge.sequence) : '');
-  const [iocIds, setIocIds] = useState<string[]>(edge?.ioc_ids ?? []);
+  // Typed work survives leaving the Investigation screen; Save, Delete, and
+  // Cancel forget it. A new edge's draft is tied to the endpoints it was drawn between.
+  const draftKey = `investigation.edge.${attackEdgeDraftId(edge, prefill)}.`;
+  const discardDraft = useDraftDiscard();
+  const [sourceKind, setSourceKind] = useDraft<AttackEdgeSourceKind>(`${draftKey}sourceKind`, edge?.source_kind ?? prefill?.source?.kind ?? 'external');
+  const [sourceId, setSourceId] = useDraft(`${draftKey}sourceId`, edge?.source_id ?? prefill?.source?.id ?? (prefill?.source?.kind ? prefill.source.id : 'Internet'));
+  const [targetKind, setTargetKind] = useDraft<SightingEntityKind>(`${draftKey}targetKind`, edge?.target_kind ?? prefill?.target?.kind ?? 'asset');
+  const [targetId, setTargetId] = useDraft(`${draftKey}targetId`, edge?.target_id ?? prefill?.target?.id ?? '');
+  const [title, setTitle] = useDraft(`${draftKey}title`, edge?.title ?? '');
+  const [description, setDescription] = useDraft(`${draftKey}description`, edge?.description ?? '');
+  const [edgeType, setEdgeType] = useDraft<AttackEdgeType>(`${draftKey}edgeType`, edge?.edge_type ?? 'lateral_movement');
+  const [confidence, setConfidence] = useDraft<AttackEdgeConfidence>(`${draftKey}confidence`, edge?.confidence ?? 'suspected');
+  const [mitreTactic, setMitreTactic] = useDraft(`${draftKey}mitreTactic`, edge?.mitre_tactic ?? '');
+  const [mitreTechnique, setMitreTechnique] = useDraft(`${draftKey}mitreTechnique`, edge?.mitre_technique ?? '');
+  const [occurredAt, setOccurredAt] = useDraft(`${draftKey}occurredAt`, edge?.occurred_at ? toLocalInput(edge.occurred_at) : '');
+  const [timelineEventId, setTimelineEventId] = useDraft(`${draftKey}timelineEventId`, edge?.timeline_event_id ?? NONE);
+  const [sequence, setSequence] = useDraft(`${draftKey}sequence`, edge ? String(edge.sequence) : '');
+  const [iocIds, setIocIds] = useDraft<string[]>(`${draftKey}iocIds`, edge?.ioc_ids ?? []);
   const [saving, setSaving] = useState(false);
 
   const entityOptions = (kind: string) => kind === 'asset'
@@ -78,6 +88,7 @@ export default function AttackEdgeForm({ edge, prefill, networks, assets, firewa
         : await invoke<ApiResponse<AttackEdge>>('create_new_attack_edge', payload);
       if (!response.success) throw new Error(response.error || 'Could not save attack edge');
       toast.success(edge ? 'Attack edge updated' : 'Attack edge recorded');
+      discardDraft(draftKey);
       onSaved();
     } catch (reason) { toast.error(String(reason)); } finally { setSaving(false); }
   };
@@ -88,6 +99,7 @@ export default function AttackEdgeForm({ edge, prefill, networks, assets, firewa
       const response = await invoke<ApiResponse<boolean>>('remove_attack_edge', { id: edge.id });
       if (!response.success) throw new Error(response.error || 'Could not delete attack edge');
       toast.success('Attack edge deleted');
+      discardDraft(draftKey);
       onSaved();
     } catch (reason) { toast.error(String(reason)); }
   };
@@ -148,7 +160,7 @@ export default function AttackEdgeForm({ edge, prefill, networks, assets, firewa
       <div className="space-y-1"><Label>Description</Label><Textarea rows={2} value={description} onChange={(event) => setDescription(event.target.value)} /></div>
       <div className="flex gap-2">
         <Button size="sm" onClick={() => void save()} disabled={saving}>{saving ? 'Saving…' : edge ? 'Update' : 'Save edge'}</Button>
-        <Button size="sm" variant="outline" onClick={onCancel}>Cancel</Button>
+        <Button size="sm" variant="outline" onClick={() => { discardDraft(draftKey); onCancel(); }}>Cancel</Button>
         {edge && <Button size="sm" variant="outline" className="ml-auto text-red-600" onClick={() => void remove()}>Delete</Button>}
       </div>
     </CardContent>

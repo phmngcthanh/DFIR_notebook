@@ -59,11 +59,20 @@ export interface ConnectivityAnalysis {
   warnings: string[];
 }
 
+/**
+ * `insufficient` means no path was found but the model does not know enough
+ * about the networks involved for that absence to mean anything — a client
+ * that knows only part of its network must not get an isolation "pass".
+ */
+export type PolicyStatus = 'pass' | 'fail' | 'warning' | 'insufficient';
+
 export interface PolicyEvaluation {
   policy: ConnectivityPolicy;
-  status: 'pass' | 'fail' | 'warning';
+  status: PolicyStatus;
   summary: string;
   analyses: ConnectivityAnalysis[];
+  /** Why a "no path" result cannot be relied on yet; empty when coverage is adequate or paths exist. */
+  coverageGaps: string[];
 }
 
 export interface ConnectivityInventory {
@@ -600,6 +609,10 @@ function enumeratePaths(edges: GraphEdge[], start: string, target: string, maxim
   return { paths, truncated };
 }
 
+function modelEdges(inventory: ConnectivityInventory, mode: ConnectivityMode): GraphEdge[] {
+  return mode === 'physical' ? physicalEdges(inventory) : logicalEdges(inventory);
+}
+
 export function analyzeConnectivity(
   inventory: ConnectivityInventory,
   sourceNetworkId: string,
@@ -607,9 +620,19 @@ export function analyzeConnectivity(
   direction: ConnectivityDirection,
   mode: ConnectivityMode,
 ): ConnectivityAnalysis {
+  return analyzeEdges(inventory, modelEdges(inventory, mode), sourceNetworkId, targetNetworkId, direction, mode);
+}
+
+function analyzeEdges(
+  inventory: ConnectivityInventory,
+  edges: GraphEdge[],
+  sourceNetworkId: string,
+  targetNetworkId: string,
+  direction: ConnectivityDirection,
+  mode: ConnectivityMode,
+): ConnectivityAnalysis {
   const start = direction === 'outbound' ? sourceNetworkId : targetNetworkId;
   const target = direction === 'outbound' ? targetNetworkId : sourceNetworkId;
-  const edges = mode === 'physical' ? physicalEdges(inventory) : logicalEdges(inventory);
   const { paths, truncated } = enumeratePaths(edges, start, target);
   const warnings: string[] = [];
   if (mode === 'logical' && devices(inventory).length === 0) warnings.push('No normalized device configurations are available; only manually asserted network connections were evaluated.');
@@ -626,24 +649,59 @@ export function analyzeConnectivity(
   };
 }
 
+/**
+ * What the model would need before "no path" can be read as evidence. Each
+ * network named by the policy must touch something the model actually knows —
+ * an imported device configuration (or, for physical checks, a recorded
+ * link) — and an Internet target needs a modeled Internet boundary.
+ */
+function coverageGaps(inventory: ConnectivityInventory, policy: ConnectivityPolicy, edges: GraphEdge[]): string[] {
+  const gaps: string[] = [];
+  const modeled = devices(inventory);
+  const name = (id: string) => inventory.networks.find((item) => item.id === id)?.name ?? 'The selected network';
+  if (policy.mode === 'logical' && modeled.length === 0) {
+    gaps.push('No router, switch, or firewall configuration has been imported, so there is no routing or policy evidence at all.');
+  } else {
+    const endpoints = [policy.sourceNetworkId];
+    if (policy.targetKind === 'network' && policy.targetNetworkId) endpoints.push(policy.targetNetworkId);
+    for (const networkId of endpoints) {
+      const configured = modeled.some((device) => device.attachments.some((item) => item.networkId === networkId));
+      const recorded = inventory.connections.some((item) => item.source_network_id === networkId || item.target_network_id === networkId);
+      if (configured || (policy.mode === 'physical' && recorded)) continue;
+      gaps.push(policy.mode === 'physical'
+        ? `${name(networkId)} has no imported device interface or recorded link, so nothing is known about how it connects.`
+        : `${name(networkId)} is not attached to any imported device configuration, so its routes and filtering are unknown.`);
+    }
+  }
+  if (policy.targetKind === 'internet' && !edges.some((edge) => edge.toNetworkId === INTERNET_NODE_ID)) {
+    gaps.push('No Internet boundary is modeled: no WAN network, WAN interface, or default route.');
+  }
+  return gaps;
+}
+
 export function evaluatePolicy(inventory: ConnectivityInventory, policy: ConnectivityPolicy): PolicyEvaluation {
   const target = policy.targetKind === 'internet' ? INTERNET_NODE_ID : policy.targetNetworkId ?? '';
   const directions: ConnectivityDirection[] = policy.direction === 'bidirectional'
     ? ['outbound', 'inbound']
     : [policy.direction];
+  const edges = modelEdges(inventory, policy.mode);
   const analyses = directions.map((direction) =>
-    analyzeConnectivity(inventory, policy.sourceNetworkId, target, direction, policy.mode));
+    analyzeEdges(inventory, edges, policy.sourceNetworkId, target, direction, policy.mode));
   const paths = analyses.flatMap((item) => item.paths);
   const hasConfirmed = paths.some((path) => path.certainty === 'confirmed');
   const hasPossible = paths.length > 0;
+  const gaps = hasPossible ? [] : coverageGaps(inventory, policy, edges);
+  const result = (status: PolicyStatus, summary: string): PolicyEvaluation => ({ policy, status, summary, analyses, coverageGaps: gaps });
   if (policy.expectation === 'blocked') {
-    if (hasConfirmed) return { policy, status: 'fail', summary: 'A confirmed path violates the required isolation.', analyses };
-    if (hasPossible) return { policy, status: 'warning', summary: 'A possible path needs review before isolation can be accepted.', analyses };
-    return { policy, status: 'pass', summary: 'No path was found in the imported physical/logical model.', analyses };
+    if (hasConfirmed) return result('fail', 'A confirmed path violates the required isolation.');
+    if (hasPossible) return result('warning', 'A possible path needs review before isolation can be accepted.');
+    if (gaps.length) return result('insufficient', 'Insufficient evidence: no path was found, but the model covers too little of these networks to show they are isolated.');
+    return result('pass', 'No path was found through the imported device configurations and recorded links. Devices that were never imported are not covered.');
   }
-  if (hasConfirmed) return { policy, status: 'pass', summary: 'At least one confirmed allowed path was found.', analyses };
-  if (hasPossible) return { policy, status: 'warning', summary: 'Only possible paths were found; policy/NAT evidence is incomplete.', analyses };
-  return { policy, status: 'fail', summary: 'No path was found for required connectivity.', analyses };
+  if (hasConfirmed) return result('pass', 'At least one confirmed allowed path was found.');
+  if (hasPossible) return result('warning', 'Only possible paths were found; policy/NAT evidence is incomplete.');
+  if (gaps.length) return result('insufficient', 'Insufficient evidence: no path was found, but the model covers too little of these networks to show the connection is missing.');
+  return result('fail', 'No path was found for required connectivity.');
 }
 
 export function parseConnectivityPolicies(metadata: string | null | undefined): ConnectivityPolicy[] {

@@ -977,6 +977,17 @@ fn set_asset_suspicious(state: State<DbState>, id: String, suspicious: bool) -> 
     })
 }
 #[tauri::command]
+fn set_entity_quick_note(
+    state: State<DbState>,
+    entity_type: String,
+    id: String,
+    quick_note: Option<String>,
+) -> Response<bool> {
+    with_actor_conn(&state, |conn, actor| {
+        set_quick_note(conn, actor, &entity_type, &id, quick_note.as_deref()).map(|_| true)
+    })
+}
+#[tauri::command]
 fn remove_asset(state: State<DbState>, id: String) -> Response<bool> {
     with_actor_conn(&state, |conn, actor| {
         delete_asset(conn, actor, &id).map(|_| true)
@@ -2514,6 +2525,7 @@ pub fn run() {
             list_assets,
             list_assets_by_network,
             set_asset_suspicious,
+            set_entity_quick_note,
             remove_asset,
             list_network_interfaces,
             create_new_network_interface,

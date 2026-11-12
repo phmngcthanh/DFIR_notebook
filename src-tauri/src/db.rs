@@ -34,6 +34,8 @@ pub struct Network {
     pub network_type: String,
     pub description: String,
     pub vlan_id: Option<String>,
+    #[serde(default)]
+    pub quick_note: Option<String>,
     pub created_at: String,
 }
 
@@ -58,6 +60,8 @@ pub struct Asset {
     pub investigation_status: String,
     pub properties: Option<String>,
     pub scan_results: Option<String>,
+    #[serde(default)]
+    pub quick_note: Option<String>,
     pub created_at: String,
 }
 
@@ -172,6 +176,8 @@ pub struct Firewall {
     pub model: Option<String>,
     pub rules: Option<String>,
     pub config_text: Option<String>,
+    #[serde(default)]
+    pub quick_note: Option<String>,
     pub created_at: String,
 }
 
@@ -461,6 +467,7 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             network_type TEXT NOT NULL DEFAULT 'LAN',
             description TEXT NOT NULL DEFAULT '',
             vlan_id TEXT,
+            quick_note TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS assets (
@@ -477,6 +484,7 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             investigation_status TEXT NOT NULL DEFAULT 'not_started',
             properties TEXT,
             scan_results TEXT,
+            quick_note TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS network_interfaces (
@@ -504,6 +512,7 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             model TEXT,
             rules TEXT,
             config_text TEXT,
+            quick_note TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS firewall_interfaces (
@@ -878,6 +887,15 @@ pub fn validate_and_migrate_case(conn: &mut Connection) -> AppResult<()> {
         .map_err(|e| e.to_string())?;
     }
     init_database(conn)?;
+    // Quick notes are per-row investigator remarks on the primary entity
+    // tables. Runs after init_database so legacy files that predate a table
+    // entirely see it created (with the column) before the ALTER is attempted.
+    for table in ["assets", "networks", "firewalls"] {
+        if !column_exists(conn, table, "quick_note")? {
+            conn.execute(&format!("ALTER TABLE {table} ADD COLUMN quick_note TEXT"), [])
+                .map_err(|e| e.to_string())?;
+        }
+    }
     repair_legacy_references(conn)?;
     backfill_primary_interfaces(conn)?;
     initialize_history(conn)?;
@@ -1217,8 +1235,8 @@ fn map_case(row: &rusqlite::Row<'_>) -> rusqlite::Result<Case> {
 }
 
 pub fn get_networks(conn: &Connection) -> AppResult<Vec<Network>> {
-    query_vec(conn, "SELECT id,name,subnet,network_type,description,vlan_id,created_at FROM networks ORDER BY name", [], |row| {
-        Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, created_at: row.get(6)? })
+    query_vec(conn, "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,created_at FROM networks ORDER BY name", [], |row| {
+        Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, quick_note: row.get(6)?, created_at: row.get(7)? })
     })
 }
 
@@ -1321,14 +1339,14 @@ pub fn save_topology_view(
 pub fn get_assets(conn: &Connection) -> AppResult<Vec<Asset>> {
     query_vec(conn,
         "SELECT a.id,a.network_id,n.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,
-                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.created_at
+                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.created_at
          FROM assets a LEFT JOIN networks n ON n.id=a.network_id ORDER BY a.name", [], map_asset)
 }
 
 pub fn get_assets_by_network(conn: &Connection, network_id: &str) -> AppResult<Vec<Asset>> {
     query_vec(conn,
         "SELECT DISTINCT a.id,a.network_id,pn.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,
-                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.created_at
+                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.created_at
          FROM assets a LEFT JOIN networks pn ON pn.id=a.network_id
          LEFT JOIN network_interfaces ni ON ni.asset_id=a.id
          WHERE a.network_id=?1 OR ni.network_id=?1 ORDER BY a.name", params![network_id], map_asset)
@@ -1350,7 +1368,8 @@ fn map_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
         investigation_status: row.get(11)?,
         properties: row.get(12)?,
         scan_results: row.get(13)?,
-        created_at: row.get(14)?,
+        quick_note: row.get(14)?,
+        created_at: row.get(15)?,
     })
 }
 
@@ -1476,7 +1495,7 @@ pub fn get_iocs(conn: &Connection) -> AppResult<Vec<Ioc>> {
 pub fn get_firewalls(conn: &Connection) -> AppResult<Vec<Firewall>> {
     query_vec(
         conn,
-        "SELECT f.id,f.network_id,n.name,f.name,f.vendor,f.model,f.rules,f.config_text,f.created_at
+        "SELECT f.id,f.network_id,n.name,f.name,f.vendor,f.model,f.rules,f.config_text,f.quick_note,f.created_at
          FROM firewalls f LEFT JOIN networks n ON n.id=f.network_id ORDER BY f.name",
         [],
         |row| {
@@ -1489,7 +1508,8 @@ pub fn get_firewalls(conn: &Connection) -> AppResult<Vec<Firewall>> {
                 model: row.get(5)?,
                 rules: row.get(6)?,
                 config_text: row.get(7)?,
-                created_at: row.get(8)?,
+                quick_note: row.get(8)?,
+                created_at: row.get(9)?,
             })
         },
     )
@@ -1804,6 +1824,21 @@ where
     Ok(rows)
 }
 
+/// Asset types every write path accepts: the Assets form, snapshot and bundle
+/// upserts, and reviewed imports. Keep in step with `BATCH_ASSET_TYPES` in
+/// `src/lib/vm-inventory.ts` and the type dropdown in `AssetManager.tsx`.
+const ASSET_TYPES: &[&str] = &[
+    "workstation",
+    "server",
+    "vm",
+    "mobile",
+    "laptop",
+    "router",
+    "switch",
+    "firewall",
+    "other",
+];
+
 fn validate_required(label: &str, value: &str) -> AppResult<()> {
     if value.trim().is_empty() {
         Err(format!("{label} is required"))
@@ -1853,6 +1888,97 @@ fn validate_ip(value: &str) -> AppResult<()> {
         .parse::<IpAddr>()
         .map(|_| ())
         .map_err(|_| "IP address is invalid".to_string())
+}
+
+/// Parsed CIDR block: network address plus prefix length.
+type SubnetCidr = (IpAddr, u8);
+
+fn parse_subnet_cidr(value: &str) -> Option<SubnetCidr> {
+    let (address, prefix) = value.trim().split_once('/')?;
+    let ip: IpAddr = address.parse().ok()?;
+    let prefix: u8 = prefix.parse().ok()?;
+    let max = if ip.is_ipv4() { 32 } else { 128 };
+    if prefix > max {
+        None
+    } else {
+        Some((ip, prefix))
+    }
+}
+
+fn cidr_contains(cidr: SubnetCidr, ip: IpAddr) -> bool {
+    match (cidr.0, ip) {
+        (IpAddr::V4(net), IpAddr::V4(addr)) => {
+            let prefix = u32::from(cidr.1);
+            if prefix == 0 {
+                return true;
+            }
+            let mask = u32::MAX << (32 - prefix);
+            (u32::from(net) & mask) == (u32::from(addr) & mask)
+        }
+        (IpAddr::V6(net), IpAddr::V6(addr)) => {
+            let prefix = u32::from(cidr.1);
+            if prefix == 0 {
+                return true;
+            }
+            let mask = u128::MAX << (128 - prefix);
+            (u128::from(net) & mask) == (u128::from(addr) & mask)
+        }
+        _ => false,
+    }
+}
+
+/// Result of placing one address among the recorded subnets.
+enum SubnetMatch<'a> {
+    None,
+    /// Exactly one network is the most specific container.
+    Unique(&'a Network),
+    /// Two or more equally specific networks contain the address — isolated
+    /// sites or departments reusing the same private range. Choosing one would
+    /// silently merge them, so the endpoint is left for the investigator.
+    Ambiguous,
+}
+
+fn match_network_for_ip<'a>(networks: &'a [Network], ip_text: &str) -> SubnetMatch<'a> {
+    let Ok(ip) = ip_text.trim().parse::<IpAddr>() else {
+        return SubnetMatch::None;
+    };
+    let mut best_prefix: Option<u8> = None;
+    let mut best: Vec<&Network> = Vec::new();
+    for network in networks {
+        let Some(cidr) = parse_subnet_cidr(&network.subnet) else {
+            continue;
+        };
+        if !cidr_contains(cidr, ip) {
+            continue;
+        }
+        match best_prefix {
+            Some(prefix) if cidr.1 < prefix => {}
+            Some(prefix) if cidr.1 == prefix => best.push(network),
+            _ => {
+                best_prefix = Some(cidr.1);
+                best = vec![network];
+            }
+        }
+    }
+    match best.as_slice() {
+        [] => SubnetMatch::None,
+        [only] => SubnetMatch::Unique(only),
+        _ => SubnetMatch::Ambiguous,
+    }
+}
+
+/// The network whose subnet most specifically contains `ip_text`. Equally
+/// specific candidates are ambiguous and yield no network, so the endpoint
+/// stays unassigned instead of joining whichever was recorded first. An
+/// explicit assignment always wins over this.
+fn best_network_for_ip(
+    conn: &Connection,
+    ip_text: &str,
+) -> AppResult<Option<(String, Option<String>)>> {
+    Ok(match match_network_for_ip(&get_networks(conn)?, ip_text) {
+        SubnetMatch::Unique(network) => Some((network.id.clone(), Some(network.name.clone()))),
+        SubnetMatch::None | SubnetMatch::Ambiguous => None,
+    })
 }
 
 fn validate_mac(value: Option<&str>) -> AppResult<()> {
@@ -2185,19 +2311,7 @@ fn validate_asset_model(value: &Asset) -> AppResult<()> {
     validate_required("Asset name", &value.name)?;
     validate_ip(&value.ip_address)?;
     validate_mac(value.mac_address.as_deref())?;
-    validate_enum(
-        "asset type",
-        &value.asset_type,
-        &[
-            "workstation",
-            "server",
-            "vm",
-            "laptop",
-            "router",
-            "switch",
-            "other",
-        ],
-    )?;
+    validate_enum("asset type", &value.asset_type, ASSET_TYPES)?;
     validate_enum(
         "compromise status",
         &value.compromise_status,
@@ -2208,7 +2322,6 @@ fn validate_asset_model(value: &Asset) -> AppResult<()> {
         &value.investigation_status,
         &["not_started", "in_progress", "completed"],
     )?;
-    validate_optional_json("Asset properties", value.properties.as_deref())?;
     validate_optional_json("Scan results", value.scan_results.as_deref())
 }
 
@@ -2682,12 +2795,12 @@ where
 pub fn get_entity_json(conn: &Connection, entity_type: &str, id: &str) -> AppResult<Option<Value>> {
     match entity_type {
         "case" => get_case(conn)?.filter(|v| v.id == id).map(|v| to_value(&v)).transpose(),
-        "network" => get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,created_at FROM networks WHERE id=?1", id, |row| {
-            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, created_at: row.get(6)? })
+        "network" => get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,created_at FROM networks WHERE id=?1", id, |row| {
+            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, quick_note: row.get(6)?, created_at: row.get(7)? })
         })?.map(|v| to_value(&v)).transpose(),
         "asset" => get_row_optional(conn,
             "SELECT a.id,a.network_id,n.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,a.suspicious,
-                    a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.created_at
+                    a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.created_at
              FROM assets a LEFT JOIN networks n ON n.id=a.network_id WHERE a.id=?1", id, map_asset)?.map(|v| to_value(&v)).transpose(),
         "network_interface" => get_row_optional(conn,
             "SELECT ni.id,ni.asset_id,ni.name,ni.ip_address,ni.mac_address,ni.network_id,n.name,ni.is_primary
@@ -2710,9 +2823,9 @@ pub fn get_entity_json(conn: &Connection, entity_type: &str, id: &str) -> AppRes
             Ok(Ioc { id: row.get(0)?, ioc_type: row.get(1)?, value: row.get(2)?, description: row.get(3)?, threat_level: row.get(4)?, first_seen: row.get(5)?, last_seen: row.get(6)?, created_at: row.get(7)? })
         })?.map(|v| to_value(&v)).transpose(),
         "firewall" => get_row_optional(conn,
-            "SELECT f.id,f.network_id,n.name,f.name,f.vendor,f.model,f.rules,f.config_text,f.created_at
+            "SELECT f.id,f.network_id,n.name,f.name,f.vendor,f.model,f.rules,f.config_text,f.quick_note,f.created_at
              FROM firewalls f LEFT JOIN networks n ON n.id=f.network_id WHERE f.id=?1", id, |row| {
-            Ok(Firewall { id: row.get(0)?, network_id: row.get(1)?, network_name: row.get(2)?, name: row.get(3)?, vendor: row.get(4)?, model: row.get(5)?, rules: row.get(6)?, config_text: row.get(7)?, created_at: row.get(8)? })
+            Ok(Firewall { id: row.get(0)?, network_id: row.get(1)?, network_name: row.get(2)?, name: row.get(3)?, vendor: row.get(4)?, model: row.get(5)?, rules: row.get(6)?, config_text: row.get(7)?, quick_note: row.get(8)?, created_at: row.get(9)? })
         })?.map(|v| to_value(&v)).transpose(),
         "firewall_interface" => get_firewall_interfaces(conn, None)?
             .into_iter()
@@ -2794,6 +2907,81 @@ pub fn update_case(
     Ok(after)
 }
 
+/// Links interfaces and assets that carry no network assignment yet and whose
+/// IP has `network` as its single most specific subnet. Explicit assignments
+/// are never overridden, and an address that an equally specific network also
+/// contains stays unassigned. History changes for every touched row are
+/// returned so callers can record them in the same commit.
+fn link_unassigned_endpoints_to_network(
+    tx: &Transaction<'_>,
+    network: &Network,
+) -> AppResult<Vec<EntityChangeInput>> {
+    let mut changes = Vec::new();
+    if parse_subnet_cidr(&network.subnet).is_none() {
+        return Ok(changes);
+    }
+    // `network` has already been written in this transaction, so the list
+    // holds its new subnet alongside every competing one.
+    let networks = get_networks(tx)?;
+    let belongs_here = |ip: &str| {
+        matches!(match_network_for_ip(&networks, ip), SubnetMatch::Unique(best) if best.id == network.id)
+    };
+    let mut primary_asset_ids = Vec::new();
+    for mut interface in get_network_interfaces(tx, None)? {
+        if interface.network_id.is_some() || !belongs_here(&interface.ip_address) {
+            continue;
+        }
+        let before = interface.clone();
+        interface.network_id = Some(network.id.clone());
+        interface.network_name = Some(network.name.clone());
+        tx.execute(
+            "UPDATE network_interfaces SET network_id=?1 WHERE id=?2",
+            params![network.id, interface.id],
+        )
+        .map_err(|e| e.to_string())?;
+        if interface.is_primary {
+            primary_asset_ids.push(interface.asset_id.clone());
+        }
+        changes.push(single_change(
+            "network_interface",
+            &interface.id,
+            "update",
+            Some(to_value(&before)?),
+            Some(to_value(&interface)?),
+        ));
+    }
+    // The asset projection mirrors the primary interface's network, so a
+    // backfilled primary NIC must carry the asset along when the asset has no
+    // assignment of its own. Assets recorded with an IP but no NIC rows are
+    // linked directly.
+    for asset_before in get_assets(tx)? {
+        if asset_before.network_id.is_some()
+            || (!primary_asset_ids.contains(&asset_before.id)
+                && !belongs_here(&asset_before.ip_address))
+        {
+            continue;
+        }
+        let asset_after = Asset {
+            network_id: Some(network.id.clone()),
+            network_name: Some(network.name.clone()),
+            ..asset_before.clone()
+        };
+        tx.execute(
+            "UPDATE assets SET network_id=?1 WHERE id=?2",
+            params![network.id, asset_before.id],
+        )
+        .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "asset",
+            &asset_before.id,
+            "update",
+            Some(to_value(&asset_before)?),
+            Some(to_value(&asset_after)?),
+        ));
+    }
+    Ok(changes)
+}
+
 pub fn create_network(
     conn: &mut Connection,
     actor: &ActorIdentity,
@@ -2820,6 +3008,7 @@ pub fn create_network(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(String::from),
+        quick_note: None,
         created_at: Utc::now().to_rfc3339(),
     };
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -2827,19 +3016,20 @@ pub fn create_network(
         "INSERT INTO networks(id,name,subnet,network_type,description,vlan_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
         params![item.id,item.name,item.subnet,item.network_type,item.description,item.vlan_id,item.created_at],
     ).map_err(|e| e.to_string())?;
-    record_commit_tx(
-        &tx,
-        actor,
-        &format!("Created network {}", item.name),
-        vec![single_change(
-            "network",
-            &item.id,
-            "create",
-            None,
-            Some(to_value(&item)?),
-        )],
-        &[],
-    )?;
+    let mut changes = vec![single_change(
+        "network",
+        &item.id,
+        "create",
+        None,
+        Some(to_value(&item)?),
+    )];
+    let mut message = format!("Created network {}", item.name);
+    let linked = link_unassigned_endpoints_to_network(&tx, &item)?;
+    if !linked.is_empty() {
+        message.push_str(&format!(" and linked {} unassigned endpoint(s)", linked.len()));
+        changes.extend(linked);
+    }
+    record_commit_tx(&tx, actor, &message, changes, &[])?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(item)
 }
@@ -2862,8 +3052,8 @@ pub fn update_network(
         &["LAN", "DMZ", "DMS", "WAN", "GUEST", "MANAGEMENT", "OTHER"],
     )?;
     let before: Network = require_existing(
-        get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,created_at FROM networks WHERE id=?1", id, |row| {
-            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, created_at: row.get(6)? })
+        get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,created_at FROM networks WHERE id=?1", id, |row| {
+            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, quick_note: row.get(6)?, created_at: row.get(7)? })
         })?, "Network")?;
     let after = Network {
         name: name.trim().into(),
@@ -2882,19 +3072,20 @@ pub fn update_network(
     if changed == 0 {
         return Err("Network was not found".into());
     }
-    record_commit_tx(
-        &tx,
-        actor,
-        &format!("Updated network {}", after.name),
-        vec![single_change(
-            "network",
-            id,
-            "update",
-            Some(to_value(&before)?),
-            Some(to_value(&after)?),
-        )],
-        &[],
-    )?;
+    let mut changes = vec![single_change(
+        "network",
+        id,
+        "update",
+        Some(to_value(&before)?),
+        Some(to_value(&after)?),
+    )];
+    let mut message = format!("Updated network {}", after.name);
+    let linked = link_unassigned_endpoints_to_network(&tx, &after)?;
+    if !linked.is_empty() {
+        message.push_str(&format!(" and linked {} unassigned endpoint(s)", linked.len()));
+        changes.extend(linked);
+    }
+    record_commit_tx(&tx, actor, &message, changes, &[])?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(after)
 }
@@ -2961,19 +3152,7 @@ pub fn create_asset(
     validate_required("Asset name", name)?;
     validate_ip(ip_address.trim())?;
     validate_mac(mac_address)?;
-    validate_enum(
-        "asset type",
-        asset_type,
-        &[
-            "workstation",
-            "server",
-            "vm",
-            "laptop",
-            "router",
-            "switch",
-            "other",
-        ],
-    )?;
+    validate_enum("asset type", asset_type, ASSET_TYPES)?;
     validate_enum(
         "compromise status",
         compromise_status,
@@ -2984,18 +3163,34 @@ pub fn create_asset(
         investigation_status,
         &["not_started", "in_progress", "completed"],
     )?;
-    validate_optional_json("Asset properties", properties)?;
     validate_optional_json("Scan results", scan_results)?;
-    if let Some(network_id) = network_id {
-        if !exists(conn, "networks", network_id)? {
-            return Err("Selected network was not found".into());
+    // Same rule as interfaces: an asset recorded with an IP but no zone joins
+    // the subnet that contains the address, so it never dangles ungrouped
+    // while its subnet exists.
+    let (network_id, network_name) = match network_id {
+        Some(nid) => {
+            if !exists(conn, "networks", nid)? {
+                return Err("Selected network was not found".into());
+            }
+            let network_name = conn
+                .query_row(
+                    "SELECT name FROM networks WHERE id=?1",
+                    params![nid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            (Some(nid.to_string()), network_name)
         }
-    }
+        None => best_network_for_ip(conn, ip_address.trim())?
+            .map_or((None, None), |(id, name)| (Some(id), name)),
+    };
     let suspicious = matches!(compromise_status, "suspected" | "infected");
-    let mut item = Asset {
+    let item = Asset {
         id: Uuid::new_v4().to_string(),
-        network_id: network_id.map(String::from),
-        network_name: None,
+        network_id,
+        network_name,
         name: name.trim().into(),
         ip_address: ip_address.trim().into(),
         mac_address: mac_address
@@ -3022,18 +3217,9 @@ pub fn create_asset(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(String::from),
+        quick_note: None,
         created_at: Utc::now().to_rfc3339(),
     };
-    item.network_name = item.network_id.as_ref().and_then(|network_id| {
-        conn.query_row(
-            "SELECT name FROM networks WHERE id=?1",
-            params![network_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-    });
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,created_at)
@@ -3100,19 +3286,7 @@ pub fn update_asset(
     validate_required("Asset name", name)?;
     validate_ip(ip_address.trim())?;
     validate_mac(mac_address)?;
-    validate_enum(
-        "asset type",
-        asset_type,
-        &[
-            "workstation",
-            "server",
-            "vm",
-            "laptop",
-            "router",
-            "switch",
-            "other",
-        ],
-    )?;
+    validate_enum("asset type", asset_type, ASSET_TYPES)?;
     validate_enum(
         "compromise status",
         compromise_status,
@@ -3123,7 +3297,6 @@ pub fn update_asset(
         investigation_status,
         &["not_started", "in_progress", "completed"],
     )?;
-    validate_optional_json("Asset properties", properties)?;
     validate_optional_json("Scan results", scan_results)?;
     if let Some(network_id) = network_id {
         if !exists(conn, "networks", network_id)? {
@@ -3132,18 +3305,30 @@ pub fn update_asset(
     }
     let before: Asset =
         require_existing(get_assets(conn)?.into_iter().find(|a| a.id == id), "Asset")?;
-    let network_name = network_id.and_then(|nid| {
-        conn.query_row(
-            "SELECT name FROM networks WHERE id=?1",
-            params![nid],
-            |row| row.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-    });
+    // Same re-derivation rule as interfaces: only assets that were never
+    // assigned a zone and whose IP is being corrected pick one up; clearing
+    // the assignment while keeping the IP stays cleared.
+    let (network_id, network_name) = match network_id {
+        Some(nid) => {
+            let network_name = conn
+                .query_row(
+                    "SELECT name FROM networks WHERE id=?1",
+                    params![nid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            (Some(nid.to_string()), network_name)
+        }
+        None if before.network_id.is_none() && before.ip_address != ip_address.trim() => {
+            best_network_for_ip(conn, ip_address.trim())?
+                .map_or((None, None), |(nid, name)| (Some(nid), name))
+        }
+        None => (None, None),
+    };
     let after = Asset {
-        network_id: network_id.map(String::from),
+        network_id,
         network_name,
         name: name.trim().into(),
         ip_address: ip_address.trim().into(),
@@ -3283,6 +3468,61 @@ pub fn update_asset_suspicious(
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// Sets or clears the per-row investigator remark on an asset, network, or
+/// firewall. The note is a column on the entity row itself, so it flows through
+/// snapshots, expert merges, and history like any other field.
+pub fn set_quick_note(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    entity_type: &str,
+    id: &str,
+    quick_note: Option<&str>,
+) -> AppResult<()> {
+    let (table, label) = match entity_type {
+        "asset" => ("assets", "Asset"),
+        "network" => ("networks", "Network"),
+        "firewall" => ("firewalls", "Firewall"),
+        other => return Err(format!("Quick notes are not supported for {other}s")),
+    };
+    let note = quick_note
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from);
+    let before = require_existing(get_entity_json(conn, entity_type, id)?, label)?;
+    let mut after = before.clone();
+    after["quick_note"] = note.clone().map(Value::String).unwrap_or(Value::Null);
+    let name = before["name"].as_str().unwrap_or_default().to_string();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let changed = tx
+        .execute(
+            &format!("UPDATE {table} SET quick_note=?1 WHERE id=?2"),
+            params![note, id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err(format!("{label} was not found"));
+    }
+    let message = if after["quick_note"].is_null() {
+        format!("Cleared quick note on {entity_type} {name}")
+    } else {
+        format!("Set quick note on {entity_type} {name}")
+    };
+    record_commit_tx(
+        &tx,
+        actor,
+        &message,
+        vec![single_change(
+            entity_type,
+            id,
+            "update",
+            Some(before),
+            Some(after),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
 pub fn delete_asset(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> AppResult<()> {
     let asset = require_existing(get_entity_json(conn, "asset", id)?, "Asset")?;
     let interfaces = get_network_interfaces(conn, Some(id))?;
@@ -3387,21 +3627,30 @@ pub fn create_network_interface(
     if !exists(conn, "assets", asset_id)? {
         return Err("Asset was not found".into());
     }
-    if let Some(nid) = network_id {
-        if !exists(conn, "networks", nid)? {
-            return Err("Selected network was not found".into());
+    // An interface recorded without a zone follows its IP: if a subnet
+    // covering the address already exists, join it so endpoints grouped here
+    // never dangle when their subnet is added later. Explicit choices always
+    // win; unassigned interfaces are also backfilled when the subnet itself
+    // is created or edited.
+    let (network_id, network_name) = match network_id {
+        Some(nid) => {
+            if !exists(conn, "networks", nid)? {
+                return Err("Selected network was not found".into());
+            }
+            let network_name = conn
+                .query_row(
+                    "SELECT name FROM networks WHERE id=?1",
+                    params![nid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            (Some(nid.to_string()), network_name)
         }
-    }
-    let network_name = network_id.and_then(|nid| {
-        conn.query_row(
-            "SELECT name FROM networks WHERE id=?1",
-            params![nid],
-            |row| row.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-    });
+        None => best_network_for_ip(conn, ip_address.trim())?
+            .map_or((None, None), |(id, name)| (Some(id), name)),
+    };
     let item = NetworkInterface {
         id: Uuid::new_v4().to_string(),
         asset_id: asset_id.into(),
@@ -3411,7 +3660,7 @@ pub fn create_network_interface(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(String::from),
-        network_id: network_id.map(String::from),
+        network_id,
         network_name,
         is_primary,
     };
@@ -3511,16 +3760,28 @@ pub fn update_network_interface(
             .find(|v| v.id == id),
         "Interface",
     )?;
-    let network_name = network_id.and_then(|nid| {
-        conn.query_row(
-            "SELECT name FROM networks WHERE id=?1",
-            params![nid],
-            |row| row.get(0),
-        )
-        .optional()
-        .ok()
-        .flatten()
-    });
+    // Re-derive the zone from the IP only for interfaces that were never
+    // assigned and whose address is being corrected; clearing the assignment
+    // while keeping the IP is a deliberate detach and must stick.
+    let (network_id, network_name) = match network_id {
+        Some(nid) => {
+            let network_name = conn
+                .query_row(
+                    "SELECT name FROM networks WHERE id=?1",
+                    params![nid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            (Some(nid.to_string()), network_name)
+        }
+        None if before.network_id.is_none() && before.ip_address != ip_address.trim() => {
+            best_network_for_ip(conn, ip_address.trim())?
+                .map_or((None, None), |(id, name)| (Some(id), name))
+        }
+        None => (None, None),
+    };
     let after = NetworkInterface {
         name: name.trim().into(),
         ip_address: ip_address.trim().into(),
@@ -3528,7 +3789,7 @@ pub fn update_network_interface(
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .map(String::from),
-        network_id: network_id.map(String::from),
+        network_id,
         network_name,
         is_primary,
         ..before.clone()
@@ -5098,6 +5359,7 @@ pub fn create_firewall(
             .filter(|v| !v.is_empty())
             .map(String::from),
         config_text: config_text.map(String::from),
+        quick_note: None,
         created_at: Utc::now().to_rfc3339(),
     };
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -5939,10 +6201,10 @@ pub fn import_case_data(
         }};
     }
     for v in &data.networks {
-        insert_item!("networks","network",&v.id,"INSERT OR IGNORE INTO networks(id,name,subnet,network_type,description,vlan_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.created_at],v);
+        insert_item!("networks","network",&v.id,"INSERT OR IGNORE INTO networks(id,name,subnet,network_type,description,vlan_id,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.quick_note,v.created_at],v);
     }
     for v in &data.assets {
-        insert_item!("assets","asset",&v.id,"INSERT OR IGNORE INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.created_at],v);
+        insert_item!("assets","asset",&v.id,"INSERT OR IGNORE INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.quick_note,v.created_at],v);
     }
     for v in &data.network_interfaces {
         insert_item!("network_interfaces","network_interface",&v.id,"INSERT OR IGNORE INTO network_interfaces(id,asset_id,name,ip_address,mac_address,network_id,is_primary) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![v.id,v.asset_id,v.name,v.ip_address,v.mac_address,v.network_id,if v.is_primary{1}else{0}],v);
@@ -5951,7 +6213,7 @@ pub fn import_case_data(
         insert_item!("clock_profiles","clock_profile",&v.id,"INSERT OR IGNORE INTO clock_profiles(id,name,description,server_reference_raw,server_timezone,server_reference_utc,correct_reference_raw,correct_timezone,correct_reference_utc,offset_ms,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![v.id,v.name,v.description,v.server_reference_raw,v.server_timezone,v.server_reference_utc,v.correct_reference_raw,v.correct_timezone,v.correct_reference_utc,v.offset_ms,v.created_at,v.updated_at],v);
     }
     for v in &data.firewalls {
-        insert_item!("firewalls","firewall",&v.id,"INSERT OR IGNORE INTO firewalls(id,network_id,name,vendor,model,rules,config_text,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![v.id,v.network_id,v.name,v.vendor,v.model,v.rules,v.config_text,v.created_at],v);
+        insert_item!("firewalls","firewall",&v.id,"INSERT OR IGNORE INTO firewalls(id,network_id,name,vendor,model,rules,config_text,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",params![v.id,v.network_id,v.name,v.vendor,v.model,v.rules,v.config_text,v.quick_note,v.created_at],v);
     }
     for v in &data.firewall_interfaces {
         let addresses = serde_json::to_string(&v.ip_addresses).map_err(|e| e.to_string())?;
@@ -6045,12 +6307,12 @@ pub fn upsert_entity_json(tx: &Transaction<'_>, entity_type: &str, value: &Value
         "network" => {
             let v: Network = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             validate_network_model(&v)?;
-            tx.execute("INSERT INTO networks(id,name,subnet,network_type,description,vlan_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(id) DO UPDATE SET name=excluded.name,subnet=excluded.subnet,network_type=excluded.network_type,description=excluded.description,vlan_id=excluded.vlan_id",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.created_at]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO networks(id,name,subnet,network_type,description,vlan_id,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET name=excluded.name,subnet=excluded.subnet,network_type=excluded.network_type,description=excluded.description,vlan_id=excluded.vlan_id,quick_note=excluded.quick_note",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.quick_note,v.created_at]).map_err(|e|e.to_string())?;
         }
         "asset" => {
             let v: Asset = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             validate_asset_model(&v)?;
-            tx.execute("INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,ip_address=excluded.ip_address,mac_address=excluded.mac_address,asset_type=excluded.asset_type,os=excluded.os,user_name=excluded.user_name,suspicious=excluded.suspicious,compromise_status=excluded.compromise_status,investigation_status=excluded.investigation_status,properties=excluded.properties,scan_results=excluded.scan_results",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.created_at]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,ip_address=excluded.ip_address,mac_address=excluded.mac_address,asset_type=excluded.asset_type,os=excluded.os,user_name=excluded.user_name,suspicious=excluded.suspicious,compromise_status=excluded.compromise_status,investigation_status=excluded.investigation_status,properties=excluded.properties,scan_results=excluded.scan_results,quick_note=excluded.quick_note",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.quick_note,v.created_at]).map_err(|e|e.to_string())?;
         }
         "network_interface" => {
             let v: NetworkInterface =
@@ -6117,7 +6379,7 @@ pub fn upsert_entity_json(tx: &Transaction<'_>, entity_type: &str, value: &Value
         "firewall" => {
             let v: Firewall = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             validate_firewall_model(&v)?;
-            tx.execute("INSERT INTO firewalls(id,network_id,name,vendor,model,rules,config_text,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,vendor=excluded.vendor,model=excluded.model,rules=excluded.rules,config_text=excluded.config_text",params![v.id,v.network_id,v.name,v.vendor,v.model,v.rules,v.config_text,v.created_at]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO firewalls(id,network_id,name,vendor,model,rules,config_text,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,vendor=excluded.vendor,model=excluded.model,rules=excluded.rules,config_text=excluded.config_text,quick_note=excluded.quick_note",params![v.id,v.network_id,v.name,v.vendor,v.model,v.rules,v.config_text,v.quick_note,v.created_at]).map_err(|e|e.to_string())?;
         }
         "firewall_interface" => {
             let v: FirewallInterface =
@@ -6338,6 +6600,528 @@ mod tests {
         .unwrap();
         assert_eq!(network.subnet, "");
         assert_eq!(network.vlan_id.as_deref(), Some("20"));
+    }
+
+    #[test]
+    fn network_created_after_endpoints_links_them_by_subnet() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let asset = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "SRV-1",
+            "10.0.0.5",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(asset.network_id.is_none());
+        let extra = create_network_interface(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            "Eth1",
+            "10.0.0.9",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(extra.network_id.is_none());
+
+        let network = add_network(&mut conn, &active_expert, "Office", "10.0.0.0/24");
+
+        let interfaces = get_network_interfaces(&conn, Some(&asset.id)).unwrap();
+        assert!(!interfaces.is_empty());
+        assert!(interfaces
+            .iter()
+            .all(|item| item.network_id.as_deref() == Some(network.id.as_str())));
+        let projected = get_assets(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == asset.id)
+            .unwrap();
+        assert_eq!(projected.network_id.as_deref(), Some(network.id.as_str()));
+        assert_eq!(
+            get_assets_by_network(&conn, &network.id)
+                .unwrap()
+                .iter()
+                .filter(|a| a.id == asset.id)
+                .count(),
+            1
+        );
+        let history = get_history(&conn, 1).unwrap();
+        assert!(history[0].message.contains("linked"));
+        assert!(history[0]
+            .changes
+            .iter()
+            .any(|change| change.entity_type == "network_interface"
+                && change.operation == "update"));
+    }
+
+    #[test]
+    fn network_subnet_edit_backfills_newly_matching_endpoints() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let dmz = add_network(&mut conn, &active_expert, "DMZ", "172.16.0.0/24");
+        let asset = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "WEB-1",
+            "10.20.30.40",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(asset.network_id.is_none());
+
+        update_network(
+            &mut conn,
+            &active_expert,
+            &dmz.id,
+            "DMZ",
+            "10.20.30.0/24",
+            "DMZ",
+            "",
+            None,
+        )
+        .unwrap();
+
+        let projected = get_assets(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.id == asset.id)
+            .unwrap();
+        assert_eq!(projected.network_id.as_deref(), Some(dmz.id.as_str()));
+    }
+
+    #[test]
+    fn endpoints_without_a_zone_follow_their_ip_into_the_most_specific_subnet() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let wide = add_network(&mut conn, &active_expert, "Corp", "10.0.0.0/16");
+        let narrow = add_network(&mut conn, &active_expert, "Servers", "10.0.0.0/24");
+        let asset = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "SRV-1",
+            "192.168.1.10",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(asset.network_id.is_none());
+
+        let in_narrow = create_network_interface(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            "Eth0",
+            "10.0.0.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(in_narrow.network_id.as_deref(), Some(narrow.id.as_str()));
+        assert_eq!(in_narrow.network_name.as_deref(), Some("Servers"));
+
+        let in_wide = create_network_interface(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            "Eth1",
+            "10.0.200.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(in_wide.network_id.as_deref(), Some(wide.id.as_str()));
+
+        let ipv6 = create_network_interface(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            "Eth2",
+            "2001:db8::1",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(ipv6.network_id.is_none());
+
+        // An explicit assignment is never overridden, not even by a more
+        // specific subnet added later.
+        let explicit = create_network_interface(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            "Eth3",
+            "10.0.0.7",
+            None,
+            Some(&wide.id),
+            false,
+        )
+        .unwrap();
+        assert_eq!(explicit.network_id.as_deref(), Some(wide.id.as_str()));
+        let narrow_too = add_network(&mut conn, &active_expert, "Narrow", "10.0.0.0/28");
+        assert_ne!(explicit.network_id.as_deref(), Some(narrow_too.id.as_str()));
+    }
+
+    #[test]
+    fn interface_zone_can_be_cleared_and_derives_again_only_on_ip_change() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let office = add_network(&mut conn, &active_expert, "Office", "10.0.0.0/24");
+        let asset = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "PC-1",
+            "10.0.0.5",
+            None,
+            "workstation",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        let iface = create_network_interface(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            "Eth0",
+            "10.0.0.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(iface.network_id.as_deref(), Some(office.id.as_str()));
+
+        let cleared = update_network_interface(
+            &mut conn,
+            &active_expert,
+            &iface.id,
+            "Eth0",
+            "10.0.0.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(cleared.network_id.is_none());
+
+        let moved = update_network_interface(
+            &mut conn,
+            &active_expert,
+            &iface.id,
+            "Eth0",
+            "10.0.0.42",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(moved.network_id.as_deref(), Some(office.id.as_str()));
+    }
+
+    #[test]
+    fn equally_specific_subnets_leave_endpoints_unassigned() {
+        let (mut conn, _, active_expert) = fresh_case();
+        // Two isolated departments that both use 10.0.0.0/24.
+        let site_a = add_network(&mut conn, &active_expert, "Site A users", "10.0.0.0/24");
+        let site_b = add_network(&mut conn, &active_expert, "Site B users", "10.0.0.0/24");
+        let asset = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "APP01",
+            "10.0.0.15",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(asset.network_id.is_none());
+        let extra = create_network_interface(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            "Eth1",
+            "10.0.0.16",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(extra.network_id.is_none());
+
+        // Editing one twin does not let it claim the shared range either.
+        update_network(
+            &mut conn,
+            &active_expert,
+            &site_b.id,
+            "Site B users",
+            "10.0.0.0/24",
+            "LAN",
+            "Branch office",
+            None,
+        )
+        .unwrap();
+        assert!(get_assets_by_network(&conn, &site_a.id).unwrap().is_empty());
+        assert!(get_assets_by_network(&conn, &site_b.id).unwrap().is_empty());
+        assert!(get_network_interfaces(&conn, Some(&asset.id))
+            .unwrap()
+            .iter()
+            .all(|item| item.network_id.is_none()));
+
+        // A strictly more specific subnet is still an unambiguous home.
+        let servers = add_network(&mut conn, &active_expert, "Site A servers", "10.0.0.0/25");
+        let stored = get_assets(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == asset.id)
+            .unwrap();
+        assert_eq!(stored.network_id.as_deref(), Some(servers.id.as_str()));
+    }
+
+    #[test]
+    fn mobile_and_firewall_assets_with_free_text_findings_are_accepted() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let finding = "Finance says they own it. Ask infrastructure for logs.";
+        let phone = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "CEO-PHONE",
+            "",
+            None,
+            "mobile",
+            Some("Android 14"),
+            None,
+            "unknown",
+            "not_started",
+            Some(finding),
+            None,
+        )
+        .unwrap();
+        assert_eq!(phone.asset_type, "mobile");
+        assert_eq!(phone.properties.as_deref(), Some(finding));
+
+        let edge = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "EDGE-FW",
+            "203.0.113.2",
+            None,
+            "firewall",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        let updated = update_asset(
+            &mut conn,
+            &active_expert,
+            &edge.id,
+            None,
+            "EDGE-FW",
+            "203.0.113.2",
+            None,
+            "firewall",
+            None,
+            None,
+            "unknown",
+            "in_progress",
+            Some("Seen in the VPN logs"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(updated.properties.as_deref(), Some("Seen in the VPN logs"));
+
+        // Scan results stay structured, and unknown types are still refused.
+        let not_json = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "SCAN",
+            "",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            Some("open ports: 22"),
+        );
+        assert!(not_json.unwrap_err().contains("Scan results must be valid JSON"));
+        let unknown = create_asset(
+            &mut conn,
+            &active_expert,
+            None,
+            "TOASTER",
+            "",
+            None,
+            "toaster",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        );
+        assert!(unknown.unwrap_err().contains("Invalid asset type"));
+
+        // Reviewed imports and merged bundles accept the same types and text.
+        let mut value = to_value(&phone).unwrap();
+        value["asset_type"] = Value::String("firewall".into());
+        value["properties"] = Value::String("Plain text, not JSON".into());
+        let tx = conn.transaction().unwrap();
+        upsert_entity_json(&tx, "asset", &value).unwrap();
+        tx.commit().unwrap();
+        let stored = get_assets(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|item| item.id == phone.id)
+            .unwrap();
+        assert_eq!(stored.asset_type, "firewall");
+        assert_eq!(stored.properties.as_deref(), Some("Plain text, not JSON"));
+    }
+
+    #[test]
+    fn quick_notes_attach_to_assets_networks_and_firewalls() {
+        let (mut conn, case, active_expert) = fresh_case();
+        let network = add_network(&mut conn, &active_expert, "Office", "10.0.0.0/24");
+        let asset = create_asset(
+            &mut conn,
+            &active_expert,
+            Some(&network.id),
+            "PC-1",
+            "10.0.0.5",
+            None,
+            "workstation",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        let firewall = create_firewall(
+            &mut conn,
+            &active_expert,
+            Some(&network.id),
+            "Edge",
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        set_quick_note(&mut conn, &active_expert, "asset", &asset.id, Some("Reimaged on site"))
+            .unwrap();
+        set_quick_note(&mut conn, &active_expert, "network", &network.id, Some("Client HQ segment"))
+            .unwrap();
+        set_quick_note(&mut conn, &active_expert, "firewall", &firewall.id, Some("Terminates the site VPN"))
+            .unwrap();
+
+        assert_eq!(
+            get_assets(&conn)
+                .unwrap()
+                .iter()
+                .find(|item| item.id == asset.id)
+                .and_then(|item| item.quick_note.as_deref()),
+            Some("Reimaged on site")
+        );
+        assert_eq!(
+            get_networks(&conn)
+                .unwrap()
+                .iter()
+                .find(|item| item.id == network.id)
+                .and_then(|item| item.quick_note.as_deref()),
+            Some("Client HQ segment")
+        );
+        assert_eq!(
+            get_firewalls(&conn)
+                .unwrap()
+                .iter()
+                .find(|item| item.id == firewall.id)
+                .and_then(|item| item.quick_note.as_deref()),
+            Some("Terminates the site VPN")
+        );
+        let history = get_history(&conn, 1).unwrap();
+        assert_eq!(history[0].message, "Set quick note on firewall Edge");
+        assert_eq!(history[0].changes[0].entity_type, "firewall");
+        assert_eq!(
+            history[0].changes[0].after.as_ref().unwrap()["quick_note"],
+            "Terminates the site VPN"
+        );
+
+        // A whitespace-only note clears the field instead of storing blanks,
+        // and unsupported entities are rejected.
+        set_quick_note(&mut conn, &active_expert, "asset", &asset.id, Some("   "))
+            .unwrap();
+        assert!(get_assets(&conn)
+            .unwrap()
+            .iter()
+            .find(|item| item.id == asset.id)
+            .is_none_or(|item| item.quick_note.is_none()));
+        assert!(set_quick_note(&mut conn, &active_expert, "note", "nope", Some("x")).is_err());
+
+        // Full snapshots carry the notes to another case file.
+        let data = export_case_data(&conn).unwrap();
+        let mut target = Connection::open_in_memory().unwrap();
+        init_database(&target).unwrap();
+        target.execute(
+            "INSERT INTO cases(id,name,description,client_name,investigator,status,created_at,updated_at,metadata) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![case.id, case.name, case.description, case.client_name, case.investigator, case.status, case.created_at, case.updated_at, case.metadata],
+        )
+        .unwrap();
+        initialize_history(&target).unwrap();
+        import_case_data(&mut target, &active_expert, &data).unwrap();
+        assert_eq!(
+            get_networks(&target)
+                .unwrap()
+                .iter()
+                .find(|item| item.id == network.id)
+                .and_then(|item| item.quick_note.as_deref()),
+            Some("Client HQ segment")
+        );
     }
 
     #[test]
@@ -6774,6 +7558,7 @@ mod tests {
             network_type: "LAN".into(),
             description: String::new(),
             vlan_id: None,
+            quick_note: None,
             created_at: Utc::now().to_rfc3339(),
         });
         malformed.assets.push(Asset {
@@ -6791,6 +7576,7 @@ mod tests {
             investigation_status: "not_started".into(),
             properties: None,
             scan_results: None,
+            quick_note: None,
             created_at: Utc::now().to_rfc3339(),
         });
         assert!(import_case_data(&mut target, &target_actor, &malformed).is_err());

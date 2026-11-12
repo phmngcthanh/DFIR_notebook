@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useDraft } from '@/lib/drafts';
 import { v4 as uuidv4 } from 'uuid';
-import { AlertTriangle, CheckCircle2, Loader2, Plus, Route, Save, SearchCheck, Trash2, X, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, CircleHelp, Loader2, Plus, Route, Save, SearchCheck, Trash2, X, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -44,10 +45,12 @@ interface PolicyForm {
 
 export default function ConnectivityVerifier({ caseInfo, inventory, onChanged, onClose }: Props) {
   const [tab, setTab] = useState('compliance');
-  const [policies, setPolicies] = useState<ConnectivityPolicy[]>(() => parseConnectivityPolicies(caseInfo.metadata));
-  const [dirty, setDirty] = useState(false);
+  // Unsaved policy edits and the half-filled policy form survive leaving the
+  // Topology screen; they are only written to the case on "Save policies".
+  const [policies, setPolicies] = useDraft<ConnectivityPolicy[]>('connectivity.policies', () => parseConnectivityPolicies(caseInfo.metadata));
+  const [dirty, setDirty] = useDraft('connectivity.dirty', false);
   const [busy, setBusy] = useState(false);
-  const [form, setForm] = useState<PolicyForm>({
+  const [form, setForm] = useDraft<PolicyForm>('connectivity.form', {
     name: '',
     sourceNetworkId: inventory.networks[0]?.id ?? '',
     target: 'internet',
@@ -63,13 +66,13 @@ export default function ConnectivityVerifier({ caseInfo, inventory, onChanged, o
 
   useEffect(() => {
     if (!dirty) setPolicies(parseConnectivityPolicies(caseInfo.metadata));
-  }, [caseInfo.metadata, dirty]);
+  }, [caseInfo.metadata, dirty, setPolicies]);
   useEffect(() => {
     if (!form.sourceNetworkId && inventory.networks[0]) {
       setForm((value) => ({ ...value, sourceNetworkId: inventory.networks[0].id }));
       setReachSource(inventory.networks[0].id);
     }
-  }, [form.sourceNetworkId, inventory.networks]);
+  }, [form.sourceNetworkId, inventory.networks, setForm]);
 
   const evaluations = useMemo(
     () => policies.filter((item) => item.enabled).map((policy) => evaluatePolicy(inventory, policy)),
@@ -204,6 +207,7 @@ export default function ConnectivityVerifier({ caseInfo, inventory, onChanged, o
                 <Badge variant="outline">{evaluations.filter((item) => item.status === 'pass').length} pass</Badge>
                 <Badge variant="destructive">{evaluations.filter((item) => item.status === 'fail').length} fail</Badge>
                 <Badge variant="outline">{evaluations.filter((item) => item.status === 'warning').length} review</Badge>
+                <Badge variant="outline">{evaluations.filter((item) => item.status === 'insufficient').length} insufficient evidence</Badge>
               </div>
               <Button size="sm" onClick={() => void savePolicies()} disabled={!dirty || busy}>
                 {busy ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}Save policies to case
@@ -265,6 +269,11 @@ function PolicyRow({
             <div className="font-medium">{policy.name}</div>
             <div className="text-xs text-slate-600">{source} → {target} · {policy.direction} · {policy.mode} · must be {policy.expectation}</div>
             <div className="mt-1 text-xs">{evaluation?.summary ?? 'Disabled policy'}</div>
+            {evaluation && evaluation.coverageGaps.length > 0 && (
+              <ul className="mt-1 list-disc space-y-0.5 pl-4 text-xs text-slate-500">
+                {evaluation.coverageGaps.map((gap) => <li key={gap}>{gap}</li>)}
+              </ul>
+            )}
             {policy.description && <div className="mt-1 text-xs text-slate-400">{policy.description}</div>}
           </div>
         </div>
@@ -319,6 +328,7 @@ function networkName(id: string, inventory: ConnectivityInventory): string {
 function StatusIcon({ status }: { status: PolicyEvaluation['status'] }) {
   if (status === 'pass') return <CheckCircle2 size={20} className="shrink-0 text-emerald-600" />;
   if (status === 'fail') return <XCircle size={20} className="shrink-0 text-red-600" />;
+  if (status === 'insufficient') return <CircleHelp size={20} className="shrink-0 text-slate-500" aria-label="Insufficient evidence" />;
   return <AlertTriangle size={20} className="shrink-0 text-amber-600" />;
 }
 

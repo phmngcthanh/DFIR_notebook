@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@/lib/api';
+import { useDraft } from '@/lib/drafts';
 import { AlertTriangle, CheckCircle2, Clock, FileText, GitGraph, KeyRound, Network, Pencil, Server, ShieldAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -18,8 +19,8 @@ export default function Dashboard({ refreshTrigger, onCaseUpdated }: Props) {
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [recentEvents, setRecentEvents] = useState<TimelineEvent[]>([]);
   const [caseInfo, setCaseInfo] = useState<Case | null>(null);
-  const [editing, setEditing] = useState(false);
-  const [caseForm, setCaseForm] = useState({ name: '', description: '', clientName: '', status: 'active' });
+  const [editing, setEditing] = useDraft('dashboard.editingCase', false);
+  const [caseForm, setCaseForm] = useDraft('dashboard.caseForm', { name: '', description: '', clientName: '', status: 'active' });
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmation: '' });
   const [changingPassword, setChangingPassword] = useState(false);
 
