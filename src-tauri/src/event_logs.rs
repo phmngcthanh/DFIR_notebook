@@ -13,13 +13,13 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Datelike, DateTime, Offset, Utc};
+use chrono::{DateTime, Datelike, Offset, Utc};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::db::{create_timeline_event, fixed_offset, parse_log_timestamp, AppResult};
+use crate::db::{create_timeline_event_with_source, fixed_offset, parse_log_timestamp, AppResult};
 use crate::history::ActorIdentity;
 use crate::secure_db::{create_encrypted_connection, open_encrypted_connection};
 
@@ -30,6 +30,11 @@ pub const SIDECAR_EXTENSION: &str = "dfirlogs";
 /// Records one `promote_records` call may create. Promotion writes a history
 /// commit per event; keep selections reviewable.
 const PROMOTE_LIMIT: usize = 500;
+/// Raw message kept in a promoted event's source reference. The timeline
+/// description stays short; this is what lets a recipient check the finding.
+const SOURCE_MESSAGE_CHARS: usize = 4_000;
+/// Excerpt of the record's full normalized details kept beside the message.
+const SOURCE_DETAILS_CHARS: usize = 2_000;
 
 pub fn sidecar_path(case_path: &Path) -> PathBuf {
     case_path.with_extension(SIDECAR_EXTENSION)
@@ -145,7 +150,9 @@ fn format_utc(value: DateTime<Utc>) -> String {
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
-    value.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Resolve the import timezone once per batch: the same interpretations the
@@ -286,13 +293,12 @@ fn normalize_windows_event(object: &Value, zone: &ImportZone) -> Option<Normaliz
         Some(value) => parse_log_timestamp(value, &zone.as_str()).ok(),
         None => None,
     };
-    let event_id = object
-        .get("Id")
-        .and_then(|value| {
-            value.as_i64().map(|number| number.to_string()).or_else(|| {
-                value.as_str().map(String::from)
-            })
-        });
+    let event_id = object.get("Id").and_then(|value| {
+        value
+            .as_i64()
+            .map(|number| number.to_string())
+            .or_else(|| value.as_str().map(String::from))
+    });
     Some(NormalizedRecord {
         event_time_utc,
         raw_time,
@@ -309,7 +315,10 @@ fn normalize_windows_event(object: &Value, zone: &ImportZone) -> Option<Normaliz
 /// Render one XML-ish EVTX node's inner text: `#text` may be a string or a
 /// number (EventID is commonly numeric), and plain string nodes appear too.
 fn xml_text(value: &Value) -> Option<String> {
-    let text = value.get("#text").or(Some(value)).filter(|node| !node.is_object())?;
+    let text = value
+        .get("#text")
+        .or(Some(value))
+        .filter(|node| !node.is_object())?;
     if let Some(text) = text.as_str() {
         return Some(text.to_string());
     }
@@ -372,10 +381,7 @@ fn render_event_data(data: &Value) -> String {
             .map(|item| match item {
                 Value::String(text) => text.clone(),
                 Value::Object(_) => {
-                    let name = item
-                        .get("Name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Value");
+                    let name = item.get("Name").and_then(Value::as_str).unwrap_or("Value");
                     let value = item
                         .get("#text")
                         .or_else(|| item.get("#attributes").and_then(|a| a.get("#text")))
@@ -465,7 +471,12 @@ impl BatchWriter {
         Ok(())
     }
 
-    fn push(&mut self, tx: &rusqlite::Transaction, ordinal: i64, record: NormalizedRecord) -> AppResult<()> {
+    fn push(
+        &mut self,
+        tx: &rusqlite::Transaction,
+        ordinal: i64,
+        record: NormalizedRecord,
+    ) -> AppResult<()> {
         if let Some(time) = &record.event_time_utc {
             let earlier = self
                 .first_time_utc
@@ -714,7 +725,10 @@ pub struct EventLogSearchOutcome {
 }
 
 fn escape_like(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 pub fn search_event_logs(
@@ -723,30 +737,60 @@ pub fn search_event_logs(
 ) -> AppResult<EventLogSearchOutcome> {
     let mut conditions: Vec<String> = Vec::new();
     let mut bindings: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(query) = params.query.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(query) = params
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         conditions.push(
             "(r.message LIKE ?1 ESCAPE '\\' OR r.provider LIKE ?1 ESCAPE '\\' OR r.host LIKE ?1 ESCAPE '\\'
               OR r.channel LIKE ?1 ESCAPE '\\' OR r.event_id LIKE ?1 ESCAPE '\\' OR r.details LIKE ?1 ESCAPE '\\')".to_string(),
         );
         bindings.push(Box::new(format!("%{}%", escape_like(query))));
     }
-    if let Some(batch) = params.batch_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(batch) = params
+        .batch_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         conditions.push("r.batch_id = ?".to_string());
         bindings.push(Box::new(batch.to_string()));
     }
-    if let Some(host) = params.host.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(host) = params
+        .host
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         conditions.push("r.host LIKE ? ESCAPE '\\'".to_string());
         bindings.push(Box::new(format!("%{}%", escape_like(host))));
     }
-    if let Some(event_id) = params.event_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(event_id) = params
+        .event_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         conditions.push("r.event_id = ?".to_string());
         bindings.push(Box::new(event_id.to_string()));
     }
-    if let Some(from) = params.from_utc.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(from) = params
+        .from_utc
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         conditions.push("r.event_time_utc >= ?".to_string());
         bindings.push(Box::new(from.to_string()));
     }
-    if let Some(to) = params.to_utc.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(to) = params
+        .to_utc
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         conditions.push("r.event_time_utc <= ?".to_string());
         bindings.push(Box::new(to.to_string()));
     }
@@ -804,7 +848,10 @@ pub fn search_event_logs(
 pub fn delete_batch(conn: &mut Connection, batch_id: &str) -> AppResult<()> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let removed = tx
-        .execute("DELETE FROM import_batches WHERE id = ?1", params![batch_id])
+        .execute(
+            "DELETE FROM import_batches WHERE id = ?1",
+            params![batch_id],
+        )
         .map_err(|e| e.to_string())?;
     if removed == 0 {
         return Err("That event-log batch was not found".into());
@@ -831,6 +878,62 @@ pub struct PromoteSummary {
 
 /// Copy selected sidecar records into the case timeline. Each promoted record
 /// becomes a normal attributed timeline event; the raw record is untouched.
+/// One sidecar record selected for promotion, with everything needed to
+/// trace the resulting timeline event back to it.
+struct PromotedRecord {
+    event_time: Option<String>,
+    kind: String,
+    file_name: Option<String>,
+    host: Option<String>,
+    provider: Option<String>,
+    channel: Option<String>,
+    event_id: Option<String>,
+    message: Option<String>,
+    record_id: i64,
+    batch_id: String,
+    ordinal: i64,
+    raw_time: Option<String>,
+    level: Option<String>,
+    details: String,
+    imported_at: String,
+}
+
+fn excerpt(value: &str, limit: usize) -> (String, bool) {
+    let mut chars = value.chars();
+    let kept: String = chars.by_ref().take(limit).collect();
+    (kept, chars.next().is_some())
+}
+
+impl PromotedRecord {
+    /// Durable pointer to the raw record: the batch and record in the event-log
+    /// store, the timestamp as the source wrote it, and the record text itself,
+    /// so the finding stays checkable when the store is not handed over.
+    fn source_ref(&self) -> Value {
+        let (message, message_truncated) =
+            excerpt(self.message.as_deref().unwrap_or(""), SOURCE_MESSAGE_CHARS);
+        let (details, details_truncated) = excerpt(&self.details, SOURCE_DETAILS_CHARS);
+        json!({
+            "type": "event_log_record",
+            "batch_id": self.batch_id,
+            "batch_kind": self.kind,
+            "file_name": self.file_name,
+            "batch_imported_at": self.imported_at,
+            "record_id": self.record_id,
+            "ordinal": self.ordinal,
+            "raw_time": self.raw_time,
+            "event_time_utc": self.event_time,
+            "host": self.host,
+            "provider": self.provider,
+            "channel": self.channel,
+            "event_id": self.event_id,
+            "level": self.level,
+            "message": message,
+            "details": details,
+            "truncated": message_truncated || details_truncated,
+        })
+    }
+}
+
 pub fn promote_records(
     case_conn: &mut Connection,
     actor: &ActorIdentity,
@@ -854,23 +957,31 @@ pub fn promote_records(
         .join(",");
     let mut statement = log_conn
         .prepare(&format!(
-            "SELECT r.event_time_utc,b.kind,b.file_name,r.host,r.provider,r.channel,r.event_id,r.message
+            "SELECT r.event_time_utc,b.kind,b.file_name,r.host,r.provider,r.channel,r.event_id,r.message,
+                    r.id,r.batch_id,r.ordinal,r.raw_time,r.level,r.details,b.imported_at
              FROM event_records r JOIN import_batches b ON b.id = r.batch_id
              WHERE r.id IN ({placeholders}) ORDER BY r.event_time_utc IS NULL, r.event_time_utc"
         ))
         .map_err(|e| e.to_string())?;
     let rows = statement
         .query_map([], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, Option<String>>(7)?,
-            ))
+            Ok(PromotedRecord {
+                event_time: row.get(0)?,
+                kind: row.get(1)?,
+                file_name: row.get(2)?,
+                host: row.get(3)?,
+                provider: row.get(4)?,
+                channel: row.get(5)?,
+                event_id: row.get(6)?,
+                message: row.get(7)?,
+                record_id: row.get(8)?,
+                batch_id: row.get(9)?,
+                ordinal: row.get(10)?,
+                raw_time: row.get(11)?,
+                level: row.get(12)?,
+                details: row.get(13)?,
+                imported_at: row.get(14)?,
+            })
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
@@ -880,8 +991,19 @@ pub fn promote_records(
     }
 
     let mut created = Vec::new();
-    for row in rows {
-        let (event_time, kind, file_name, host, provider, channel, event_id, message) = row;
+    for record in rows {
+        let source_ref = record.source_ref();
+        let PromotedRecord {
+            event_time,
+            kind,
+            file_name,
+            host,
+            provider,
+            channel,
+            event_id,
+            message,
+            ..
+        } = record;
         let mut description = String::new();
         if let Some(channel) = channel.as_deref() {
             description.push('[');
@@ -913,7 +1035,7 @@ pub fn promote_records(
             Some(name) => format!("Event log {kind}: {name}"),
             None => format!("Event log {kind}"),
         };
-        let event = create_timeline_event(
+        let event = create_timeline_event_with_source(
             case_conn,
             actor,
             options.asset_id.as_deref(),
@@ -928,6 +1050,7 @@ pub fn promote_records(
             Some(&source),
             None,
             None,
+            Some(source_ref),
         )?;
         created.push(event.id);
     }
@@ -1015,8 +1138,8 @@ mod tests {
         )
         .expect("search works")
         .rows[0]
-        .event_time_utc
-        .clone();
+            .event_time_utc
+            .clone();
         assert!(nginx.unwrap().starts_with("2026-07-19T14:26:40.512"));
     }
 
@@ -1078,8 +1201,7 @@ mod tests {
             r#"[{"TimeCreated":"2026-07-19T09:00:01.500Z","Id":4624,"ProviderName":"Microsoft-Windows-Security-Auditing","LogName":"Security","MachineName":"WS-204-07","Message":"An account was successfully logged on"}]"#,
         )
         .expect("imports");
-        let actor =
-            ActorIdentity::new("Tester".to_string(), None, Vec::new()).expect("actor");
+        let actor = ActorIdentity::new("Tester".to_string(), None, Vec::new()).expect("actor");
         let row = search_event_logs(
             &sidecar,
             &EventLogSearchParams {
@@ -1089,7 +1211,7 @@ mod tests {
         )
         .expect("search")
         .rows[0]
-        .id;
+            .id;
         let summary = promote_records(
             &mut case,
             &actor,
@@ -1103,10 +1225,49 @@ mod tests {
         )
         .expect("promotion works");
         assert_eq!(summary.created, 1);
+        let promoted = get_timeline_events(&case).expect("timeline");
+        let reference = promoted[0].source_ref.as_ref().expect("source reference");
+        assert_eq!(reference["type"], "event_log_record");
+        assert_eq!(reference["record_id"], row);
+        assert!(reference["ordinal"].as_i64().unwrap() >= 0);
+        assert_eq!(reference["host"], "WS-204-07");
+        assert_eq!(reference["file_name"], "security.json");
+        assert_eq!(
+            reference["message"],
+            "An account was successfully logged on"
+        );
+        assert_eq!(reference["truncated"], false);
         let events = get_timeline_events(&case).expect("timeline");
         assert_eq!(events.len(), 1);
-        assert!(events[0].description.contains("An account was successfully logged on"));
+        assert!(events[0]
+            .description
+            .contains("An account was successfully logged on"));
         assert_eq!(events[0].severity, "high");
+        // Editing the event later keeps the reference.
+        let event = &promoted[0];
+        crate::db::update_timeline_event(
+            &mut case,
+            &actor,
+            &event.id,
+            None,
+            event.raw_timestamp.as_deref(),
+            event.raw_timezone.as_deref(),
+            None,
+            None,
+            None,
+            &event.event_type,
+            "Analyst wording",
+            &event.severity,
+            event.source.as_deref(),
+            None,
+            None,
+        )
+        .expect("update");
+        let edited = get_timeline_events(&case).expect("timeline");
+        assert_eq!(
+            edited[0].source_ref.as_ref().expect("kept")["record_id"],
+            row
+        );
     }
 
     #[test]
@@ -1124,7 +1285,11 @@ mod tests {
             .as_deref()
             .unwrap()
             .starts_with("2026-07-19T09:00:01.500"));
-        assert!(record.message.as_deref().unwrap().contains("TargetUserName=alice"));
+        assert!(record
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("TargetUserName=alice"));
     }
 
     #[test]

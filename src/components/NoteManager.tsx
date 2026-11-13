@@ -15,12 +15,12 @@ interface Props { refreshTrigger: number }
 export default function NoteManager({ refreshTrigger }: Props) {
   const [notes, setNotes] = useState<Note[]>([]);
   // A note being written survives switching screens.
-  const [showForm, setShowForm] = useDraft('notes.showForm', false);
-  const [editingId, setEditingId] = useDraft<string | null>('notes.editingId', null);
-  const [title, setTitle] = useDraft('notes.title', '');
-  const [content, setContent] = useDraft('notes.content', '');
+  const [showForm, setShowForm] = useDraft('notes.showForm', false, { persist: true });
+  const [editingId, setEditingId] = useDraft<string | null>('notes.editingId', null, { persist: true });
+  const [title, setTitle] = useDraft('notes.title', '', { persist: true });
+  const [content, setContent] = useDraft('notes.content', '', { persist: true });
   const [preview, setPreview] = useDraft('notes.preview', false);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useDraft('notes.search', '');
 
   const loadNotes = useCallback(async () => {
     try {

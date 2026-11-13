@@ -19,8 +19,8 @@ export default function Dashboard({ refreshTrigger, onCaseUpdated }: Props) {
   const [stats, setStats] = useState<Stats>(EMPTY_STATS);
   const [recentEvents, setRecentEvents] = useState<TimelineEvent[]>([]);
   const [caseInfo, setCaseInfo] = useState<Case | null>(null);
-  const [editing, setEditing] = useDraft('dashboard.editingCase', false);
-  const [caseForm, setCaseForm] = useDraft('dashboard.caseForm', { name: '', description: '', clientName: '', status: 'active' });
+  const [editing, setEditing] = useDraft('dashboard.editingCase', false, { persist: true });
+  const [caseForm, setCaseForm] = useDraft('dashboard.caseForm', { name: '', description: '', clientName: '', status: 'active' }, { persist: true });
   const [passwordForm, setPasswordForm] = useState({ currentPassword: '', newPassword: '', confirmation: '' });
   const [changingPassword, setChangingPassword] = useState(false);
 

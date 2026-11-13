@@ -95,8 +95,8 @@ export default function InvestigationGraph({ refreshTrigger }: Props) {
   const [drawSource, setDrawSource] = useState<SelectedEntity | null>(null);
   const [selected, setSelected] = useState<SelectedEntity | null>(null);
   // An open sighting or attack-edge form comes back after leaving the screen.
-  const [sightingTarget, setSightingTarget] = useDraft<SelectedEntity | null>('investigation.sightingTarget', null);
-  const [edgeForm, setEdgeForm] = useDraft<EdgeFormState>('investigation.edgeForm', null);
+  const [sightingTarget, setSightingTarget] = useDraft<SelectedEntity | null>('investigation.sightingTarget', null, { persist: true });
+  const [edgeForm, setEdgeForm] = useDraft<EdgeFormState>('investigation.edgeForm', null, { persist: true });
   const [inspectorToken, setInspectorToken] = useState(0);
 
   const [views, setViews] = useState<InvestigationViewSummary[]>([]);

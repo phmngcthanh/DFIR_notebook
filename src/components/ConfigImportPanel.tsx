@@ -32,11 +32,11 @@ interface Props {
 
 export default function ConfigImportPanel({ inventory, onApplied, onClose }: Props) {
   // A pasted configuration and its pending review survive switching screens.
-  const [profile, setProfile] = useDraft<ConfigProfile>('configImport.profile', 'palo_alto_firewall');
-  const [roleOverride, setRoleOverride] = useDraft<'auto' | 'router' | 'switch'>('configImport.roleOverride', 'auto');
-  const [deviceName, setDeviceName] = useDraft('configImport.deviceName', '');
-  const [sourceFile, setSourceFile] = useDraft('configImport.sourceFile', '');
-  const [text, setText] = useDraft('configImport.text', '');
+  const [profile, setProfile] = useDraft<ConfigProfile>('configImport.profile', 'palo_alto_firewall', { persist: true });
+  const [roleOverride, setRoleOverride] = useDraft<'auto' | 'router' | 'switch'>('configImport.roleOverride', 'auto', { persist: true });
+  const [deviceName, setDeviceName] = useDraft('configImport.deviceName', '', { persist: true });
+  const [sourceFile, setSourceFile] = useDraft('configImport.sourceFile', '', { persist: true });
+  const [text, setText] = useDraft('configImport.text', '', { persist: true });
   const [parsed, setParsed] = useDraft<ParsedDeviceConfig | null>('configImport.parsed', null);
   const [preview, setPreview] = useDraft<PartialImportPreview | null>('configImport.preview', null);
   const [warnings, setWarnings] = useDraft<string[]>('configImport.warnings', []);

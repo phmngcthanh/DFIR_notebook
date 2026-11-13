@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { downloadText, invoke, pickTextFile, session } from '@/lib/api';
 import { useDraft } from '@/lib/drafts';
 import {
-  AlertTriangle, CheckCircle2, Clock3, Database, Download, GitCompare,
-  FileOutput, History, LockKeyhole, Network, RefreshCw, Trash2, Upload, Users,
+  AlertTriangle, CheckCircle2, Clock3, Database, GitCompare, HardDriveDownload,
+  FileOutput, History, LockKeyhole, Network, RefreshCw, Send, ShieldCheck, Trash2, Upload, Users,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -13,7 +13,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import PartialImportPanel from '@/components/PartialImportPanel';
 import type {
-  ApiResponse, FieldDiff, HistoryCommit, JsonValue, MergeApplySummary,
+  ApiResponse, BackupSummary, FieldDiff, HandoverStatus, HistoryCommit, JsonValue, MergeApplySummary,
   ImportSummary, MergeDecision, MergePreview, MergePreviewChange,
 } from '@/types';
 
@@ -43,12 +43,18 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
   const [exportPassword, setExportPassword] = useState('');
   const [exportPasswordConfirmation, setExportPasswordConfirmation] = useState('');
   const [importPassword, setImportPassword] = useState('');
+  const [handover, setHandover] = useState<HandoverStatus | null>(null);
 
   const loadHistory = useCallback(async () => {
     try {
       const response = await invoke<ApiResponse<HistoryCommit[]>>('list_case_history', { limit: 100 });
       if (!response.success) throw new Error(response.error || 'Could not load case history');
       setHistory(response.data ?? []);
+      // Offline copies show where they stand against the shared baseline.
+      if (!session.hasSessions) {
+        const status = await invoke<ApiResponse<HandoverStatus>>('get_handover_status');
+        if (status.success && status.data) setHandover(status.data);
+      }
     } catch (reason) { toast.error(String(reason)); }
   }, []);
 
@@ -173,9 +179,28 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
       const response = await invoke<ApiResponse<string>>('save_change_bundle_to_file', { password });
       if (!response.success) throw new Error(response.error || 'Could not save change bundle');
       setExportPassword(''); setExportPasswordConfirmation('');
-      toast.success('Change bundle saved');
+      toast.success('Change bundle saved', { description: 'A .sha256 checksum file was written beside it.' });
     } catch (reason) { if (!String(reason).includes('cancel')) toast.error(String(reason)); }
     finally { setBusy(false); }
+  };
+
+  // Desktop only: a byte copy of the encrypted case and its event-log store,
+  // checked to open with the password, with a .sha256 manifest. It is the
+  // backup, and the master copy a lead hands back after the daily merge.
+  const saveFullBackup = async (password: string): Promise<boolean> => {
+    setBusy(true);
+    try {
+      const response = await invoke<ApiResponse<BackupSummary>>('save_full_backup', { password });
+      if (!response.success || !response.data) throw new Error(response.error || 'Could not save the backup');
+      const summary = response.data;
+      toast.success(`Full backup saved: ${summary.path}`, {
+        description: `${summary.eventLogPath ? 'Includes the event-log store. ' : ''}Checksums are in ${fileName(summary.manifestPath)}.`,
+      });
+      return true;
+    } catch (reason) {
+      if (!String(reason).includes('cancel')) toast.error(String(reason));
+      return false;
+    } finally { setBusy(false); }
   };
 
   const markBaseline = async () => {
@@ -293,22 +318,26 @@ export default function ExportImport({ refreshTrigger, onImport }: Props) {
 
       <PartialImportPanel disabled={busy} onApplied={() => { onImport(); void loadHistory(); }} />
 
-      <div className="grid gap-4 lg:grid-cols-3 xl:grid-cols-5">
-        {!session.hasSessions && <ActionCard icon={<Download />} title="Export my changes" description="Save a plain JSON or encrypted portable change bundle since the shared baseline." action="Save change bundle" disabled={busy} onClick={() => void saveChangeBundle()} />}
+      {!session.hasSessions && (
+        <HandoverGuide status={handover} loadedCount={previews.length} busy={busy}
+          onSaveBundle={() => void saveChangeBundle()} onLoadBundle={() => void loadBundle()}
+          onMarkBaseline={() => void markBaseline()} onSaveBackup={saveFullBackup} />
+      )}
+
+      <div className="grid gap-4 lg:grid-cols-3 xl:grid-cols-4">
         <ActionCard icon={<Database />} title="Data snapshot" description="Case records as JSON or encrypted .dfirx. Not a full backup: leaves out change history, saved topology layouts, and raw event logs, and imports back only into this same case." action={session.hasSessions ? 'Download snapshot' : 'Save snapshot'} disabled={busy} onClick={() => void saveSnapshot()} />
-        <ActionCard icon={<Upload />} title="Review expert bundle" description="Load a plain or encrypted bundle from an expert who worked offline. Loading only creates a preview." action="Load for review" disabled={busy} onClick={() => void loadBundle()} />
+        {session.hasSessions && <ActionCard icon={<Upload />} title="Review expert bundle" description="Load a plain or encrypted bundle from an expert who worked offline. Loading only creates a preview." action="Load for review" disabled={busy} onClick={() => void loadBundle()} />}
         <ActionCard icon={<Database />} title="Add-only snapshot import" description="Password-aware path: add missing UUIDs only. For selective sections or overwrites, use Plain structured partial import above." action="Import add-only" disabled={busy} onClick={() => void loadLegacySnapshot()} />
         <ActionCard icon={<FileOutput />} title="Export readable report" description="Turn a snapshot or change bundle file into a plain-text report anyone can read. The case is not changed." action="Create report" disabled={busy} onClick={() => void saveTextReport()} />
+        {session.hasSessions && (
+          <Card><CardContent className="space-y-2 p-4">
+            <div className="flex items-center gap-2 font-medium text-slate-800"><span className="text-cyan-700"><HardDriveDownload /></span>Full backup</div>
+            <p className="text-xs text-slate-500">On the server the operator backs up the case by copying its .db file, and its .dfirlogs event-log store when there is one, from the case folder. Both stay encrypted with the case password.</p>
+          </CardContent></Card>
+        )}
       </div>
 
       {importSummary && <ImportSummaryPanel summary={importSummary} onClose={() => setImportSummary(null)} />}
-
-      {!session.hasSessions && (
-        <Card className="border-cyan-200 bg-cyan-50/40"><CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
-          <div><p className="font-medium text-slate-800">Shared baseline</p><p className="text-xs text-slate-600">After the team accepts all daily edits, mark the master copy and redistribute that same database for the next work period.</p></div>
-          <Button variant="outline" onClick={() => void markBaseline()}><Users size={15} className="mr-2" />Mark current head</Button>
-        </CardContent></Card>
-      )}
 
       {previews.map((preview) => <BundleReview key={preview.bundle_id} preview={preview} selected={selected} resolutions={resolutions} resolvedFields={resolvedFields}
         busy={busy} setSelected={setSelected} chooseField={chooseField} setEntityPolicy={(entityType, policy) => setExpertSectionPolicy(preview, entityType, policy)} onApply={() => void applyPreview(preview)} onDiscard={() => void discard(preview)} />)}
@@ -340,7 +369,10 @@ function BundleReview({ preview, selected, resolutions, resolvedFields, busy, se
   return <Card className="overflow-hidden">
     <CardHeader className="border-b bg-slate-50"><div className="flex flex-wrap items-start justify-between gap-3">
       <div><CardTitle className="text-base">{preview.exported_by}</CardTitle><p className="mt-1 text-xs text-slate-500">Exported {localTime(preview.exported_at)} · {preview.changes.length} entity changes</p></div>
-      <div className="flex items-center gap-2">{!preview.common_base && <Badge variant="destructive">Unknown baseline</Badge>}{conflicts > 0 && <Badge className="bg-amber-100 text-amber-800">{conflicts} conflicts</Badge>}<Badge variant="outline">{selectedCount} selected</Badge></div>
+      <div className="flex items-center gap-2">{preview.integrity === 'verified'
+        ? <Badge className="bg-emerald-100 text-emerald-800" title="The bundle's content matches the checksum recorded when it was exported"><ShieldCheck size={12} className="mr-1" />Checksum verified</Badge>
+        : <Badge variant="outline" className="border-amber-300 text-amber-800" title="Exported by an older version without a checksum, so transfer damage cannot be ruled out">No checksum</Badge>}
+        {!preview.common_base && <Badge variant="destructive">Unknown baseline</Badge>}{conflicts > 0 && <Badge className="bg-amber-100 text-amber-800">{conflicts} conflicts</Badge>}<Badge variant="outline">{selectedCount} selected</Badge></div>
     </div></CardHeader>
     <CardContent className="space-y-5 p-4">
       {!preview.common_base && <div className="flex gap-2 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800"><AlertTriangle size={18} className="shrink-0" />This bundle does not share a known baseline with the open case. All edits require explicit review.</div>}
@@ -388,7 +420,7 @@ function MergeSectionPolicy({ icon, title, changes, onPolicy }: {
 
 function HistoryPanel({ commits, onRefresh }: { commits: HistoryCommit[]; onRefresh: () => void }) {
   return <Card><CardHeader><div className="flex items-center justify-between"><CardTitle className="flex items-center gap-2 text-base"><History size={18} />Audit history</CardTitle><Button variant="ghost" size="sm" onClick={onRefresh}><RefreshCw size={14} /></Button></div></CardHeader><CardContent>
-    {commits.length === 0 ? <p className="text-sm text-slate-500">No recorded edits.</p> : <div className="max-h-96 space-y-2 overflow-auto">{commits.map((commit) => <details key={commit.id} className="rounded border p-3"><summary className="cursor-pointer list-none"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-medium">{commit.message}</p><p className="text-xs text-slate-500">{commit.author_name} · {localTime(commit.created_at)}{scopeText(commit.scope)}</p></div><Badge variant="outline">{commit.changes.length}</Badge></div></summary><div className="mt-2 space-y-1 border-t pt-2">{commit.changes.map((change) => <p key={change.id} className="text-xs text-slate-600"><span className="font-medium">{change.operation}</span> {humanEntity(change.entity_type)} <span className="font-mono text-[10px] text-slate-400">{change.entity_id}</span></p>)}</div></details>)}</div>}
+    {commits.length === 0 ? <p className="text-sm text-slate-500">No recorded edits.</p> : <div className="max-h-96 space-y-2 overflow-auto">{commits.map((commit) => <details key={commit.id} className="rounded border p-3"><summary className="cursor-pointer list-none"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-medium">{commit.message}</p><p className="text-xs text-slate-500">{commit.author_name} · {localTime(commit.created_at)}{scopeText(commit.scope)}{contributors(commit)}</p></div><Badge variant="outline">{commit.changes.length}</Badge></div></summary><div className="mt-2 space-y-1 border-t pt-2">{commit.changes.map((change) => <p key={change.id} className="text-xs text-slate-600"><span className="font-medium">{change.operation}</span> {humanEntity(change.entity_type)} <span className="font-mono text-[10px] text-slate-400">{change.entity_id}</span></p>)}</div></details>)}</div>}
   </CardContent></Card>;
 }
 
@@ -412,6 +444,64 @@ function selectedExportPassword(encrypted: boolean, password: string, confirmati
   return password;
 }
 
+/**
+ * The offline team's daily cycle as three steps: each expert hands in a
+ * bundle, the lead reviews and merges them into the master, and the lead hands
+ * the merged master back as a full backup that every expert restores.
+ */
+function HandoverGuide({ status, loadedCount, busy, onSaveBundle, onLoadBundle, onMarkBaseline, onSaveBackup }: {
+  status: HandoverStatus | null; loadedCount: number; busy: boolean;
+  onSaveBundle: () => void; onLoadBundle: () => void; onMarkBaseline: () => void;
+  onSaveBackup: (password: string) => Promise<boolean>;
+}) {
+  // A password for one action: deliberately plain state, never a draft.
+  const [password, setPassword] = useState('');
+  const progress = !status
+    ? 'Reading this copy\'s history…'
+    : !status.base_on_main_path
+      ? 'This copy does not contain the shared baseline. Restore the latest master before handing in work.'
+      : status.commits_since_base === 0
+        ? `No changes since the shared baseline${status.base_created_at ? ` of ${localTime(status.base_created_at)}` : ''}.`
+        : `${status.changes_since_base} change${status.changes_since_base === 1 ? '' : 's'} in ${status.commits_since_base} save${status.commits_since_base === 1 ? '' : 's'} since the shared baseline${status.base_created_at ? ` of ${localTime(status.base_created_at)}` : ''}.`;
+  return <Card className="border-cyan-200">
+    <CardHeader>
+      <CardTitle className="flex items-center gap-2 text-base"><Users size={18} />Offline handover</CardTitle>
+      <p className="text-xs text-slate-500">For teams working on separate copies: each expert hands in their changes, the lead reviews and merges them into the master, then hands the merged master back to everyone.</p>
+    </CardHeader>
+    <CardContent className="grid gap-4 lg:grid-cols-3">
+      <HandoverStep number={1} title="Hand in my work" who="Each expert">
+        <p className="text-xs text-slate-600">{progress}</p>
+        <Button onClick={onSaveBundle} disabled={busy || (status !== null && (!status.base_on_main_path || status.commits_since_base === 0))}><Send size={15} className="mr-2" />Save change bundle</Button>
+        <p className="text-[11px] text-slate-500">Encrypt it with an export password above if it travels on removable media. A .sha256 checksum file is written beside it, and the bundle carries its own checksum, checked on load.</p>
+      </HandoverStep>
+      <HandoverStep number={2} title="Review returned work" who="Lead">
+        <p className="text-xs text-slate-600">Load each expert's bundle, settle conflicts field by field, and apply. Each expert's original changes stay attributed to them.</p>
+        <Button variant="outline" onClick={onLoadBundle} disabled={busy}><Upload size={15} className="mr-2" />Load bundle for review</Button>
+        <p className="text-[11px] text-slate-500">{loadedCount === 0 ? 'No bundles loaded.' : `${loadedCount} bundle${loadedCount === 1 ? '' : 's'} loaded below.`}</p>
+      </HandoverStep>
+      <HandoverStep number={3} title="Redistribute the master" who="Lead">
+        <p className="text-xs text-slate-600">Once every bundle is applied, mark the shared baseline, then save a full backup and give that copy to each expert, who opens it with Restore a full backup.</p>
+        <Button variant="outline" onClick={onMarkBaseline} disabled={busy}>Mark shared baseline</Button>
+        <PasswordField label="Case password for backup" value={password} onChange={setPassword} />
+        <Button onClick={() => void onSaveBackup(password).then((saved) => { if (saved) setPassword(''); })} disabled={busy || !password}><HardDriveDownload size={15} className="mr-2" />Save full backup</Button>
+        <p className="text-[11px] text-slate-500">Copies the encrypted case file and its event-log store, checks the copy opens, and writes a .sha256 manifest. This is also your backup.</p>
+      </HandoverStep>
+    </CardContent>
+  </Card>;
+}
+
+function HandoverStep({ number, title, who, children }: { number: number; title: string; who: string; children: React.ReactNode }) {
+  return <div className="space-y-2 rounded-md border bg-slate-50/60 p-3">
+    <p className="flex items-center gap-2 text-sm font-semibold text-slate-800"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-cyan-600 text-xs text-white">{number}</span>{title}<span className="ml-auto text-[11px] font-normal text-slate-500">{who}</span></p>
+    {children}
+  </div>;
+}
+
+function contributors(commit: HistoryCommit) {
+  const authors = [...new Set((commit.merged_commits ?? []).map((item) => item.author_name))];
+  return authors.length ? ` · work by ${authors.join(', ')}` : '';
+}
+function fileName(path: string) { return path.split(/[\\/]/).pop() ?? path; }
 function ValueCell({ value }: { value?: JsonValue }) { return <td className="break-words p-2 font-mono text-[11px] text-slate-600">{displayValue(value)}</td>; }
 function OperationBadge({ operation }: { operation: string }) { return <Badge className={operation === 'create' ? 'bg-emerald-100 text-emerald-800' : operation === 'delete' ? 'bg-red-100 text-red-800' : 'bg-blue-100 text-blue-800'}>{operation}</Badge>; }
 function ClassificationBadge({ value }: { value: string }) { const label = value.replace('_', ' '); return <Badge variant={value.includes('conflict') ? 'destructive' : 'outline'}>{label}</Badge>; }

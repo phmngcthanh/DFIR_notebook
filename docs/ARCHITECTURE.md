@@ -2,7 +2,7 @@
 
 Document version: 1.0  
 Application version: 1.0.20
-Last reviewed: 2026-07-28
+Last reviewed: 2026-11-12
 
 ## 1. Architectural objective
 
@@ -120,9 +120,11 @@ PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 ```
 
-The current schema version is `PRAGMA user_version = 7`.
+The current schema version is `PRAGMA user_version = 8`. Version 8 added the capture inbox (`captures`), persisted drafts (`drafts`), contributor attribution for merges (`history_merged_commits`), and the `timeline_events.source_ref` column. The migration is additive: a version 7 case opens and upgrades in place, and an older build refuses a version 8 file.
 
 Topology presentation is stored in `topology_views`, independently for each layout mode. A saved view contains device and layout-anchor positions plus the Cytoscape pan/zoom camera. This state belongs to the physical case database but is intentionally excluded from evidence history and expert export/merge bundles.
+
+Drafts follow the same rule. The frontend keeps unsaved input in memory per case and expert, and inputs that opt in are written, debounced, to `drafts` under the expert's name so they survive a restart. They are never recorded in history, snapshots, or bundles, a saved or cancelled form deletes its row, and a value over 256 KiB stays in memory only. Passwords are never drafts.
 
 ### 3.4 Database unlock lifecycle
 
@@ -176,8 +178,10 @@ erDiagram
 | `firewall_interfaces` | Multi-interface firewall addressing | firewall, interface name, multiple IPv4/IPv6 addresses or CIDRs, MAC, zone, VLAN, role, primary flag, description |
 | `firewall_nat_rules` | Structured address/port translation | VIP/DNAT/SNAT/port-mapping type, protocol, source, original and translated addresses/ports, ingress/egress interfaces, enabled state |
 | `clock_profiles` | Reusable server clock correlations | raw server/reference values, independent timezones, normalized UTC values, millisecond offset |
-| `timeline_events` | Evidence chronology | optional asset, preserved raw time/zone, clock profile and copied offset, corrected UTC timestamp, precision, type, description, severity, source, MITRE |
-| `iocs` | Indicators of compromise | type, value, description, threat level, first/last seen |
+| `timeline_events` | Evidence chronology | optional asset, preserved raw time/zone, clock profile and copied offset, corrected UTC timestamp, precision, type, description, severity, source, MITRE, and `source_ref` (JSON pointing back to the raw event-log record an event was promoted from) |
+| `iocs` | Indicators of compromise | type (IP, Hash, Domain, URL, Email, Registry, Mutex, FilePath, FileName, Process), value, description, threat level, first/last seen |
+| `captures` | Information recorded verbatim the moment it was learned | content exactly as typed (up to 200,000 characters), source, status (open/processed/dismissed), `captured_by` and team from the session, links to the records it was processed into, resolution |
+| `drafts` | Unsaved form input that survives a restart | owner (expert name), draft key, JSON value up to 256 KiB; excluded from history, snapshots, and bundles; never passwords |
 | `ioc_sightings` | IOC observed on a concrete entity | IOC reference plus exactly one of asset/network/firewall (CHECK-enforced), optional sighting time, location (path/registry/log source), note |
 | `attack_edges` | Analyst-drawn attacker movement | polymorphic source (asset/network/firewall or free-label external origin) and target, title, edge type, confidence, MITRE tactic/technique, optional occurrence time, optional timeline-event anchor (SET NULL on event delete), analyst sequence, linked IOC id list (JSON) |
 | `notes` | Versioned investigator notes | title, Markdown text, created/updated timestamps |
@@ -223,6 +227,7 @@ The two dimensions are deliberately separate. A clean system may still require a
 | `history_changes` | Entity operation, base/new revisions, before/after JSON, incoming source change ID |
 | `history_entity_heads` | Current revision and deletion state per entity UUID |
 | `history_state` | Current head and shared baseline commit |
+| `history_merged_commits` | For each merge commit, the contributors' original commits it carried: author, session, message, scope (team included), timestamp, and which of their changes the merge took |
 
 History is append-only through normal application workflows. Entity rows represent current state; history rows provide attributed before/after changes and merge ancestry.
 
@@ -294,7 +299,7 @@ The model avoids grouping solely by asset name, which prevents name collisions f
 
 ### 7.1 Identity and scope
 
-`ActorIdentity` contains a self-declared name, random session UUID, optional scope label, and selected network IDs. It is operational attribution only. It is not authentication, authorization, or a digital signature.
+`ActorIdentity` contains a self-declared name, an optional team (free text up to 80 characters, such as "Malware reverse engineering" or "Log analysis"), a random session UUID, an optional scope label, and selected network IDs. The team is written into every commit's scope, so the Activity Board can follow work per team. It is operational attribution only. It is not authentication, authorization, or a digital signature, and it never limits what an expert can edit.
 
 Scope is deliberately soft: it filters assigned assets and records context in commits while allowing an expert to act outside the original assignment after confirmation.
 
@@ -305,10 +310,13 @@ A bundle includes:
 - format and version;
 - bundle UUID and case UUID;
 - shared baseline and expert head commit IDs;
-- exporter name and timestamp; and
-- ordered commits with parents, scopes, and before/after entity changes.
+- exporter name and timestamp;
+- ordered commits with parents, scopes, and before/after entity changes; and
+- `integrity`: `{ "algorithm": "sha256", "content_sha256": "…" }`, the SHA-256 of the bundle's canonical JSON (every other field, object keys sorted, no whitespace).
 
 Only commits on the expert's main path after the shared baseline are exported.
+
+The checksum is computed from the parsed JSON rather than the file bytes, so it is the same for both shells and survives re-formatting, but any change to a value fails it. Loading a bundle whose checksum does not match is refused before a preview is built. A bundle from an older build has no `integrity` field. It still loads, and the review shows "No checksum" instead of "Checksum verified". The desktop build also writes `<bundle>.sha256` beside each saved bundle, in `sha256sum` format, so the file can be checked with `sha256sum -c` or `Get-FileHash` before anyone opens it.
 
 ### 7.3 Preview and three-way comparison
 
@@ -326,6 +334,8 @@ For object-shaped entities, fields changed only by the incoming expert can be co
 ### 7.4 Apply
 
 Selected resolutions are ordered by dependency, applied in one transaction, and recorded as a merge commit. Imported source change IDs support repeat detection. Interface merges reconcile the primary asset projection before commit.
+
+The merge commit is authored by whoever applied it, and the same transaction stores the contributors' original commits in `history_merged_commits`, with a per-change flag for whether the merge took that change. The Activity Board shows those commits in their authors' own lanes, marked with who merged them. Work relayed through an intermediate master keeps its original author.
 
 After one bundle is applied, remaining loaded previews are recalculated against the new master state.
 
@@ -349,11 +359,12 @@ iocs[]
 ioc_sightings[]
 attack_edges[]
 investigation_views[]
+captures[]
 firewalls[]
 network_connections[]
 ```
 
-The output is formatted UTF-8 JSON. Legacy snapshots without newer defaulted fields remain readable.
+The output is formatted UTF-8 JSON. Legacy snapshots without newer defaulted fields remain readable. Drafts are never part of a snapshot.
 
 Snapshot import requires the same case UUID. It inserts missing records in dependency-safe order, skips existing UUIDs, does not overwrite current case metadata, and returns inserted/skipped counts.
 
@@ -361,7 +372,15 @@ Snapshot import requires the same case UUID. It inserts missing records in depen
 
 The bundle is formatted UTF-8 JSON with `format: "dfir-investigator-changes"` and `format_version: 1`. It is optimized for attributed review and merge rather than complete backup.
 
-### 8.3 Encrypted portable envelope
+### 8.3 Full backup and handover files (desktop)
+
+A full backup (`handover.rs`, desktop only) is a byte copy of the encrypted case `.db` and, when there is one, its `.dfirlogs` event-log store. It is taken while the command holds the case connection and the event-log store, so no write can land mid-copy. The case uses SQLite's default rollback journal, so the `.db` file is complete whenever no transaction is open. The copy is then opened with the case password and page-checked, and a `<backup>.db.sha256` manifest in `sha256sum` format lists both files.
+
+Because the copy keeps the case id, password, history, and shared baseline, it is both the backup and the master a lead hands back to every expert after the daily merge. Restore checks the manifest when one is present and refuses a set that no longer matches it. It then checks the password, copies the set to a new working file, and opens that file; it never overwrites a file and never changes the backup. A backup cannot replace the open case, and it refuses to pair with an unrelated `.dfirlogs` at the target.
+
+On the server the operator backs up a case by copying its `.db` and `.dfirlogs` files from the case folder.
+
+### 8.4 Encrypted portable envelope
 
 When a password is supplied, the exact plain JSON bytes become the authenticated encrypted payload in a `.dfirx` envelope.
 
@@ -383,7 +402,7 @@ The importer validates fixed KDF/cipher parameters before allocating KDF memory,
 
 The full language-neutral contract is in [../PORTABLE_EXPORT_FORMAT.md](../PORTABLE_EXPORT_FORMAT.md).
 
-### 8.4 Plain structured partial import
+### 8.5 Plain structured partial import
 
 `format: "dfir-investigator-partial"` version 1 is a deliberately unencrypted, language-neutral patch format. It supports create, update, and upsert operations across all core entities but rejects deletion.
 
@@ -391,7 +410,7 @@ The frontend never applies submitted JSON directly. Rust parses it, checks the c
 
 The selected subset is dry-run again immediately before confirmation. Apply rejects stale previews, missing selected dependencies, and any relationship error, then commits all accepted changes plus one attributed history commit in a single transaction. Pending previews are held only in process memory. See [PARTIAL_IMPORT.md](PARTIAL_IMPORT.md).
 
-### 8.5 Vendor configuration and VM-inventory adapters
+### 8.6 Vendor configuration and VM-inventory adapters
 
 Both assisted import workflows deliberately reuse the partial-import boundary:
 

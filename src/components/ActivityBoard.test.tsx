@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HistoryCommit } from '@/types';
 import ActivityBoard from './ActivityBoard';
@@ -86,5 +87,66 @@ describe('ActivityBoard', () => {
     expect(screen.getByText('is suspicious:', { exact: false })).toBeInTheDocument();
     expect(screen.getByText('false')).toBeInTheDocument();
     expect(screen.getByText('true')).toBeInTheDocument();
+  });
+});
+
+describe('ActivityBoard teams and merged work', () => {
+  const merged: HistoryCommit[] = [
+    commit({
+      id: 'lead-merge',
+      author_name: 'Lead',
+      session_id: 'session-lead',
+      message: 'Merged bundle from Rev Analyst',
+      scope: { team: 'Coordination' },
+      created_at: '2026-07-20T18:00:00Z',
+      parent_ids: ['base', 'bundle-head'],
+      changes: [{
+        id: 'merge-change-1', entity_type: 'ioc', entity_id: 'ioc-1', operation: 'create',
+        base_revision: 0, new_revision: 1, created_at: '2026-07-20T18:00:00Z', after: { value: 'evil.example' },
+      }],
+      merged_commits: [{
+        commit_id: 'rev-1',
+        bundle_id: 'bundle-1',
+        author_name: 'Rev Analyst',
+        session_id: 'session-rev',
+        message: 'Added C2 domain from sample A',
+        scope: { team: 'Malware reverse engineering' },
+        created_at: '2026-07-20T11:00:00Z',
+        changes: [
+          { id: 'rev-change-1', entity_type: 'ioc', entity_id: 'ioc-1', operation: 'create', applied: true },
+          { id: 'rev-change-2', entity_type: 'note', entity_id: 'note-1', operation: 'create', applied: false },
+        ],
+      }],
+    }),
+  ];
+
+  beforeEach(() => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue({ success: true, data: merged });
+  });
+
+  it("puts merged-in work in its author's lane, marked with who merged it", async () => {
+    render(<ActivityBoard refreshTrigger={0} />);
+    const original = await screen.findByText('Added C2 domain from sample A');
+    const card = original.closest('details') as HTMLElement;
+    expect(within(card).getByText('merged by Lead')).toBeInTheDocument();
+    expect(within(card).getByText('not taken in the merge')).toBeInTheDocument();
+    expect(screen.getByText('Rev Analyst')).toBeInTheDocument();
+    expect(screen.getByText('Malware reverse engineering')).toBeInTheDocument();
+    expect(screen.getByText(/brings in 1 original commit$/)).toBeInTheDocument();
+    expect(screen.getByText('2 experts')).toBeInTheDocument();
+  });
+
+  it('filters the board to one team', async () => {
+    const user = userEvent.setup();
+    render(<ActivityBoard refreshTrigger={0} />);
+    await screen.findByText('Added C2 domain from sample A');
+
+    await user.click(screen.getByRole('combobox', { name: 'Filter by team' }));
+    await user.click(await screen.findByRole('option', { name: 'Malware reverse engineering' }));
+
+    expect(screen.getByText('Added C2 domain from sample A')).toBeInTheDocument();
+    expect(screen.queryByText('Merged bundle from Rev Analyst')).not.toBeInTheDocument();
+    expect(screen.getByText('1 expert')).toBeInTheDocument();
   });
 });

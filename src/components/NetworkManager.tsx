@@ -28,12 +28,12 @@ export default function NetworkManager({ refreshTrigger }: Props) {
   const [networks, setNetworks] = useState<Network[]>([]);
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
   const [firewalls, setFirewalls] = useState<Firewall[]>([]);
-  const [search, setSearch] = useState('');
-  const [showForm, setShowForm] = useDraft('networks.showForm', false);
-  const [editingId, setEditingId] = useDraft<string | null>('networks.editingId', null);
-  const [networkForm, setNetworkForm] = useDraft('networks.networkForm', emptyNetwork);
-  const [connectionForm, setConnectionForm] = useDraft('networks.connectionForm', emptyConnection);
-  const [firewallForm, setFirewallForm] = useDraft('networks.firewallForm', emptyFirewall);
+  const [search, setSearch] = useDraft('networks.search', '');
+  const [showForm, setShowForm] = useDraft('networks.showForm', false, { persist: true });
+  const [editingId, setEditingId] = useDraft<string | null>('networks.editingId', null, { persist: true });
+  const [networkForm, setNetworkForm] = useDraft('networks.networkForm', emptyNetwork, { persist: true });
+  const [connectionForm, setConnectionForm] = useDraft('networks.connectionForm', emptyConnection, { persist: true });
+  const [firewallForm, setFirewallForm] = useDraft('networks.firewallForm', emptyFirewall, { persist: true });
   const [selectedFirewallId, setSelectedFirewallId] = useDraft<string | null>('networks.selectedFirewallId', null);
 
   const loadData = useCallback(async () => {

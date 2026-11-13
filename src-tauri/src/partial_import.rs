@@ -149,6 +149,7 @@ fn normalized_entity_type(value: &str) -> AppResult<String> {
         "ioc_sighting" | "ioc_sightings" | "sighting" | "sightings" => "ioc_sighting",
         "attack_edge" | "attack_edges" | "attack_path" | "attack_paths" => "attack_edge",
         "note" | "notes" => "note",
+        "capture" | "captures" | "inbox" => "capture",
         _ => return Err(format!("Unsupported entity type '{value}'")),
     };
     Ok(entity.to_string())
@@ -162,7 +163,7 @@ fn entity_rank(entity_type: &str) -> usize {
         "network_interface" | "clock_profile" | "firewall" => 3,
         "firewall_interface" => 4,
         "firewall_nat_rule" | "network_connection" => 5,
-        "timeline_event" | "ioc" | "note" => 6,
+        "timeline_event" | "ioc" | "note" | "capture" => 6,
         "ioc_sighting" | "attack_edge" => 7,
         _ => 9,
     }
@@ -202,6 +203,7 @@ fn snapshot_changes(data: ExportData) -> Vec<PartialImportChange> {
     add_values!("ioc_sighting", data.ioc_sightings);
     add_values!("attack_edge", data.attack_edges);
     add_values!("note", data.notes);
+    add_values!("capture", data.captures);
     changes
 }
 
@@ -292,7 +294,7 @@ fn new_entity(entity_type: &str, id: &str, now: &str) -> AppResult<Map<String, V
             json!({"id":id,"source_network_id":"","source_network_name":null,"target_network_id":"","target_network_name":null,"connection_type":"","description":"","device_name":null})
         }
         "timeline_event" => {
-            json!({"id":id,"asset_id":null,"asset_name":null,"timestamp":"","raw_timestamp":null,"raw_timezone":null,"server_timestamp_utc":null,"correct_timestamp_raw":null,"correct_timezone":null,"clock_profile_id":null,"clock_profile_name":null,"clock_offset_ms":0,"time_precision":"unknown","correct_time_precision":"unknown","event_type":"other","description":"","severity":"info","source":null,"mitre_tactic":null,"mitre_technique":null,"created_at":now})
+            json!({"id":id,"asset_id":null,"asset_name":null,"timestamp":"","raw_timestamp":null,"raw_timezone":null,"server_timestamp_utc":null,"correct_timestamp_raw":null,"correct_timezone":null,"clock_profile_id":null,"clock_profile_name":null,"clock_offset_ms":0,"time_precision":"unknown","correct_time_precision":"unknown","event_type":"other","description":"","severity":"info","source":null,"mitre_tactic":null,"mitre_technique":null,"created_at":now,"source_ref":null})
         }
         "ioc" => {
             json!({"id":id,"ioc_type":"IP","value":"","description":"","threat_level":"medium","first_seen":null,"last_seen":null,"created_at":now})
@@ -304,6 +306,9 @@ fn new_entity(entity_type: &str, id: &str, now: &str) -> AppResult<Map<String, V
             json!({"id":id,"source_kind":"external","source_id":"","source_name":null,"target_kind":"asset","target_id":"","target_name":null,"title":"","description":"","edge_type":"other","confidence":"suspected","mitre_tactic":null,"mitre_technique":null,"occurred_at":null,"timeline_event_id":null,"timeline_event_time":null,"sequence":0,"ioc_ids":[],"created_at":now})
         }
         "note" => json!({"id":id,"title":"","content":"","created_at":now,"updated_at":now}),
+        "capture" => {
+            json!({"id":id,"content":"","source":"","status":"open","captured_by":"","team":null,"links":[],"resolution":"","created_at":now,"updated_at":now})
+        }
         _ => {
             return Err(format!(
                 "'{entity_type}' cannot be created through partial import"
@@ -874,6 +879,34 @@ pub fn validate_partial_selection(
     }
 }
 
+/// A capture records who captured it. One proposed by a partial document
+/// that does not say is captured by the expert applying the import, as if it
+/// had been typed into Capture; one that names its author (for example from a
+/// snapshot) keeps it.
+fn attribute_new_capture(change: &PreparedPartialChange, actor: &ActorIdentity) -> Option<Value> {
+    if change.entity_type != "capture" || change.before.is_some() {
+        return None;
+    }
+    let unnamed = change
+        .after
+        .get("captured_by")
+        .and_then(Value::as_str)
+        .is_none_or(|name| name.trim().is_empty());
+    if !unnamed {
+        return None;
+    }
+    let mut after = change.after.clone();
+    let object = after.as_object_mut()?;
+    object.insert("captured_by".into(), Value::String(actor.name.clone()));
+    if object.get("team").is_none_or(Value::is_null) {
+        object.insert(
+            "team".into(),
+            actor.team.clone().map_or(Value::Null, Value::String),
+        );
+    }
+    Some(after)
+}
+
 pub fn apply_partial_import(
     conn: &mut Connection,
     actor: &ActorIdentity,
@@ -907,7 +940,12 @@ pub fn apply_partial_import(
                 affected_firewalls.insert(firewall_id.to_string());
             }
         }
-        upsert_entity_json(&tx, &change.entity_type, &change.after)?;
+        let after = attribute_new_capture(change, actor);
+        upsert_entity_json(
+            &tx,
+            &change.entity_type,
+            after.as_ref().unwrap_or(&change.after),
+        )?;
     }
     for asset_id in affected_assets {
         reconcile_asset_primary_interface(&tx, &asset_id)?;
@@ -995,6 +1033,7 @@ pub fn partial_import_template(conn: &Connection) -> AppResult<String> {
         "ioc_sightings": compact(to_values(serde_json::to_value(export.ioc_sightings).map_err(|e|e.to_string())?), &["ioc_id","entity_kind","entity_id"]),
         "attack_edges": compact(to_values(serde_json::to_value(export.attack_edges).map_err(|e|e.to_string())?), &["title","source_kind","source_id","target_kind","target_id"]),
         "notes": compact(to_values(serde_json::to_value(export.notes).map_err(|e|e.to_string())?), &["title"]),
+        "captures": compact(to_values(serde_json::to_value(export.captures).map_err(|e|e.to_string())?), &["status","source"]),
     });
     let template = json!({
         "format": PARTIAL_IMPORT_FORMAT,
@@ -1006,7 +1045,7 @@ pub fn partial_import_template(conn: &Connection) -> AppResult<String> {
             "operations": ["create", "update", "upsert"],
             "safety": "Deletion is not supported. update requires target_id. create may include a UUID in values.id; use explicit UUIDs when newly created records reference one another.",
             "selection": "The app validates and previews every record. The investigator chooses Skip, Add only, or Use incoming before confirmation.",
-            "entity_types": ["case","network","asset","network_interface","clock_profile","firewall","firewall_interface","firewall_nat_rule","network_connection","timeline_event","ioc","ioc_sighting","attack_edge","note"],
+            "entity_types": ["case","network","asset","network_interface","clock_profile","firewall","firewall_interface","firewall_nat_rule","network_connection","timeline_event","ioc","ioc_sighting","attack_edge","note","capture"],
             "field_notes": {
                 "network": "name, subnet, network_type, description, vlan_id, quick_note (short investigator remark)",
                 "asset": "network_id, name, ip_address, mac_address, asset_type, os, user_name, compromise_status, investigation_status, properties, scan_results, quick_note (short investigator remark)",
@@ -1017,10 +1056,11 @@ pub fn partial_import_template(conn: &Connection) -> AppResult<String> {
                 "firewall_nat_rule": "firewall_id, name, nat_type (vip/dnat/snat/port_mapping), enabled, protocol, source_cidr, original_destination, original_port, translated_source, translated_destination, translated_port, inbound_interface_id, outbound_interface_id, description",
                 "network_connection": "source_network_id, target_network_id, connection_type, description, device_name",
                 "timeline_event": "asset_id, optional raw_timestamp + raw_timezone, optional correct_timestamp_raw + correct_timezone, or clock_profile_id, event_type, description, severity, source, mitre_tactic, mitre_technique. Both times may be omitted and added later.",
-                "ioc": "ioc_type, value, description, threat_level, first_seen, last_seen",
+                "ioc": "ioc_type (IP/Hash/Domain/URL/Email/Registry/Mutex/FilePath/FileName/Process), value, description, threat_level, first_seen, last_seen",
                 "ioc_sighting": "ioc_id, entity_kind (asset/network/firewall), entity_id, sighted_at, location, note",
                 "attack_edge": "source_kind (asset/network/firewall/external), source_id (entity UUID, or free label for external), target_kind, target_id, title, description, edge_type (initial_access/lateral_movement/privilege_escalation/persistence/c2/exfiltration/other), confidence (confirmed/probable/suspected), mitre_tactic, mitre_technique, occurred_at, timeline_event_id, sequence, ioc_ids (array of IOC UUIDs)",
                 "note": "title, content",
+                "capture": "content (the information exactly as received), source (who or what it came from), status (open/processed/dismissed), resolution",
                 "case": "name, description, client_name, status, metadata. Session expert names provide attribution; legacy investigator metadata is not editable."
             }
         },
@@ -1081,6 +1121,44 @@ mod tests {
             get_entity_json(&conn, "network", "11111111-1111-4111-8111-111111111111")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn imported_captures_without_an_author_are_captured_by_the_importer() {
+        let mut conn = case();
+        let case_id = current_case_id(&conn).unwrap();
+        let document = json!({
+            "format": PARTIAL_IMPORT_FORMAT,
+            "format_version": 1,
+            "case_id": case_id,
+            "changes": [
+                {"change_id":"unnamed","entity_type":"capture","operation":"create","target_id":"capture-1","values":{"content":"APP01 is in finance","source":"Interview notes"}},
+                {"change_id":"named","entity_type":"capture","operation":"create","target_id":"capture-2","values":{"content":"DB02 at 10.0.0.40","captured_by":"Alice","team":"Network exploration"}}
+            ]
+        });
+        let pending = preview_partial_import(&mut conn, &document.to_string()).unwrap();
+        let importer = ActorIdentity::new("Bob".into(), None, Vec::new())
+            .unwrap()
+            .with_team(Some("Log analysis".into()))
+            .unwrap();
+        apply_partial_import(
+            &mut conn,
+            &importer,
+            &pending,
+            &["unnamed".into(), "named".into()],
+        )
+        .unwrap();
+
+        let unnamed = crate::db::get_capture(&conn, "capture-1").unwrap().unwrap();
+        assert_eq!(
+            (unnamed.captured_by.as_str(), unnamed.team.as_deref()),
+            ("Bob", Some("Log analysis"))
+        );
+        let named = crate::db::get_capture(&conn, "capture-2").unwrap().unwrap();
+        assert_eq!(
+            (named.captured_by.as_str(), named.team.as_deref()),
+            ("Alice", Some("Network exploration"))
         );
     }
 

@@ -2,13 +2,17 @@
 
 Document version: 1.0  
 Application version: 1.0.20
-Last reviewed: 2026-07-28
+Last reviewed: 2026-11-12
 
 ## 1. Format selection
 
 | Input | Typical extension | Encryption | Purpose | Changes the open case? |
 |---|---|---|---|---|
 | SQLite case | `.db` | SQLCipher; database-file password required | Open a complete working case | Opens that database after unlock/validation |
+| Full backup (desktop) | `.db` with `.db.sha256`, plus `.dfirlogs` when the case has an event-log store | SQLCipher; the case password | Backup, and the master a lead hands back after the daily merge | Restore checks the checksums and password, copies the set to a new working file, and opens it; the backup is never changed |
+| Checksum file | `.sha256` beside a bundle or backup | No | `sha256sum`-format manifest for checking a file after transfer | Never; checked on restore, and checkable with `sha256sum -c` or `Get-FileHash` |
+| Pasted indicators | pasted text: a list, a report, or defanged values | No | Bulk IOC intake (**IOCs → Paste IOCs**) | Only after detection, review, and confirmation |
+| Capture | typed or pasted text (**Capture**, Alt+C) | Stored in the case | Record something the moment it is learned | Saved verbatim to the Capture inbox; records are created only when it is processed and confirmed |
 | Full snapshot | `.json` | No | Backup/legacy add-only transfer | Yes, after same-case validation |
 | Encrypted snapshot | `.dfirx` | AES-256-GCM envelope | Protected backup/transfer | Yes, after password and validation |
 | Expert change bundle | `.json` | No | Git-like attributed review/merge | Only after review and confirmation |
@@ -130,7 +134,19 @@ sudo cp /var/log/auth.log ./
 
 Every import becomes one **batch** with kind, source file name, timezone assumption, record counts, and the covered time range. Batches can be deleted — deleting a batch removes only raw sidecar records, never promoted timeline events. Records are searched by free text (message, provider, host, channel, event ID, raw content) with host, event-ID, batch, and UTC time-range filters. Timestamps with an explicit offset keep it; undated values are interpreted with the chosen import timezone, and the raw line is always retained in the record details.
 
-**Promotion** copies selected records (up to 500 at a time) into the case timeline as ordinary attributed events — description, source (`Event log <kind>: <file>`), optional asset link, severity, and event type of your choosing. The raw record stays in the sidecar; promotion never rewrites it. The importer parses offline copies only: it never queries a live Windows host, syslog server, or SIEM, and EVTX files reflect whatever point in time the copy was taken.
+**Promotion** copies selected records (up to 500 at a time) into the case timeline as ordinary attributed events — description, source (`Event log <kind>: <file>`), optional asset link, severity, and event type of your choosing. The raw record stays in the sidecar; promotion never rewrites it. Each promoted event also carries a `source_ref` that points back to that raw record. Because it travels with the event into snapshots and bundles, the reference still holds after the sidecar is gone:
+
+```json
+{
+  "type": "event_log_record",
+  "batch_id": "…", "batch_kind": "windows-json", "file_name": "security-events.json", "batch_imported_at": "…",
+  "record_id": "…", "ordinal": 42, "raw_time": "…", "event_time_utc": "…",
+  "host": "DC01", "provider": "Microsoft-Windows-Security-Auditing", "channel": "Security", "event_id": 4624, "level": "Information",
+  "message": "first 4,000 characters", "details": "first 2,000 characters", "truncated": false
+}
+```
+
+Promoting the same record again updates its event and keeps the reference. The importer parses offline copies only: it never queries a live Windows host, syslog server, or SIEM, and EVTX files reflect whatever point in time the copy was taken.
 
 ## 2. Structured partial-import envelope
 
@@ -203,7 +219,8 @@ Fields listed as required are required when creating a record. Updates may conta
 | `firewall_nat_rule` | `firewall_id`, `name`, `nat_type` | `enabled`, `protocol`, `source_cidr`, `original_destination`, `original_port`, `translated_source`, `translated_destination`, `translated_port`, `inbound_interface_id`, `outbound_interface_id`, `description`; types: `vip`, `dnat`, `snat`, `port_mapping` |
 | `network_connection` | `source_network_id`, `target_network_id`, `connection_type` | `description`, `device_name`; source and target must differ |
 | `timeline_event` | `raw_timestamp` or `timestamp`, `description` | `raw_timezone`, `clock_profile_id`, `asset_id`, `event_type`, `severity` (`info`, `low`, `medium`, `high`, `critical`), `source`, `mitre_tactic`, `mitre_technique` |
-| `ioc` | `ioc_type`, `value` | `description`, `threat_level` (`low`, `medium`, `high`, `critical`), `first_seen`, `last_seen`; types: `IP`, `Hash`, `Domain`, `URL`, `Email`, `Registry`, `Mutex` |
+| `ioc` | `ioc_type`, `value` | `description`, `threat_level` (`low`, `medium`, `high`, `critical`), `first_seen`, `last_seen`; types: `IP`, `Hash`, `Domain`, `URL`, `Email`, `Registry`, `Mutex`, `FilePath` (must include a directory), `FileName` (no directory), `Process` (one line) |
+| `capture` | `content` | `source`, `status` (`open`, `processed`, `dismissed`), `resolution`; `captured_by` and `team` may be given to keep the original author, otherwise the expert applying the import is recorded as the one who captured it. `content` is stored exactly as given |
 | `ioc_sighting` | `ioc_id`, `entity_kind` (`asset`, `network`, `firewall`), `entity_id` | `sighted_at`, `location`, `note`; the IOC and target entity must exist |
 | `attack_edge` | `source_kind` (`asset`, `network`, `firewall`, `external`), `source_id`, `target_kind` (`asset`, `network`, `firewall`), `target_id`, `title` | `description`, `edge_type` (`initial_access`, `lateral_movement`, `privilege_escalation`, `persistence`, `c2`, `exfiltration`, `other`), `confidence` (`confirmed`, `probable`, `suspected`), `mitre_tactic`, `mitre_technique`, `occurred_at`, `timeline_event_id`, `sequence`, `ioc_ids` (array of existing IOC UUIDs); for `external` sources `source_id` is a free origin label; source and target must differ |
 | `note` | `title` | `content` (safe Markdown when displayed) |
@@ -368,17 +385,28 @@ A plain snapshot is formatted UTF-8 JSON with this root structure:
   "ioc_sightings": [],
   "attack_edges": [],
   "investigation_views": [],
+  "captures": [],
   "notes": []
 }
 ```
 
-`ioc_sightings` and `attack_edges` are evidence entities and take part in history, expert bundles, and partial import. `investigation_views` are named saved Investigation Graph views (presentation state): imported by snapshot for convenience but excluded from history, expert bundles, and partial import. Snapshots written before these arrays existed remain valid; each missing array defaults to empty.
+`ioc_sightings`, `attack_edges`, and `captures` are evidence entities and take part in history, expert bundles, and partial import. Saved drafts are never part of a snapshot. `investigation_views` are named saved Investigation Graph views (presentation state): imported by snapshot for convenience but excluded from history, expert bundles, and partial import. Snapshots written before these arrays existed remain valid; each missing array defaults to empty.
 
 Snapshot import requires the same `case_info.id`, inserts missing UUIDs, skips existing UUIDs, and never overwrites open-case metadata. A plain snapshot can also be loaded into the partial-import reviewer; there it is converted to reviewed upserts so the operator can explicitly select incoming updates.
 
 ## 9. Expert bundle and encrypted envelope
 
-An expert bundle has `format: "dfir-investigator-changes"` and contains attributed commits from a shared baseline. Do not hand-author it; generate it through **Expert Merge → Save change bundle**.
+An expert bundle has `format: "dfir-investigator-changes"` and contains attributed commits from a shared baseline. Do not hand-author it; generate it through **Case Transfer → Save change bundle**.
+
+A bundle carries `integrity: { "algorithm": "sha256", "content_sha256": "…" }`: the SHA-256 of its canonical JSON (every other field, object keys sorted, no whitespace). Loading a bundle whose content no longer matches is refused with "This change bundle failed its integrity check"; ask the expert for a fresh copy. Bundles from builds before this field still load, and the review marks them "No checksum". The desktop build also writes `<bundle>.sha256` beside each saved bundle, for checking the file itself before it is opened:
+
+```sh
+sha256sum -c changes-Analyst-A.json.sha256
+```
+
+```powershell
+Get-FileHash .\changes-Analyst-A.json -Algorithm SHA256   # compare with the first field of the .sha256 file
+```
 
 An encrypted file has `format: "dfir-investigator-encrypted"`. Its authenticated ciphertext contains the exact ordinary snapshot or expert-bundle JSON bytes. The portable password is independent of session expert names and machines.
 

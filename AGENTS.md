@@ -28,6 +28,8 @@ A portable workbench for 3rd-party DFIR teams on client sites without SIEM acces
 - **Expert Merge** — export/import change bundles (commits since a shared baseline), three-way preview with per-field conflict resolution, transactional apply, merge commits with two parents.
 - **Partial import** — case-aware JSON template for LLM/human filling, previewed and applied transactionally with add-only or incoming-overwrite policy.
 - **Portable exports** — every snapshot/bundle can be plain JSON or an encrypted `.dfirx` (Argon2id + AES-256-GCM) with an independent export password.
+- **Capture and search** — Alt+C records text verbatim (with author, team, source) into a Capture inbox, where it is processed into reviewed records; Ctrl+K searches the whole case; IOCs can be pasted in bulk (refanged, typed, deduplicated).
+- **Teams and handover** — an optional team on the expert identity is recorded in every commit and filterable in the Activity Board; bundles carry a content checksum; the desktop build saves/restores full backups with `.sha256` manifests for the offline daily handover.
 
 ## Technology Stack
 
@@ -39,7 +41,7 @@ A portable workbench for 3rd-party DFIR teams on client sites without SIEM acces
 | Shell | Tauri 2 (`tauri-plugin-dialog` only) | |
 | Backend | Rust, edition 2021; toolchain pinned in `rust-toolchain.toml` | |
 | Database | `rusqlite` with **`bundled-sqlcipher-vendored-openssl`** — SQLCipher + OpenSSL are compiled from source (Strawberry Perl needed on Windows, build-time only) | |
-| Crypto | `aes-gcm`, `argon2`, `getrandom`, `zeroize` for portable exports; SQLCipher for the DB at rest | |
+| Crypto | `aes-gcm`, `argon2`, `getrandom`, `zeroize` for portable exports; `sha2` for bundle and backup checksums; SQLCipher for the DB at rest | |
 
 There is **no** React Hook Form, Zod, HTTP client, or state-management library.
 
@@ -63,7 +65,9 @@ src-tauri/src/                # UNMODIFIED on this branch — the shared core li
 ├── secure_db.rs              # SQLCipher key/rekey/legacy-migration via FFI
 ├── history.rs                # Commit history, change bundles, three-way merge preview/apply
 ├── portable_export.rs        # .dfirx envelope: Argon2id KDF + AES-256-GCM
-└── partial_import.rs         # Template generation, preview, validated transactional apply
+├── partial_import.rs         # Template generation, preview, validated transactional apply
+└── handover.rs               # Full backup/restore + .sha256 manifests — desktop only; tauri-free so the
+                              #   server can include it under cfg(test) and run its tests
 
 server/src/
 ├── main.rs                   # #[path] includes of the five core modules, CLI, router, CSP headers
@@ -104,14 +108,19 @@ Commands live in one `match` in `dispatch.rs`, built from two macros: `read_cmd!
 - **Native-dialog commands, replaced.** `save_*_to_file` → commands that return the text for the browser to download (`export_case_json`, `get_partial_import_template`, `render_export_report`). `load_*_from_file` → commands that take the text the browser read (`import_case_json`, `load_change_bundle_text`, `preview_partial_import_text`).
 - **Session commands, re-pointed.** `create_new_case`/`open_existing_case` became `POST /api/cases` and `POST /api/auth/unlock`; `close_current_case` ends the session; `get_db_path` returns the case *id*, never a server path.
 - **Dropped.** `migrate_legacy_case` (needs two local paths — use the desktop build), plus `save_change_bundle_to_file` and `mark_current_shared_baseline`, which have no meaning when everyone writes to the same case.
+- **Desktop only.** `save_full_backup` and `restore_full_backup` (native dialogs; on the server the operator copies the `.db`/`.dfirlogs` files). `get_handover_status` is ported but only the desktop UI shows it.
+- **Drafts are not case content.** `load_case_drafts`/`save_case_drafts` are keyed by the session's expert name and `save_case_drafts` deliberately does **not** bump the revision — otherwise every open browser would be told the case changed on each keystroke.
 
 Outside the command route: `GET /api/cases`, `POST /api/cases`, `POST /api/auth/unlock`, `POST /api/auth/logout`, `GET /api/state`.
 
 ## Database
 
-All DDL and migrations live in `db.rs`; current schema version is tracked via `PRAGMA user_version` (see `validate_and_migrate_case`). Tables:
+All DDL and migrations live in `db.rs`; current schema version is tracked via `PRAGMA user_version` (see `validate_and_migrate_case`), now **8**. Tables:
 
-`cases`, `networks`, `assets`, `network_interfaces`, `network_connections`, `firewalls`, `firewall_interfaces`, `firewall_nat_rules`, `clock_profiles`, `timeline_events`, `notes`, `iocs`, `topology_views`, plus history tables (`history_commits`, `history_commit_parents`, `history_changes`, `history_entity_heads`, `history_state`).
+`cases`, `networks`, `assets`, `network_interfaces`, `network_connections`, `firewalls`, `firewall_interfaces`, `firewall_nat_rules`, `clock_profiles`, `timeline_events` (incl. `source_ref` for events promoted from raw logs), `notes`, `iocs`, `captures`, `drafts`, `topology_views`, plus history tables (`history_commits`, `history_commit_parents`, `history_changes`, `history_entity_heads`, `history_state`, `history_merged_commits`).
+
+- `drafts` (per expert name) is working state like `topology_views`: never in history, snapshots, or bundles. `captures` is evidence: history, snapshots, bundles, partial import, and search all include it.
+- A merge commit records the contributors' original commits in `history_merged_commits` (with per-change applied flags) so the Activity Board can attribute merged work to its authors.
 
 - Case files live wherever the user chose in the native Save dialog (not a fixed app-data dir).
 - `scan_results`/`rules` are JSON strings in TEXT columns; asset `properties` is JSON (VM inventory, device configuration) or plain free text, so readers must tolerate both.
@@ -129,6 +138,7 @@ All DDL and migrations live in `db.rs`; current schema version is tracked via `P
 - **CSP is strict and local-only** (`server/src/main.rs`, adapted from `tauri.conf.json`): `default-src 'self'`, `script-src 'self'`, `connect-src 'self'`. Keep it that way — no remote content.
 - **DB at rest:** SQLCipher; key applied via FFI in `secure_db.rs` with `cipher_memory_security = ON`. Passwords are wrapped in `Zeroizing` and are never stored, logged, or bound to the expert name.
 - **Exports:** Argon2id (64 MiB, t=3, p=1) + AES-256-GCM, fresh random salt/nonce per file (`portable_export.rs`). Unchanged, so `.dfirx` files move between the desktop build and the server.
+- **Bundle integrity:** a change bundle's `integrity.content_sha256` is computed over its canonical JSON (keys sorted, no whitespace, the field itself left out) and checked on load; a mismatch is refused (`BUNDLE_INTEGRITY_MESSAGE`), a missing field (older exports) is shown as "No checksum". Always hash the canonical form, never file bytes or serde's output order. This is transfer-damage/tamper detection, not a signature — anyone can recompute it.
 - **SQL:** always parameterized; table names only via hardcoded `match` arms. Keep it that way.
 - **Frontend:** no `dangerouslySetInnerHTML`, no `console.*`. Markdown notes render through the React-only `SafeMarkdown` (NoteManager) that escapes HTML and allows only `http:`/`https:`/`mailto:` links. vis-timeline `content`/`title` strings rely on the library's built-in XSS filter — do not disable it or introduce custom `template` functions that return raw HTML.
 - No accounts/RBAC by design: the expert name is self-declared attribution; the case password is the access control.
@@ -136,7 +146,8 @@ All DDL and migrations live in `db.rs`; current schema version is tracked via `P
 ## Code Style
 
 - **Frontend:** functional components, default exports for features; `@/` imports; Tailwind + `cn()`; local state via `useState`/`useEffect` with a `refreshTrigger` counter prop for re-fetch signaling; errors surfaced with sonner `toast.error`.
-- **Unsaved input** (open forms, pasted text, pending import/merge reviews) uses `useDraft` from `src/lib/drafts.ts` instead of `useState`, so it survives switching screens. Drafts are in memory only, scoped to the open case, and pruned when it changes; never put a password in a draft.
+- **Unsaved input** (open forms, pasted text, pending import/merge reviews) uses `useDraft` from `src/lib/drafts.ts` instead of `useState`, so it survives switching screens. Drafts are scoped to the open case and expert and pruned when either changes; never put a password in a draft.
+- **Persisted drafts:** `useDraft(key, initial, { persist: true })` also saves the value (debounced, ≤256 KiB) to the case under the expert's name and restores it on the next unlock — use it for text that is slow to retype. A component that closes by **unmounting** must forget its draft with `useDraftDiscard()(prefix)` on save/cancel: a `setX('')` issued in the same batch as the parent's unmount never renders, so the draft (and its saved copy) would come back.
 - **Merge apply** refuses any selected record that changed after its preview (`STALE_PREVIEW_MESSAGE` in `history.rs`); the Case Transfer screen refreshes the preview when it sees that message.
 - **Server:** snake_case command names matching the desktop ones; DB access only through `OpenCase::with_conn`; no `unwrap()` in request paths; multi-step writes always inside `conn.transaction()` with a history commit recorded in the same transaction. Adding a command means adding one `match` arm and one params struct with `#[serde(rename_all = "camelCase")]`.
 

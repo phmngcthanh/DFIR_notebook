@@ -2,7 +2,7 @@
 
 Document version: 1.0  
 Application version: 1.0.20
-Last reviewed: 2026-07-28
+Last reviewed: 2026-11-12
 
 ## 1. Purpose
 
@@ -44,8 +44,11 @@ The **active expert** is the name attributed to changes made during the current 
 When unlocking a case, enter:
 
 - expert name;
+- optional team, such as `Network exploration`, `Log analysis`, `Malware reverse engineering`, `Collection`, or `Investigation` (suggestions are offered, any text is accepted);
 - optional assignment label, such as `Room 204`, `Finance`, or `DMZ`; and
 - optional focus network zones.
+
+The team is recorded with every change you make, so **Activity Board** can show one team's work at a time. Like the name, it is attribution only and never limits what you can edit.
 
 The focus is advisory. It filters and highlights relevant work but does not prevent an expert from editing outside the assignment. The application asks for confirmation when an asset or interface is saved outside selected focus zones.
 
@@ -197,7 +200,16 @@ Use table or timeline view. Search and filter by time range, asset, severity, ev
 
 ### Step 7: Record IOCs and findings
 
-Use **IOCs** for indicators such as IP addresses, hashes, domains, and URLs. Record threat level, description, and first/last-seen times when known.
+Use **IOCs** for indicators such as IP addresses, hashes, domains, URLs, e-mail addresses, registry keys, mutexes, file paths, file names, and process names. Record threat level, description, and first/last-seen times when known.
+
+To add many at once, select **Paste IOCs** and paste a list, a reverse-engineering report, or values copied from a chat:
+
+- defanged values (`hxxps://`, `evil[.]example`, `[at]`) are refanged;
+- each value is typed automatically, and a report label such as `Mutex:`, `Process:`, `Registry:`, or `SHA256:` sets the type of what follows;
+- indicators already in the case are marked and cannot be added twice; and
+- a value whose type could not be told stays unticked until you choose one.
+
+Set one threat level and description for the batch, then select **Add**. The indicators are checked by the same rules as a single entry and added in one attributed change. Nothing is added if any ticked value is invalid; the panel lists those values instead.
 
 Use **Notes** for findings, hypotheses, evidence references, decisions, and handover information. Notes support a safe Markdown subset. Raw HTML is displayed as text rather than executed.
 
@@ -226,6 +238,22 @@ The **Dashboard** shows full-case counts, including:
 
 During coordination meetings, use the dashboard and filtered asset list to decide where responders should go next.
 
+### Throughout: capture first, sort it out later
+
+Press **Alt+C** on any screen (or select **Capture** in the sidebar) to record something the moment you learn it, such as an interview remark, a hostname read off a screen, or a line from an e-mail. Only the text is required, and it is saved exactly as typed, with your name, team, the time, and an optional source. **Ctrl+Enter** saves. **Save and capture another** keeps the source for the next note from the same conversation. **Esc** closes the dialog and keeps the text for later.
+
+Captures wait in the **Capture inbox** until someone deals with each one:
+
+- **Process** reads the text and proposes assets and indicators. For "APP01, 10.0.0.15, probably on ESX03", APP01 at 10.0.0.15 is ticked, and ESX03, only mentioned, is not. Defanged values, hashes, URLs, file paths, and registry keys are ticked as indicators; plain domains, e-mail addresses, and public IP addresses are offered unticked, since they are often just context. Edit or tick what is justified, then **Review** and **Apply**. A new host is recorded with only what the text says: its name, type "other", and its address in the one subnet that contains it. A host already in the case only gains an address it did not have. The capture is marked processed and linked to what it produced.
+- **Save as note** keeps the capture as a note that says who captured it and where it came from.
+- **Mark processed** or **Dismiss** when nothing needs recording; **Reopen** brings it back.
+
+The captured text itself never changes. Processing only creates or links records.
+
+### Throughout: search the whole case
+
+Press **Ctrl+K** (or select **Search**) and type at least two characters: a hostname, IP or MAC address, hash, indicator value, or any word from notes, timeline events, captures, or attack paths. Results are grouped by kind; use the arrow keys and **Enter**, or click, to open the screen that holds the record with it in view.
+
 ## 6. Editing and deletion behavior
 
 Core case, network, asset, interface, timeline, IOC, note, firewall, and connection records can be edited.
@@ -236,7 +264,8 @@ Important safeguards:
 - Deleting an asset removes its interfaces but keeps timeline evidence and clears the event's asset link.
 - Updates or deletes that match no record return an error.
 - Multi-table changes and imports use SQLite transactions.
-- Unsaved input (an open form, pasted text, a loaded import or bundle review) stays on its screen while you visit other screens. It is kept in memory only, never written to disk until you save, and discarded when the case is locked, another case is opened, or the session ends. Passwords are never kept.
+- Unsaved input (an open form, pasted text, a loaded import or bundle review) stays on its screen while you visit other screens, and is discarded from memory when the case is locked, another case is opened, or the session ends.
+- Text that is slow to retype is also saved to the case file, under your expert name, about a second after you stop typing: half-written captures, pasted indicator lists and imports, open record forms, and notes. It survives a crash or restart and comes back when you unlock the case with the same name. These drafts are not evidence. They are never part of the history, snapshots, or bundles, they are deleted when you save or cancel the form, and passwords are never saved.
 
 ## 7. Working alongside the rest of the team
 
@@ -258,7 +287,7 @@ to label it.
 Someone who worked in the desktop app can still hand their work over. On the
 server, open **Case Transfer** and:
 
-1. select **Load for review** and choose their bundle file;
+1. select **Load for review** and choose their bundle file, and check the badge: **Checksum verified** means the content is exactly what was exported, and **No checksum** means it came from an older version that could not prove that (a bundle damaged or altered in transit is refused outright);
 2. review topology/PC configuration and timeline changes;
 3. accept or reject each entity change;
 4. resolve same-field conflicts by choosing current or incoming value; and
@@ -282,6 +311,24 @@ Classifications include:
 - **already applied**: the imported source change was previously merged.
 
 Bundles from another case ID are rejected. Unknown baselines require explicit review.
+
+The merge is recorded under the name of whoever applied it, but each expert's original changes stay theirs. **Activity Board** shows them in the contributor's own lane, marked "merged by" and with their team, and greys out any change the merge did not take. This holds even when work is relayed through more than one merge.
+
+### Offline teams: the daily handover (desktop)
+
+When experts work on their own copies, without a shared server, **Case Transfer** shows an **Offline handover** guide with the day's cycle:
+
+1. **Hand in my work** (each expert). The guide shows how many changes this copy holds since the shared baseline. **Save change bundle** writes them to one file; encrypt it with an export password if it travels on removable media. A `.sha256` checksum file is written beside it, and the bundle carries its own checksum, which is checked when it is loaded.
+2. **Review returned work** (lead). Load each expert's bundle on the master copy, settle conflicts field by field, and apply.
+3. **Redistribute the master** (lead). After every bundle is applied, select **Mark shared baseline**, enter the case password, and select **Save full backup**. This writes a byte copy of the encrypted case, plus its event-log store when there is one, and a `.sha256` manifest. The copy is checked to open with the password before the backup is reported done.
+
+Each expert then opens the master with **Open Case → Restore a full backup or redistributed master**. The checksums are checked when the `.sha256` file is present, the backup is copied to a new working file of your choosing, and that copy opens. The backup itself is never changed and nothing is overwritten. A full backup is also simply the backup of a case: it keeps the history and the shared baseline, which a data snapshot does not.
+
+Anyone can check a transferred file before opening it:
+
+```sh
+sha256sum -c incident-7-backup-20261112-1830.db.sha256
+```
 
 ### Structured information and LLM-assisted intake
 
@@ -395,7 +442,9 @@ This is intentional. The event remains as evidence but becomes unassigned.
 2. Check suspected/infected systems and confirm supporting timeline entries.
 3. Review secondary NIC edges and unexpected cross-zone connections.
 4. Add unresolved assumptions and handover notes.
-5. Download an encrypted snapshot when handling rules require it.
-6. Review the day's work in **Activity Board** and the audit history.
-7. Select **End Session** before leaving the workstation.
-8. Operator: back up the `.db` files from the case directory under approved data-at-rest protection. A copy initially accepts the same case password.
+5. Empty the **Capture inbox**: process, keep as a note, or dismiss every open capture.
+6. Download an encrypted snapshot when handling rules require it.
+7. Review the day's work in **Activity Board**, per team where useful, and the audit history.
+8. Offline teams: experts save their change bundles; the lead merges them, marks the shared baseline, and hands out a full backup as tomorrow's master.
+9. Select **End Session** before leaving the workstation.
+10. Operator: back up the `.db` files, and any `.dfirlogs` files beside them, from the case directory under approved data-at-rest protection. A copy initially accepts the same case password.

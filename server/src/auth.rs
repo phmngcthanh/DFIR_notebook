@@ -82,6 +82,8 @@ pub struct UnlockRequest {
     pub scope_label: Option<String>,
     #[serde(default)]
     pub scope_network_ids: Vec<String>,
+    #[serde(default)]
+    pub team: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,7 +121,8 @@ pub(crate) fn unlock_inner(
         request.expert_name,
         request.scope_label,
         request.scope_network_ids,
-    )?;
+    )?
+    .with_team(request.team)?;
 
     let case = match state.unlock_case(&request.case_id, password.as_str()) {
         Ok(case) => {

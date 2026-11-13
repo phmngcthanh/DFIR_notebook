@@ -42,6 +42,7 @@ describe('CaseSetup', () => {
 
     await waitFor(() => expect(screen.getByLabelText('Case *')).toBeInTheDocument());
     await user.type(screen.getByLabelText('Expert name *'), 'Expert A');
+    await user.type(screen.getByLabelText('Team'), 'Malware reverse engineering');
     await user.type(screen.getByLabelText('Case database password *'), 'existing-secret');
     await user.click(screen.getByRole('button', { name: 'Unlock Case' }));
 
@@ -49,6 +50,7 @@ describe('CaseSetup', () => {
       caseId: 'incident-7',
       password: 'existing-secret',
       expertName: 'Expert A',
+      team: 'Malware reverse engineering',
     }));
     expect(onSession).toHaveBeenCalledOnce();
   });

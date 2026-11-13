@@ -53,10 +53,10 @@ const EXPORT_GUIDANCE: Record<VmInventoryPlatform, { native: string; csv: string
 export default function VmInventoryImportPanel({ inventory, onApplied, onClose }: Props) {
   // A pasted list and its pending review survive switching screens; the
   // reviewed preview is re-validated against the case before it is applied.
-  const [platform, setPlatform] = useDraft<VmInventoryPlatform>('assetImport.platform', 'generic');
-  const [inventoryScope, setInventoryScope] = useDraft('assetImport.scope', '');
-  const [sourceFile, setSourceFile] = useDraft('assetImport.sourceFile', '');
-  const [text, setText] = useDraft('assetImport.text', '');
+  const [platform, setPlatform] = useDraft<VmInventoryPlatform>('assetImport.platform', 'generic', { persist: true });
+  const [inventoryScope, setInventoryScope] = useDraft('assetImport.scope', '', { persist: true });
+  const [sourceFile, setSourceFile] = useDraft('assetImport.sourceFile', '', { persist: true });
+  const [text, setText] = useDraft('assetImport.text', '', { persist: true });
   const [parsed, setParsed] = useDraft<ParsedVmInventory | null>('assetImport.parsed', null);
   const [preview, setPreview] = useDraft<PartialImportPreview | null>('assetImport.preview', null);
   const [warnings, setWarnings] = useDraft<string[]>('assetImport.warnings', []);

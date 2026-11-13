@@ -47,8 +47,8 @@ export default function ConnectivityVerifier({ caseInfo, inventory, onChanged, o
   const [tab, setTab] = useState('compliance');
   // Unsaved policy edits and the half-filled policy form survive leaving the
   // Topology screen; they are only written to the case on "Save policies".
-  const [policies, setPolicies] = useDraft<ConnectivityPolicy[]>('connectivity.policies', () => parseConnectivityPolicies(caseInfo.metadata));
-  const [dirty, setDirty] = useDraft('connectivity.dirty', false);
+  const [policies, setPolicies] = useDraft<ConnectivityPolicy[]>('connectivity.policies', () => parseConnectivityPolicies(caseInfo.metadata), { persist: true });
+  const [dirty, setDirty] = useDraft('connectivity.dirty', false, { persist: true });
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useDraft<PolicyForm>('connectivity.form', {
     name: '',
@@ -58,7 +58,7 @@ export default function ConnectivityVerifier({ caseInfo, inventory, onChanged, o
     mode: 'logical',
     expectation: 'blocked',
     description: '',
-  });
+  }, { persist: true });
   const [reachSource, setReachSource] = useState(inventory.networks[0]?.id ?? '');
   const [reachTarget, setReachTarget] = useState('internet');
   const [reachDirection, setReachDirection] = useState<ConnectivityDirection | 'bidirectional'>('bidirectional');

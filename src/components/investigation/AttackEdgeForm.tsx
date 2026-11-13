@@ -44,20 +44,20 @@ export default function AttackEdgeForm({ edge, prefill, networks, assets, firewa
   // Cancel forget it. A new edge's draft is tied to the endpoints it was drawn between.
   const draftKey = `investigation.edge.${attackEdgeDraftId(edge, prefill)}.`;
   const discardDraft = useDraftDiscard();
-  const [sourceKind, setSourceKind] = useDraft<AttackEdgeSourceKind>(`${draftKey}sourceKind`, edge?.source_kind ?? prefill?.source?.kind ?? 'external');
-  const [sourceId, setSourceId] = useDraft(`${draftKey}sourceId`, edge?.source_id ?? prefill?.source?.id ?? (prefill?.source?.kind ? prefill.source.id : 'Internet'));
-  const [targetKind, setTargetKind] = useDraft<SightingEntityKind>(`${draftKey}targetKind`, edge?.target_kind ?? prefill?.target?.kind ?? 'asset');
-  const [targetId, setTargetId] = useDraft(`${draftKey}targetId`, edge?.target_id ?? prefill?.target?.id ?? '');
-  const [title, setTitle] = useDraft(`${draftKey}title`, edge?.title ?? '');
-  const [description, setDescription] = useDraft(`${draftKey}description`, edge?.description ?? '');
-  const [edgeType, setEdgeType] = useDraft<AttackEdgeType>(`${draftKey}edgeType`, edge?.edge_type ?? 'lateral_movement');
-  const [confidence, setConfidence] = useDraft<AttackEdgeConfidence>(`${draftKey}confidence`, edge?.confidence ?? 'suspected');
-  const [mitreTactic, setMitreTactic] = useDraft(`${draftKey}mitreTactic`, edge?.mitre_tactic ?? '');
-  const [mitreTechnique, setMitreTechnique] = useDraft(`${draftKey}mitreTechnique`, edge?.mitre_technique ?? '');
-  const [occurredAt, setOccurredAt] = useDraft(`${draftKey}occurredAt`, edge?.occurred_at ? toLocalInput(edge.occurred_at) : '');
-  const [timelineEventId, setTimelineEventId] = useDraft(`${draftKey}timelineEventId`, edge?.timeline_event_id ?? NONE);
-  const [sequence, setSequence] = useDraft(`${draftKey}sequence`, edge ? String(edge.sequence) : '');
-  const [iocIds, setIocIds] = useDraft<string[]>(`${draftKey}iocIds`, edge?.ioc_ids ?? []);
+  const [sourceKind, setSourceKind] = useDraft<AttackEdgeSourceKind>(`${draftKey}sourceKind`, edge?.source_kind ?? prefill?.source?.kind ?? 'external', { persist: true });
+  const [sourceId, setSourceId] = useDraft(`${draftKey}sourceId`, edge?.source_id ?? prefill?.source?.id ?? (prefill?.source?.kind ? prefill.source.id : 'Internet'), { persist: true });
+  const [targetKind, setTargetKind] = useDraft<SightingEntityKind>(`${draftKey}targetKind`, edge?.target_kind ?? prefill?.target?.kind ?? 'asset', { persist: true });
+  const [targetId, setTargetId] = useDraft(`${draftKey}targetId`, edge?.target_id ?? prefill?.target?.id ?? '', { persist: true });
+  const [title, setTitle] = useDraft(`${draftKey}title`, edge?.title ?? '', { persist: true });
+  const [description, setDescription] = useDraft(`${draftKey}description`, edge?.description ?? '', { persist: true });
+  const [edgeType, setEdgeType] = useDraft<AttackEdgeType>(`${draftKey}edgeType`, edge?.edge_type ?? 'lateral_movement', { persist: true });
+  const [confidence, setConfidence] = useDraft<AttackEdgeConfidence>(`${draftKey}confidence`, edge?.confidence ?? 'suspected', { persist: true });
+  const [mitreTactic, setMitreTactic] = useDraft(`${draftKey}mitreTactic`, edge?.mitre_tactic ?? '', { persist: true });
+  const [mitreTechnique, setMitreTechnique] = useDraft(`${draftKey}mitreTechnique`, edge?.mitre_technique ?? '', { persist: true });
+  const [occurredAt, setOccurredAt] = useDraft(`${draftKey}occurredAt`, edge?.occurred_at ? toLocalInput(edge.occurred_at) : '', { persist: true });
+  const [timelineEventId, setTimelineEventId] = useDraft(`${draftKey}timelineEventId`, edge?.timeline_event_id ?? NONE, { persist: true });
+  const [sequence, setSequence] = useDraft(`${draftKey}sequence`, edge ? String(edge.sequence) : '', { persist: true });
+  const [iocIds, setIocIds] = useDraft<string[]>(`${draftKey}iocIds`, edge?.ioc_ids ?? [], { persist: true });
   const [saving, setSaving] = useState(false);
 
   const entityOptions = (kind: string) => kind === 'asset'

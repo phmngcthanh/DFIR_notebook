@@ -39,10 +39,10 @@ export default function EventLogPanel({ refreshTrigger, onChanged }: Props) {
 
   // Pasted log text, search terms, and promotion settings survive switching
   // screens. The store password is deliberately not kept.
-  const [kind, setKind] = useDraft<ImportKind>('eventLogs.kind', 'syslog');
-  const [timezone, setTimezone] = useDraft('eventLogs.timezone', 'UTC');
-  const [hostHint, setHostHint] = useDraft('eventLogs.hostHint', '');
-  const [note, setNote] = useDraft('eventLogs.note', '');
+  const [kind, setKind] = useDraft<ImportKind>('eventLogs.kind', 'syslog', { persist: true });
+  const [timezone, setTimezone] = useDraft('eventLogs.timezone', 'UTC', { persist: true });
+  const [hostHint, setHostHint] = useDraft('eventLogs.hostHint', '', { persist: true });
+  const [note, setNote] = useDraft('eventLogs.note', '', { persist: true });
   const [text, setText] = useDraft('eventLogs.text', '');
 
   const [batches, setBatches] = useState<EventLogBatch[]>([]);

@@ -20,7 +20,7 @@ describe('expert session setup', () => {
     });
   });
 
-  it('requires a name and sends optional soft scope for attribution', async () => {
+  it('requires a name and sends optional soft scope and team for attribution', async () => {
     const onComplete = vi.fn();
     const user = userEvent.setup();
     render(<ExpertSetup onComplete={onComplete} />);
@@ -30,14 +30,26 @@ describe('expert session setup', () => {
     expect(screen.getByText('Expert name is required')).toBeInTheDocument();
 
     await user.type(screen.getByLabelText('Expert name *'), ' Alice ');
+    await user.type(screen.getByLabelText('Team'), 'Log analysis');
     await user.type(screen.getByLabelText('Optional assignment'), 'Room 204');
     await user.click(screen.getByLabelText('Office'));
     await user.click(screen.getByRole('button', { name: 'Start session' }));
 
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('set_current_expert', {
-      name: 'Alice', scopeLabel: 'Room 204', scopeNetworkIds: ['zone-1'],
+      name: 'Alice', scopeLabel: 'Room 204', scopeNetworkIds: ['zone-1'], team: 'Log analysis',
     }));
     expect(onComplete).toHaveBeenCalledWith(expect.objectContaining({ name: 'Alice', scope_label: 'Room 204' }));
     expect(localStorage.getItem('dfir-expert-name')).toBe('Alice');
+    // The team is offered again next time.
+    expect(localStorage.getItem('dfir-expert-team')).toBe('Log analysis');
+  });
+
+  it('sends no team when none is entered', async () => {
+    const user = userEvent.setup();
+    render(<ExpertSetup onComplete={vi.fn()} />);
+    await screen.findByText('Office');
+    await user.type(screen.getByLabelText('Expert name *'), 'Bob');
+    await user.click(screen.getByRole('button', { name: 'Start session' }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('set_current_expert', expect.objectContaining({ name: 'Bob', team: null })));
   });
 });

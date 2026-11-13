@@ -121,7 +121,8 @@ fn indicator_name(ioc: &Ioc) -> String {
 }
 
 /// Map an IOC to a STIX pattern. The type vocabulary matches the app's own
-/// (`IP`, `Hash`, `Domain`, `URL`, `Email`, `Registry`, `Mutex`).
+/// (`IP`, `Hash`, `Domain`, `URL`, `Email`, `Registry`, `Mutex`, `FilePath`,
+/// `FileName`, `Process`).
 fn stix_pattern(ioc: &Ioc) -> String {
     let value = escape_pattern(ioc.value.trim());
     match ioc.ioc_type.as_str() {
@@ -136,9 +137,29 @@ fn stix_pattern(ioc: &Ioc) -> String {
         "Email" => format!("[email-addr:value = '{value}']"),
         "Registry" => format!("[windows-registry-key:key = '{value}']"),
         "Mutex" => format!("[mutex:name = '{value}']"),
+        "FileName" => format!("[file:name = '{value}']"),
+        "FilePath" => file_path_pattern(ioc.value.trim()),
+        // A value with arguments is a command line; a bare name is the image.
+        "Process" if ioc.value.trim().contains(char::is_whitespace) => {
+            format!("[process:command_line = '{value}']")
+        }
+        "Process" => format!("[process:image_ref.name = '{value}']"),
         // Unknown types never validate at the create layer, but keep the export
         // total rather than dropping an indicator.
         _ => format!("[x-dfir-ioc:value = '{value}']"),
+    }
+}
+
+/// STIX has no full-path property: split into the file name and the directory
+/// it was found in.
+fn file_path_pattern(path: &str) -> String {
+    match path.rfind(['\\', '/']) {
+        Some(index) if index + 1 < path.len() => {
+            let directory = escape_pattern(&path[..index]);
+            let name = escape_pattern(&path[index + 1..]);
+            format!("[file:name = '{name}' AND file:parent_directory_ref.path = '{directory}']")
+        }
+        _ => format!("[file:name = '{}']", escape_pattern(path)),
     }
 }
 
@@ -280,6 +301,41 @@ mod tests {
             assert!(object["created"].as_str().unwrap().ends_with('Z'));
             assert!(object["valid_from"].as_str().unwrap().ends_with('Z'));
         }
+    }
+
+    #[test]
+    fn file_and_process_indicators_map_to_stix_patterns() {
+        let bundle: Value = serde_json::from_str(
+            &iocs_to_stix(&[
+                ioc("f1", "FileName", "svc.exe", "high"),
+                ioc("f2", "FilePath", r"C:\Users\Public\svc.exe", "high"),
+                ioc(
+                    "p1",
+                    "Process",
+                    "rundll32.exe shell32.dll,Control_RunDLL",
+                    "high",
+                ),
+                ioc("p2", "Process", "mimikatz.exe", "high"),
+            ])
+            .unwrap(),
+        )
+        .unwrap();
+        let patterns: Vec<&str> = bundle["objects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|object| object["pattern"].as_str().unwrap())
+            .collect();
+        assert_eq!(patterns[0], "[file:name = 'svc.exe']");
+        assert_eq!(
+            patterns[1],
+            r"[file:name = 'svc.exe' AND file:parent_directory_ref.path = 'C:\\Users\\Public']"
+        );
+        assert_eq!(
+            patterns[2],
+            "[process:command_line = 'rundll32.exe shell32.dll,Control_RunDLL']"
+        );
+        assert_eq!(patterns[3], "[process:image_ref.name = 'mimikatz.exe']");
     }
 
     #[test]

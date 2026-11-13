@@ -78,6 +78,59 @@ export interface TimelineEvent {
   mitre_tactic?: string;
   mitre_technique?: string;
   created_at: string;
+  /** Set when the event was promoted from stored evidence. */
+  source_ref?: EventLogSourceRef | null;
+}
+
+/** Where a promoted timeline event came from in the event-log store. */
+export interface EventLogSourceRef {
+  type: 'event_log_record' | string;
+  batch_id?: string;
+  batch_kind?: string;
+  file_name?: string | null;
+  batch_imported_at?: string;
+  record_id?: number;
+  ordinal?: number;
+  raw_time?: string | null;
+  event_time_utc?: string | null;
+  host?: string | null;
+  provider?: string | null;
+  channel?: string | null;
+  event_id?: string | null;
+  level?: string | null;
+  message?: string;
+  details?: string;
+  truncated?: boolean;
+}
+
+export type CaptureStatus = 'open' | 'processed' | 'dismissed';
+
+export interface CaptureLink {
+  entity_type: string;
+  entity_id: string;
+  title: string;
+}
+
+/** Information recorded verbatim the moment it was learned; sorted out later. */
+export interface Capture {
+  id: string;
+  content: string;
+  source: string;
+  status: CaptureStatus;
+  captured_by: string;
+  team?: string | null;
+  links: CaptureLink[];
+  resolution: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SearchHit {
+  entity_type: 'asset' | 'network' | 'firewall' | 'ioc' | 'timeline_event' | 'note' | 'capture' | 'attack_edge' | string;
+  entity_id: string;
+  title: string;
+  field: string;
+  detail: string;
 }
 
 export interface ClockProfile {
@@ -318,6 +371,7 @@ export interface ExpertIdentity {
   session_id: string;
   scope_label?: string;
   scope_network_ids: string[];
+  team?: string | null;
 }
 
 export interface HistoryChange {
@@ -342,6 +396,58 @@ export interface HistoryCommit {
   created_at: string;
   parent_ids: string[];
   changes: HistoryChange[];
+  /** On a merge commit: the contributors' original commits it brought in. */
+  merged_commits?: MergedCommit[];
+}
+
+export interface MergedChange {
+  id: string;
+  entity_type: string;
+  entity_id: string;
+  operation: 'create' | 'update' | 'delete';
+  applied: boolean;
+}
+
+export interface MergedCommit {
+  commit_id: string;
+  bundle_id: string;
+  author_name: string;
+  session_id: string;
+  message: string;
+  scope?: JsonValue;
+  created_at: string;
+  changes: MergedChange[];
+}
+
+export interface HandoverStatus {
+  head_commit_id: string;
+  shared_base_commit_id: string;
+  base_created_at?: string | null;
+  base_on_main_path: boolean;
+  commits_since_base: number;
+  changes_since_base: number;
+  last_change_at?: string | null;
+}
+
+export interface ManifestCheck {
+  status: 'verified' | 'absent';
+  files: string[];
+}
+
+export interface BackupSummary {
+  path: string;
+  eventLogPath?: string | null;
+  manifestPath: string;
+  bytes: number;
+  eventLogBytes?: number | null;
+  caseName: string;
+}
+
+export interface RestoreSummary {
+  path: string;
+  caseName: string;
+  manifest: ManifestCheck;
+  restoredEventLogs: boolean;
 }
 
 export interface FieldDiff {
@@ -380,6 +486,8 @@ export interface MergePreview {
   exported_at: string;
   common_base: boolean;
   changes: MergePreviewChange[];
+  /** 'verified' when the bundle's checksum matched; 'absent' for older bundles without one. */
+  integrity?: 'verified' | 'absent' | string;
 }
 
 export interface MergeDecision {
@@ -507,4 +615,4 @@ export interface EventLogSearchOutcome {
   total: number;
 }
 
-export type View = 'dashboard' | 'networks' | 'assets' | 'topology' | 'investigation' | 'timeline' | 'eventlogs' | 'iocs' | 'notes' | 'activity' | 'export' | 'about';
+export type View = 'dashboard' | 'inbox' | 'networks' | 'assets' | 'topology' | 'investigation' | 'timeline' | 'eventlogs' | 'iocs' | 'notes' | 'activity' | 'export' | 'about';

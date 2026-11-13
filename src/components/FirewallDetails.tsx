@@ -30,12 +30,12 @@ export default function FirewallDetails({ firewall, networks, onChanged }: Props
   const [natRules, setNatRules] = useState<FirewallNatRule[]>([]);
   // Interface and NAT forms are kept per firewall while the screen is left.
   const draft = `firewall.${firewall.id}`;
-  const [interfaceForm, setInterfaceForm] = useDraft(`${draft}.interfaceForm`, emptyInterface);
-  const [natForm, setNatForm] = useDraft(`${draft}.natForm`, emptyNat);
-  const [editingInterface, setEditingInterface] = useDraft<string | null>(`${draft}.editingInterface`, null);
-  const [editingNat, setEditingNat] = useDraft<string | null>(`${draft}.editingNat`, null);
-  const [showInterfaceForm, setShowInterfaceForm] = useDraft(`${draft}.showInterfaceForm`, false);
-  const [showNatForm, setShowNatForm] = useDraft(`${draft}.showNatForm`, false);
+  const [interfaceForm, setInterfaceForm] = useDraft(`${draft}.interfaceForm`, emptyInterface, { persist: true });
+  const [natForm, setNatForm] = useDraft(`${draft}.natForm`, emptyNat, { persist: true });
+  const [editingInterface, setEditingInterface] = useDraft<string | null>(`${draft}.editingInterface`, null, { persist: true });
+  const [editingNat, setEditingNat] = useDraft<string | null>(`${draft}.editingNat`, null, { persist: true });
+  const [showInterfaceForm, setShowInterfaceForm] = useDraft(`${draft}.showInterfaceForm`, false, { persist: true });
+  const [showNatForm, setShowNatForm] = useDraft(`${draft}.showNatForm`, false, { persist: true });
 
   const load = useCallback(async () => {
     const [interfaceResponse, natResponse] = await Promise.all([

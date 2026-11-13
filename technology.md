@@ -109,12 +109,13 @@ A change bundle contains:
 
 - case, bundle, baseline, and expert-head identifiers;
 - ordered commits and history parents;
-- expert name, session, time, and optional work scope; and
-- before-and-after entity values.
+- expert name, team, session, time, and optional work scope;
+- before-and-after entity values; and
+- a SHA-256 checksum of its content, checked when the bundle is loaded.
 
 The receiving investigator gets a three-way comparison of baseline, current master, and incoming values. The review identifies clean changes, automatic field merges, deletions, already-applied changes, and same-field conflicts. Investigators can select records and resolve conflicts field by field before one transaction commits the accepted result.
 
-Different case IDs, unknown baselines, and repeated bundles are not silently accepted. This makes distributed work reviewable without claiming to provide real-time collaboration or cryptographic identity.
+Different case IDs, unknown baselines, repeated bundles, and bundles damaged or altered after export are not silently accepted. Merged work stays attributed to the experts who did it, not only to whoever merged it. For the daily handover, the desktop build saves a full backup of the encrypted case, with a `sha256sum`-compatible manifest, which every expert restores as the next day's master. This makes distributed work reviewable without claiming to provide real-time collaboration or cryptographic identity.
 
 ### Controlled human, script, and LLM intake
 
@@ -203,6 +204,10 @@ An investigator can use the application to:
 - preserve source timestamps and correlate incorrect server clocks;
 - import offline Windows EVTX, Windows event JSON, and Unix syslog copies into a searchable encrypted event-log sidecar, and promote chosen records into the attributed timeline;
 - create, edit, search, and filter timeline events, IOCs, and notes;
+- capture information verbatim the moment it is learned (Alt+C) and later turn it into reviewed assets, indicators, or notes from a Capture inbox;
+- paste indicator lists and reports in bulk, with refanging, type detection, and duplicate checks;
+- search the whole case for hostnames, addresses, hashes, indicators, and text from one box (Ctrl+K);
+- follow work per team (network exploration, log analysis, malware reverse engineering, collection, investigation) in the Activity Board;
 - retain hypotheses and uncertainty without presenting them as conclusions;
 - export interoperable snapshots or password-protected portable files;
 - exchange attributed changes from a shared baseline;

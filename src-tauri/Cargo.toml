@@ -31,3 +31,5 @@ argon2 = "0.5"
 base64 = "0.22"
 getrandom = "0.2"
 zeroize = "1.8"
+# Change-bundle checksums and handover manifests (shared with the server build).
+sha2 = "0.10"

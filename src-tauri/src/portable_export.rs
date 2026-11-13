@@ -249,6 +249,7 @@ fn render_case_snapshot(root: &Value) -> Result<String, String> {
         ("ioc_sightings", "IOC SIGHTINGS"),
         ("attack_edges", "ATTACK PATHWAY"),
         ("notes", "NOTES"),
+        ("captures", "CAPTURE INBOX"),
     ] {
         render_collection(&mut output, title, object.get(field))?;
     }
@@ -295,6 +296,11 @@ fn render_change_bundle(root: &Value) -> Result<String, String> {
     ] {
         scalar_line(&mut output, &human_label(field), object.get(field));
     }
+    scalar_line(
+        &mut output,
+        "Content SHA-256",
+        root.pointer("/integrity/content_sha256"),
+    );
     render_collection(&mut output, "COMMITS AND CHANGES", object.get("commits"))?;
     Ok(output)
 }

@@ -23,14 +23,14 @@ export default function SightingForm({ entityKind, entityId, entityName, iocs, o
   // Typed work survives leaving the Investigation screen; Save and Cancel forget it.
   const draftKey = `investigation.sighting.${entityKind}.${entityId}.`;
   const discardDraft = useDraftDiscard();
-  const [iocId, setIocId] = useDraft(`${draftKey}iocId`, iocs[0]?.id ?? '');
-  const [sightedAt, setSightedAt] = useDraft(`${draftKey}sightedAt`, '');
-  const [location, setLocation] = useDraft(`${draftKey}location`, '');
-  const [note, setNote] = useDraft(`${draftKey}note`, '');
+  const [iocId, setIocId] = useDraft(`${draftKey}iocId`, iocs[0]?.id ?? '', { persist: true });
+  const [sightedAt, setSightedAt] = useDraft(`${draftKey}sightedAt`, '', { persist: true });
+  const [location, setLocation] = useDraft(`${draftKey}location`, '', { persist: true });
+  const [note, setNote] = useDraft(`${draftKey}note`, '', { persist: true });
   const selected = iocs.find((ioc) => ioc.id === iocId);
   const highThreat = selected ? ['high', 'critical'].includes(selected.threat_level) : false;
-  const [escalate, setEscalate] = useDraft(`${draftKey}escalate`, false);
-  const [escalateTo, setEscalateTo] = useDraft<'suspected' | 'infected'>(`${draftKey}escalateTo`, highThreat ? 'infected' : 'suspected');
+  const [escalate, setEscalate] = useDraft(`${draftKey}escalate`, false, { persist: true });
+  const [escalateTo, setEscalateTo] = useDraft<'suspected' | 'infected'>(`${draftKey}escalateTo`, highThreat ? 'infected' : 'suspected', { persist: true });
   const [saving, setSaving] = useState(false);
 
   const save = async () => {

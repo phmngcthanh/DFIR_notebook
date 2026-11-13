@@ -24,7 +24,7 @@ const SECTION_ORDER = [
 export default function PartialImportPanel({ disabled, onApplied }: Props) {
   // Pasted JSON and a pending review survive switching screens; apply still
   // re-validates every selected record against the case.
-  const [jsonText, setJsonText] = useDraft('partialImport.text', '');
+  const [jsonText, setJsonText] = useDraft('partialImport.text', '', { persist: true });
   const [preview, setPreview] = useDraft<PartialImportPreview | null>('partialImport.preview', null);
   const [selected, setSelected] = useDraft<Selection>('partialImport.selected', {});
   const [validation, setValidation] = useDraft<PartialSelectionValidation | null>('partialImport.validation', null);

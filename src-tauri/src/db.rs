@@ -113,6 +113,43 @@ pub struct TimelineEvent {
     pub mitre_tactic: Option<String>,
     pub mitre_technique: Option<String>,
     pub created_at: String,
+    /// Where the event came from when it was promoted from stored evidence:
+    /// the event-log batch and record, the original timestamp text, and an
+    /// excerpt of the raw record, so a recipient can trace the finding back.
+    #[serde(default)]
+    pub source_ref: Option<Value>,
+}
+
+/// An entity a capture was turned into while it was processed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CaptureLink {
+    pub entity_type: String,
+    pub entity_id: String,
+    #[serde(default)]
+    pub title: String,
+}
+
+/// Raw information recorded the moment it was learned ("APP01, 10.0.0.15,
+/// probably on ESX03. Finance owns it."), kept verbatim with who captured it
+/// and when. Classification and linking happen later, when it is processed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Capture {
+    pub id: String,
+    pub content: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default = "default_capture_status")]
+    pub status: String,
+    #[serde(default)]
+    pub captured_by: String,
+    #[serde(default)]
+    pub team: Option<String>,
+    #[serde(default)]
+    pub links: Vec<CaptureLink>,
+    #[serde(default)]
+    pub resolution: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,10 +441,16 @@ pub struct ExportData {
     pub attack_edges: Vec<AttackEdge>,
     #[serde(default)]
     pub investigation_views: Vec<InvestigationView>,
+    #[serde(default)]
+    pub captures: Vec<Capture>,
 }
 
 fn default_format_version() -> u32 {
     1
+}
+
+fn default_capture_status() -> String {
+    "open".to_string()
 }
 
 fn default_edge_type() -> String {
@@ -578,7 +621,8 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             source TEXT,
             mitre_tactic TEXT,
             mitre_technique TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            source_ref TEXT
         );
         CREATE TABLE IF NOT EXISTS notes (
             id TEXT PRIMARY KEY,
@@ -684,6 +728,41 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             head_commit_id TEXT NOT NULL,
             shared_base_commit_id TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS captures (
+            id TEXT PRIMARY KEY,
+            content TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'open',
+            captured_by TEXT NOT NULL DEFAULT '',
+            team TEXT,
+            links TEXT NOT NULL DEFAULT '[]',
+            resolution TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        -- Unsaved form input per expert. Working state, not evidence: it has no
+        -- history and is left out of snapshots and change bundles.
+        CREATE TABLE IF NOT EXISTS drafts (
+            owner TEXT NOT NULL,
+            draft_key TEXT NOT NULL,
+            value_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (owner, draft_key)
+        );
+        -- The original commits behind a merge, so a contributor's authorship,
+        -- times, and team survive the merger's single merge commit.
+        CREATE TABLE IF NOT EXISTS history_merged_commits (
+            merge_commit_id TEXT NOT NULL REFERENCES history_commits(id),
+            commit_id TEXT NOT NULL,
+            bundle_id TEXT NOT NULL,
+            author_name TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            message TEXT NOT NULL,
+            scope_json TEXT,
+            created_at TEXT NOT NULL,
+            changes_json TEXT NOT NULL,
+            PRIMARY KEY (merge_commit_id, commit_id)
+        );
         CREATE INDEX IF NOT EXISTS idx_assets_network ON assets(network_id);
         CREATE INDEX IF NOT EXISTS idx_timeline_asset ON timeline_events(asset_id);
         CREATE INDEX IF NOT EXISTS idx_timeline_time ON timeline_events(timestamp);
@@ -706,7 +785,9 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
         CREATE INDEX IF NOT EXISTS idx_attack_edges_source ON attack_edges(source_kind, source_id);
         CREATE INDEX IF NOT EXISTS idx_attack_edges_target ON attack_edges(target_kind, target_id);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_investigation_views_name ON investigation_views(LOWER(name));
-        PRAGMA user_version = 7;",
+        CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status);
+        CREATE INDEX IF NOT EXISTS idx_history_merged_commits_merge ON history_merged_commits(merge_commit_id);
+        PRAGMA user_version = 8;",
     )
     .map_err(|e| e.to_string())
 }
@@ -892,9 +973,17 @@ pub fn validate_and_migrate_case(conn: &mut Connection) -> AppResult<()> {
     // entirely see it created (with the column) before the ALTER is attempted.
     for table in ["assets", "networks", "firewalls"] {
         if !column_exists(conn, table, "quick_note")? {
-            conn.execute(&format!("ALTER TABLE {table} ADD COLUMN quick_note TEXT"), [])
-                .map_err(|e| e.to_string())?;
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN quick_note TEXT"),
+                [],
+            )
+            .map_err(|e| e.to_string())?;
         }
+    }
+    // Schema 8: promoted timeline events keep a reference to their raw record.
+    if !column_exists(conn, "timeline_events", "source_ref")? {
+        conn.execute("ALTER TABLE timeline_events ADD COLUMN source_ref TEXT", [])
+            .map_err(|e| e.to_string())?;
     }
     repair_legacy_references(conn)?;
     backfill_primary_interfaces(conn)?;
@@ -1199,6 +1288,13 @@ pub fn initialize_history(conn: &Connection) -> AppResult<()> {
             serde_json::to_value(item).map_err(|e| e.to_string())?,
         ));
     }
+    for item in get_captures(conn)? {
+        baseline_entities.push((
+            "capture",
+            item.id.clone(),
+            serde_json::to_value(item).map_err(|e| e.to_string())?,
+        ));
+    }
     for (entity_type, entity_id, _) in baseline_entities {
         conn.execute(
             "INSERT OR IGNORE INTO history_entity_heads
@@ -1408,11 +1504,27 @@ pub fn get_timeline_events(conn: &Connection) -> AppResult<Vec<TimelineEvent>> {
         "SELECT e.id,e.asset_id,a.name,e.timestamp,e.raw_timestamp,e.raw_timezone,
                 e.server_timestamp_utc,e.correct_timestamp_raw,e.correct_timezone,
                 e.clock_profile_id,cp.name,e.clock_offset_ms,e.time_precision,e.correct_time_precision,
-                e.event_type,e.description,e.severity,e.source,e.mitre_tactic,e.mitre_technique,e.created_at
+                e.event_type,e.description,e.severity,e.source,e.mitre_tactic,e.mitre_technique,e.created_at,
+                e.source_ref
          FROM timeline_events e
          LEFT JOIN assets a ON a.id=e.asset_id
          LEFT JOIN clock_profiles cp ON cp.id=e.clock_profile_id
          ORDER BY CASE WHEN e.timestamp='' THEN 1 ELSE 0 END,e.timestamp,e.created_at", [], map_timeline)
+}
+
+/// JSON kept in a TEXT column. Text that is not JSON is preserved as a string
+/// rather than dropped, so a hand-edited value never disappears silently.
+fn json_text_value(text: Option<String>) -> Option<Value> {
+    text.filter(|value| !value.trim().is_empty())
+        .map(|value| serde_json::from_str(&value).unwrap_or(Value::String(value)))
+}
+
+fn json_value_text(value: &Option<Value>) -> AppResult<Option<String>> {
+    value
+        .as_ref()
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::to_string(value).map_err(|e| e.to_string()))
+        .transpose()
 }
 
 fn map_timeline(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimelineEvent> {
@@ -1438,6 +1550,7 @@ fn map_timeline(row: &rusqlite::Row<'_>) -> rusqlite::Result<TimelineEvent> {
         mitre_tactic: row.get(18)?,
         mitre_technique: row.get(19)?,
         created_at: row.get(20)?,
+        source_ref: json_text_value(row.get(21)?),
     })
 }
 
@@ -1490,6 +1603,579 @@ pub fn get_iocs(conn: &Connection) -> AppResult<Vec<Ioc>> {
     query_vec(conn, "SELECT id,ioc_type,value,description,threat_level,first_seen,last_seen,created_at FROM iocs ORDER BY created_at DESC", [], |row| {
         Ok(Ioc { id: row.get(0)?, ioc_type: row.get(1)?, value: row.get(2)?, description: row.get(3)?, threat_level: row.get(4)?, first_seen: row.get(5)?, last_seen: row.get(6)?, created_at: row.get(7)? })
     })
+}
+
+const CAPTURE_SELECT: &str = "SELECT id,content,source,status,captured_by,team,links,resolution,created_at,updated_at FROM captures";
+
+fn map_capture(row: &rusqlite::Row<'_>) -> rusqlite::Result<Capture> {
+    let links: String = row.get(6)?;
+    Ok(Capture {
+        id: row.get(0)?,
+        content: row.get(1)?,
+        source: row.get(2)?,
+        status: row.get(3)?,
+        captured_by: row.get(4)?,
+        team: row.get(5)?,
+        links: serde_json::from_str(&links).unwrap_or_default(),
+        resolution: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+/// Open captures first, newest first within each status.
+pub fn get_captures(conn: &Connection) -> AppResult<Vec<Capture>> {
+    query_vec(
+        conn,
+        &format!(
+            "{CAPTURE_SELECT} ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, created_at DESC"
+        ),
+        [],
+        map_capture,
+    )
+}
+
+pub fn get_capture(conn: &Connection, id: &str) -> AppResult<Option<Capture>> {
+    get_row_optional(
+        conn,
+        &format!("{CAPTURE_SELECT} WHERE id=?1"),
+        id,
+        map_capture,
+    )
+}
+
+fn capture_links_text(links: &[CaptureLink]) -> AppResult<String> {
+    serde_json::to_string(links).map_err(|e| e.to_string())
+}
+
+fn normalized_capture_links(links: Vec<CaptureLink>) -> Vec<CaptureLink> {
+    let mut result: Vec<CaptureLink> = Vec::new();
+    for link in links {
+        let link = CaptureLink {
+            entity_type: link.entity_type.trim().to_string(),
+            entity_id: link.entity_id.trim().to_string(),
+            title: link.title.trim().chars().take(200).collect(),
+        };
+        if !result
+            .iter()
+            .any(|item| item.entity_type == link.entity_type && item.entity_id == link.entity_id)
+        {
+            result.push(link);
+        }
+    }
+    result
+}
+
+/// Record what was learned exactly as written. Only the text is required;
+/// the capturing expert and their team come from the session.
+pub fn create_capture(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    content: &str,
+    source: &str,
+) -> AppResult<Capture> {
+    let now = Utc::now().to_rfc3339();
+    let item = Capture {
+        id: Uuid::new_v4().to_string(),
+        content: content.trim().to_string(),
+        source: source.trim().to_string(),
+        status: "open".to_string(),
+        captured_by: actor.name.clone(),
+        team: actor.team.clone(),
+        links: Vec::new(),
+        resolution: String::new(),
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    validate_capture_model(&item)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO captures(id,content,source,status,captured_by,team,links,resolution,created_at,updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![
+            item.id,
+            item.content,
+            item.source,
+            item.status,
+            item.captured_by,
+            item.team,
+            capture_links_text(&item.links)?,
+            item.resolution,
+            item.created_at,
+            item.updated_at
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    record_commit_tx(
+        &tx,
+        actor,
+        "Captured information",
+        vec![single_change(
+            "capture",
+            &item.id,
+            "create",
+            None,
+            Some(to_value(&item)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(item)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_capture(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    id: &str,
+    content: &str,
+    source: &str,
+    status: &str,
+    links: Vec<CaptureLink>,
+    resolution: &str,
+) -> AppResult<Capture> {
+    let before = require_existing(get_capture(conn, id)?, "Capture")?;
+    let after = Capture {
+        content: content.trim().to_string(),
+        source: source.trim().to_string(),
+        status: status.trim().to_string(),
+        links: normalized_capture_links(links),
+        resolution: resolution.trim().to_string(),
+        updated_at: Utc::now().to_rfc3339(),
+        ..before.clone()
+    };
+    validate_capture_model(&after)?;
+    let message = if after.status == before.status {
+        "Updated capture"
+    } else {
+        match after.status.as_str() {
+            "processed" => "Processed capture",
+            "dismissed" => "Dismissed capture",
+            _ => "Reopened capture",
+        }
+    };
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let changed = tx
+        .execute(
+            "UPDATE captures SET content=?1,source=?2,status=?3,links=?4,resolution=?5,updated_at=?6 WHERE id=?7",
+            params![
+                after.content,
+                after.source,
+                after.status,
+                capture_links_text(&after.links)?,
+                after.resolution,
+                after.updated_at,
+                id
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("Capture was not found".into());
+    }
+    record_commit_tx(
+        &tx,
+        actor,
+        message,
+        vec![single_change(
+            "capture",
+            id,
+            "update",
+            Some(to_value(&before)?),
+            Some(to_value(&after)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(after)
+}
+
+pub fn delete_capture(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> AppResult<()> {
+    let before = require_existing(get_entity_json(conn, "capture", id)?, "Capture")?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    if tx
+        .execute("DELETE FROM captures WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?
+        == 0
+    {
+        return Err("Capture was not found".into());
+    }
+    record_commit_tx(
+        &tx,
+        actor,
+        "Deleted capture",
+        vec![single_change("capture", id, "delete", Some(before), None)],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+// ---- drafts -----------------------------------------------------------------
+// Unsaved form input, kept per expert so it survives a restart or a crash.
+// Working state, not evidence: no history, no revision bump on the server,
+// and never part of a snapshot or change bundle.
+
+/// Longest draft key accepted; keys are UI identifiers such as `assets.form`.
+const MAX_DRAFT_KEY_CHARS: usize = 200;
+/// Largest single draft persisted. Bigger values (a pasted multi-megabyte log)
+/// stay in the window's memory only.
+pub const MAX_DRAFT_BYTES: usize = 256 * 1024;
+const MAX_DRAFTS_PER_SAVE: usize = 500;
+
+pub fn load_drafts(conn: &Connection, owner: &str) -> AppResult<serde_json::Map<String, Value>> {
+    let rows = query_vec(
+        conn,
+        "SELECT draft_key,value_json FROM drafts WHERE owner=?1 ORDER BY draft_key",
+        params![owner.trim()],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let mut drafts = serde_json::Map::new();
+    for (key, json) in rows {
+        if let Ok(value) = serde_json::from_str::<Value>(&json) {
+            drafts.insert(key, value);
+        }
+    }
+    Ok(drafts)
+}
+
+/// Upsert each draft; a `null` value deletes it. One transaction per call.
+pub fn save_drafts(
+    conn: &mut Connection,
+    owner: &str,
+    drafts: &serde_json::Map<String, Value>,
+) -> AppResult<usize> {
+    let owner = owner.trim();
+    validate_required("Draft owner", owner)?;
+    if drafts.len() > MAX_DRAFTS_PER_SAVE {
+        return Err(format!("Save at most {MAX_DRAFTS_PER_SAVE} drafts at once"));
+    }
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for (key, value) in drafts {
+        if key.trim().is_empty() || key.chars().count() > MAX_DRAFT_KEY_CHARS {
+            return Err("Draft keys must be 1 to 200 characters".to_string());
+        }
+        if value.is_null() {
+            tx.execute(
+                "DELETE FROM drafts WHERE owner=?1 AND draft_key=?2",
+                params![owner, key],
+            )
+            .map_err(|e| e.to_string())?;
+            continue;
+        }
+        let json = serde_json::to_string(value).map_err(|e| e.to_string())?;
+        if json.len() > MAX_DRAFT_BYTES {
+            return Err(format!(
+                "Draft '{key}' is larger than {} KiB and stays unsaved",
+                MAX_DRAFT_BYTES / 1024
+            ));
+        }
+        tx.execute(
+            "INSERT INTO drafts(owner,draft_key,value_json,updated_at) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(owner,draft_key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
+            params![owner, key, json, now],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(drafts.len())
+}
+
+// ---- case-wide search -------------------------------------------------------
+
+/// One case-wide search result. `entity_type`/`entity_id` say where to go;
+/// `field` and `detail` say why it matched.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SearchHit {
+    pub entity_type: String,
+    pub entity_id: String,
+    pub title: String,
+    pub field: String,
+    pub detail: String,
+}
+
+/// A searchable record set. Every identifier is a compile-time constant, so
+/// the generated SQL never contains user input; the query is a bound pattern.
+struct SearchSource {
+    entity_type: &'static str,
+    from: &'static str,
+    id_expr: &'static str,
+    title_expr: &'static str,
+    fields: &'static [(&'static str, &'static str)],
+}
+
+const SEARCH_SOURCES: &[SearchSource] = &[
+    SearchSource {
+        entity_type: "asset",
+        from: "assets",
+        id_expr: "id",
+        title_expr: "name",
+        fields: &[
+            ("name", "name"),
+            ("IP", "ip_address"),
+            ("MAC", "mac_address"),
+            ("OS", "os"),
+            ("user / owner", "user_name"),
+            ("quick note", "quick_note"),
+            ("details", "properties"),
+        ],
+    },
+    SearchSource {
+        entity_type: "asset",
+        from: "network_interfaces ni JOIN assets a ON a.id=ni.asset_id",
+        id_expr: "a.id",
+        title_expr: "a.name",
+        fields: &[
+            ("interface IP", "ni.ip_address"),
+            ("interface MAC", "ni.mac_address"),
+            ("interface", "ni.name"),
+        ],
+    },
+    SearchSource {
+        entity_type: "network",
+        from: "networks",
+        id_expr: "id",
+        title_expr: "name",
+        fields: &[
+            ("name", "name"),
+            ("subnet", "subnet"),
+            ("VLAN", "vlan_id"),
+            ("description", "description"),
+            ("quick note", "quick_note"),
+        ],
+    },
+    SearchSource {
+        entity_type: "firewall",
+        from: "firewalls",
+        id_expr: "id",
+        title_expr: "name",
+        fields: &[
+            ("name", "name"),
+            ("vendor", "vendor"),
+            ("model", "model"),
+            ("quick note", "quick_note"),
+            ("configuration", "config_text"),
+        ],
+    },
+    SearchSource {
+        entity_type: "firewall",
+        from: "firewall_interfaces fi JOIN firewalls f ON f.id=fi.firewall_id",
+        id_expr: "f.id",
+        title_expr: "f.name",
+        fields: &[
+            ("interface IP", "fi.ip_addresses"),
+            ("interface MAC", "fi.mac_address"),
+            ("interface", "fi.name"),
+        ],
+    },
+    SearchSource {
+        entity_type: "ioc",
+        from: "iocs",
+        id_expr: "id",
+        title_expr: "value",
+        fields: &[("value", "value"), ("description", "description")],
+    },
+    SearchSource {
+        entity_type: "timeline_event",
+        from: "timeline_events",
+        id_expr: "id",
+        title_expr: "description",
+        fields: &[
+            ("description", "description"),
+            ("source", "source"),
+            ("server time", "raw_timestamp"),
+            ("MITRE technique", "mitre_technique"),
+            ("MITRE tactic", "mitre_tactic"),
+            ("source record", "source_ref"),
+        ],
+    },
+    SearchSource {
+        entity_type: "note",
+        from: "notes",
+        id_expr: "id",
+        title_expr: "title",
+        fields: &[("title", "title"), ("content", "content")],
+    },
+    SearchSource {
+        entity_type: "capture",
+        from: "captures",
+        id_expr: "id",
+        title_expr: "content",
+        fields: &[("text", "content"), ("source", "source")],
+    },
+    SearchSource {
+        entity_type: "attack_edge",
+        from: "attack_edges",
+        id_expr: "id",
+        title_expr: "title",
+        fields: &[("title", "title"), ("description", "description")],
+    },
+];
+
+const SEARCH_MIN_CHARS: usize = 2;
+const SEARCH_PER_SOURCE: usize = 25;
+
+fn like_pattern(text: &str) -> String {
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+/// MAC addresses are written with ':' or '-' separators; search both forms.
+fn search_variants(query: &str) -> Vec<String> {
+    let mut variants = vec![query.to_lowercase()];
+    let separated_hex = query
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || matches!(c, ':' | '-'))
+        && query.contains([':', '-']);
+    if separated_hex {
+        for (from, to) in [(':', "-"), ('-', ":")] {
+            let variant = query.to_lowercase().replace(from, to);
+            if !variants.contains(&variant) {
+                variants.push(variant);
+            }
+        }
+    }
+    variants
+}
+
+/// Character offset of `needle` (already lower-cased) in `haystack`.
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let lower = haystack.to_lowercase();
+    let byte = lower.find(needle)?;
+    Some(lower[..byte].chars().count())
+}
+
+fn search_snippet(value: &str, position: usize, needle_chars: usize) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let start = position.saturating_sub(30).min(chars.len());
+    let end = (position + needle_chars + 60).min(chars.len()).max(start);
+    let mut text = chars[start..end]
+        .iter()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if start > 0 {
+        text.insert(0, '…');
+    }
+    if end < chars.len() {
+        text.push('…');
+    }
+    text
+}
+
+fn search_title(value: &str) -> String {
+    let line = value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let short: String = line.chars().take(90).collect();
+    if line.chars().count() > 90 {
+        format!("{short}…")
+    } else {
+        short
+    }
+}
+
+/// Find hostnames, IPs, MACs, hashes, IOC values, and text anywhere in the
+/// case. Exact field matches rank first, then prefix matches, then the rest.
+pub fn search_case(conn: &Connection, query: &str, limit: usize) -> AppResult<Vec<SearchHit>> {
+    let query: String = query.trim().chars().take(200).collect();
+    if query.chars().count() < SEARCH_MIN_CHARS {
+        return Ok(Vec::new());
+    }
+    let exact = query.to_lowercase();
+    let needles = search_variants(&query);
+    let limit = limit.clamp(1, 200);
+    let mut scored: Vec<(u8, usize, SearchHit)> = Vec::new();
+    for (source_index, source) in SEARCH_SOURCES.iter().enumerate() {
+        let columns: Vec<&str> = source.fields.iter().map(|(_, column)| *column).collect();
+        let condition = columns
+            .iter()
+            .map(|column| format!("{column} LIKE ?1 ESCAPE '\\'"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let sql = format!(
+            "SELECT {},{},{} FROM {} WHERE {} LIMIT {}",
+            source.id_expr,
+            source.title_expr,
+            columns.join(","),
+            source.from,
+            condition,
+            SEARCH_PER_SOURCE
+        );
+        let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        for needle in &needles {
+            let rows = statement
+                .query_map(params![like_pattern(needle)], |row| {
+                    let id: String = row.get(0)?;
+                    let title: Option<String> = row.get(1)?;
+                    let mut values = Vec::with_capacity(columns.len());
+                    for index in 0..columns.len() {
+                        values.push(row.get::<_, Option<String>>(index + 2)?);
+                    }
+                    Ok((id, title.unwrap_or_default(), values))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            for (id, title, values) in rows {
+                if scored
+                    .iter()
+                    .any(|(_, _, hit)| hit.entity_type == source.entity_type && hit.entity_id == id)
+                {
+                    continue;
+                }
+                let matched =
+                    source
+                        .fields
+                        .iter()
+                        .zip(values.iter())
+                        .find_map(|((label, _), value)| {
+                            let value = value.as_deref()?;
+                            let (position, needle_chars) = needles.iter().find_map(|needle| {
+                                find_ci(value, needle).map(|at| (at, needle.chars().count()))
+                            })?;
+                            let lower = value.trim().to_lowercase();
+                            let score = if lower == exact {
+                                0
+                            } else if lower.starts_with(&exact) {
+                                1
+                            } else {
+                                2
+                            };
+                            Some((
+                                score,
+                                (*label).to_string(),
+                                search_snippet(value, position, needle_chars),
+                            ))
+                        });
+                let Some((score, field, detail)) = matched else {
+                    continue;
+                };
+                scored.push((
+                    score,
+                    source_index,
+                    SearchHit {
+                        entity_type: source.entity_type.to_string(),
+                        entity_id: id,
+                        title: search_title(&title),
+                        field,
+                        detail,
+                    },
+                ));
+            }
+        }
+    }
+    scored.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    Ok(scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, hit)| hit)
+        .collect())
 }
 
 pub fn get_firewalls(conn: &Connection) -> AppResult<Vec<Firewall>> {
@@ -2265,12 +2951,14 @@ pub fn parse_log_timestamp(value: &str, timezone: &str) -> AppResult<String> {
     Ok(format_utc(datetime))
 }
 
+/// IOC types every write path accepts. File paths, file names, and process
+/// names cover what reverse engineers and endpoint teams hand over most.
+pub const IOC_TYPES: &[&str] = &[
+    "IP", "Hash", "Domain", "URL", "Email", "Registry", "Mutex", "FilePath", "FileName", "Process",
+];
+
 fn validate_ioc_value(ioc_type: &str, value: &str) -> AppResult<()> {
-    validate_enum(
-        "IOC type",
-        ioc_type,
-        &["IP", "Hash", "Domain", "URL", "Email", "Registry", "Mutex"],
-    )?;
+    validate_enum("IOC type", ioc_type, IOC_TYPES)?;
     let value = value.trim();
     match ioc_type {
         "IP" => validate_ip(value),
@@ -2292,6 +2980,16 @@ fn validate_ioc_value(ioc_type: &str, value: &str) -> AppResult<()> {
         }
         "Email" if value.split_once('@').is_none() || value.contains(char::is_whitespace) => {
             Err("Email IOC is invalid".to_string())
+        }
+        "FilePath" if value.contains(['\n', '\r']) || !value.contains(['\\', '/']) => {
+            Err("File path IOC must include a directory, e.g. C:\\Users\\Public\\a.exe".to_string())
+        }
+        "FileName" if value.contains(['\n', '\r', '\\', '/']) => Err(
+            "File name IOC must be a name without a directory; use File path for full paths"
+                .to_string(),
+        ),
+        "Process" if value.contains(['\n', '\r']) => {
+            Err("Process IOC must fit on one line".to_string())
         }
         _ => Ok(()),
     }
@@ -2361,6 +3059,40 @@ fn validate_clock_profile_model(value: &ClockProfile) -> AppResult<()> {
             "Clock profile '{}' has an inconsistent offset",
             value.name
         ));
+    }
+    Ok(())
+}
+
+const CAPTURE_STATUSES: &[&str] = &["open", "processed", "dismissed"];
+/// Captured text is pasted notes, not a file store; the cap keeps one paste
+/// from bloating every snapshot and bundle that carries it.
+const MAX_CAPTURE_CHARS: usize = 200_000;
+/// Entities a processed capture may point at.
+const CAPTURE_LINK_TYPES: &[&str] = &[
+    "asset",
+    "network",
+    "network_interface",
+    "firewall",
+    "ioc",
+    "ioc_sighting",
+    "timeline_event",
+    "note",
+    "attack_edge",
+    "network_connection",
+    "clock_profile",
+];
+
+fn validate_capture_model(value: &Capture) -> AppResult<()> {
+    validate_required("Captured text", &value.content)?;
+    if value.content.chars().count() > MAX_CAPTURE_CHARS {
+        return Err(format!(
+            "Captured text is limited to {MAX_CAPTURE_CHARS} characters; keep large material as evidence files"
+        ));
+    }
+    validate_enum("capture status", &value.status, CAPTURE_STATUSES)?;
+    for link in &value.links {
+        validate_enum("capture link type", &link.entity_type, CAPTURE_LINK_TYPES)?;
+        validate_required("Capture link id", &link.entity_id)?;
     }
     Ok(())
 }
@@ -2759,6 +3491,9 @@ fn validate_export_data(data: &ExportData) -> AppResult<()> {
     for value in &data.investigation_views {
         validate_investigation_view_model(value)?;
     }
+    for value in &data.captures {
+        validate_capture_model(value)?;
+    }
     Ok(())
 }
 
@@ -2813,7 +3548,8 @@ pub fn get_entity_json(conn: &Connection, entity_type: &str, id: &str) -> AppRes
             "SELECT e.id,e.asset_id,a.name,e.timestamp,e.raw_timestamp,e.raw_timezone,
                     e.server_timestamp_utc,e.correct_timestamp_raw,e.correct_timezone,
                     e.clock_profile_id,cp.name,e.clock_offset_ms,e.time_precision,e.correct_time_precision,
-                    e.event_type,e.description,e.severity,e.source,e.mitre_tactic,e.mitre_technique,e.created_at
+                    e.event_type,e.description,e.severity,e.source,e.mitre_tactic,e.mitre_technique,e.created_at,
+                    e.source_ref
              FROM timeline_events e LEFT JOIN assets a ON a.id=e.asset_id
              LEFT JOIN clock_profiles cp ON cp.id=e.clock_profile_id WHERE e.id=?1", id, map_timeline)?.map(|v| to_value(&v)).transpose(),
         "note" => get_row_optional(conn, "SELECT id,title,content,created_at,updated_at FROM notes WHERE id=?1", id, |row| {
@@ -2845,6 +3581,8 @@ pub fn get_entity_json(conn: &Connection, entity_type: &str, id: &str) -> AppRes
         "ioc_sighting" => get_row_optional(conn, &format!("{SIGHTING_SELECT} WHERE s.id=?1"), id, map_sighting)?
             .map(|v| to_value(&v)).transpose(),
         "attack_edge" => get_row_optional(conn, &format!("{ATTACK_EDGE_SELECT} WHERE e.id=?1"), id, map_attack_edge)?
+            .map(|v| to_value(&v)).transpose(),
+        "capture" => get_row_optional(conn, &format!("{CAPTURE_SELECT} WHERE id=?1"), id, map_capture)?
             .map(|v| to_value(&v)).transpose(),
         _ => Err(format!("Unsupported entity type: {entity_type}")),
     }
@@ -2923,9 +3661,7 @@ fn link_unassigned_endpoints_to_network(
     // `network` has already been written in this transaction, so the list
     // holds its new subnet alongside every competing one.
     let networks = get_networks(tx)?;
-    let belongs_here = |ip: &str| {
-        matches!(match_network_for_ip(&networks, ip), SubnetMatch::Unique(best) if best.id == network.id)
-    };
+    let belongs_here = |ip: &str| matches!(match_network_for_ip(&networks, ip), SubnetMatch::Unique(best) if best.id == network.id);
     let mut primary_asset_ids = Vec::new();
     for mut interface in get_network_interfaces(tx, None)? {
         if interface.network_id.is_some() || !belongs_here(&interface.ip_address) {
@@ -3026,7 +3762,10 @@ pub fn create_network(
     let mut message = format!("Created network {}", item.name);
     let linked = link_unassigned_endpoints_to_network(&tx, &item)?;
     if !linked.is_empty() {
-        message.push_str(&format!(" and linked {} unassigned endpoint(s)", linked.len()));
+        message.push_str(&format!(
+            " and linked {} unassigned endpoint(s)",
+            linked.len()
+        ));
         changes.extend(linked);
     }
     record_commit_tx(&tx, actor, &message, changes, &[])?;
@@ -3082,7 +3821,10 @@ pub fn update_network(
     let mut message = format!("Updated network {}", after.name);
     let linked = link_unassigned_endpoints_to_network(&tx, &after)?;
     if !linked.is_empty() {
-        message.push_str(&format!(" and linked {} unassigned endpoint(s)", linked.len()));
+        message.push_str(&format!(
+            " and linked {} unassigned endpoint(s)",
+            linked.len()
+        ));
         changes.extend(linked);
     }
     record_commit_tx(&tx, actor, &message, changes, &[])?;
@@ -4292,6 +5034,45 @@ pub fn create_timeline_event(
     mitre_tactic: Option<&str>,
     mitre_technique: Option<&str>,
 ) -> AppResult<TimelineEvent> {
+    create_timeline_event_with_source(
+        conn,
+        actor,
+        asset_id,
+        server_timestamp,
+        server_timezone,
+        correct_timestamp,
+        correct_timezone,
+        clock_profile_id,
+        event_type,
+        description,
+        severity,
+        source,
+        mitre_tactic,
+        mitre_technique,
+        None,
+    )
+}
+
+/// `create_timeline_event` plus a structured reference to the evidence the
+/// event was promoted from (see `TimelineEvent::source_ref`).
+#[allow(clippy::too_many_arguments)]
+pub fn create_timeline_event_with_source(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    asset_id: Option<&str>,
+    server_timestamp: Option<&str>,
+    server_timezone: Option<&str>,
+    correct_timestamp: Option<&str>,
+    correct_timezone: Option<&str>,
+    clock_profile_id: Option<&str>,
+    event_type: &str,
+    description: &str,
+    severity: &str,
+    source: Option<&str>,
+    mitre_tactic: Option<&str>,
+    mitre_technique: Option<&str>,
+    source_ref: Option<Value>,
+) -> AppResult<TimelineEvent> {
     let times = resolve_event_times(
         conn,
         server_timestamp,
@@ -4321,6 +5102,7 @@ pub fn create_timeline_event(
         .flatten()
     });
     let item = TimelineEvent {
+        source_ref: source_ref.filter(|value| !value.is_null()),
         id: Uuid::new_v4().to_string(),
         asset_id: asset_id.map(String::from),
         asset_name,
@@ -4353,8 +5135,9 @@ pub fn create_timeline_event(
         created_at: Utc::now().to_rfc3339(),
     };
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    tx.execute("INSERT INTO timeline_events(id,asset_id,timestamp,raw_timestamp,raw_timezone,server_timestamp_utc,correct_timestamp_raw,correct_timezone,clock_profile_id,clock_offset_ms,time_precision,correct_time_precision,event_type,description,severity,source,mitre_tactic,mitre_technique,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
-        params![item.id,item.asset_id,item.timestamp,item.raw_timestamp,item.raw_timezone,item.server_timestamp_utc,item.correct_timestamp_raw,item.correct_timezone,item.clock_profile_id,item.clock_offset_ms,item.time_precision,item.correct_time_precision,item.event_type,item.description,item.severity,item.source,item.mitre_tactic,item.mitre_technique,item.created_at]).map_err(|e|e.to_string())?;
+    let source_ref_text = json_value_text(&item.source_ref)?;
+    tx.execute("INSERT INTO timeline_events(id,asset_id,timestamp,raw_timestamp,raw_timezone,server_timestamp_utc,correct_timestamp_raw,correct_timezone,clock_profile_id,clock_offset_ms,time_precision,correct_time_precision,event_type,description,severity,source,mitre_tactic,mitre_technique,created_at,source_ref) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
+        params![item.id,item.asset_id,item.timestamp,item.raw_timestamp,item.raw_timezone,item.server_timestamp_utc,item.correct_timestamp_raw,item.correct_timezone,item.clock_profile_id,item.clock_offset_ms,item.time_precision,item.correct_time_precision,item.event_type,item.description,item.severity,item.source,item.mitre_tactic,item.mitre_technique,item.created_at,source_ref_text]).map_err(|e|e.to_string())?;
     record_commit_tx(
         &tx,
         actor,
@@ -6156,6 +6939,7 @@ pub fn export_case_data(conn: &Connection) -> AppResult<ExportData> {
             }
             views
         },
+        captures: get_captures(conn)?,
     })
 }
 
@@ -6243,7 +7027,8 @@ pub fn import_case_data(
                     Some(parse_timestamp_preview(raw, zone, 0)?.interpreted_utc);
             }
         }
-        insert_item!("timeline_events","timeline_event",&v.id,"INSERT OR IGNORE INTO timeline_events(id,asset_id,timestamp,raw_timestamp,raw_timezone,server_timestamp_utc,correct_timestamp_raw,correct_timezone,clock_profile_id,clock_offset_ms,time_precision,correct_time_precision,event_type,description,severity,source,mitre_tactic,mitre_technique,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",params![v.id,v.asset_id,v.timestamp,v.raw_timestamp,v.raw_timezone,v.server_timestamp_utc,v.correct_timestamp_raw,v.correct_timezone,v.clock_profile_id,v.clock_offset_ms,v.time_precision,v.correct_time_precision,v.event_type,v.description,v.severity,v.source,v.mitre_tactic,v.mitre_technique,v.created_at],&v);
+        let source_ref_text = json_value_text(&v.source_ref)?;
+        insert_item!("timeline_events","timeline_event",&v.id,"INSERT OR IGNORE INTO timeline_events(id,asset_id,timestamp,raw_timestamp,raw_timezone,server_timestamp_utc,correct_timestamp_raw,correct_timezone,clock_profile_id,clock_offset_ms,time_precision,correct_time_precision,event_type,description,severity,source,mitre_tactic,mitre_technique,created_at,source_ref) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",params![v.id,v.asset_id,v.timestamp,v.raw_timestamp,v.raw_timezone,v.server_timestamp_utc,v.correct_timestamp_raw,v.correct_timezone,v.clock_profile_id,v.clock_offset_ms,v.time_precision,v.correct_time_precision,v.event_type,v.description,v.severity,v.source,v.mitre_tactic,v.mitre_technique,v.created_at,source_ref_text],&v);
     }
     for v in &data.notes {
         insert_item!("notes","note",&v.id,"INSERT OR IGNORE INTO notes(id,title,content,created_at,updated_at) VALUES (?1,?2,?3,?4,?5)",params![v.id,v.title,v.content,v.created_at,v.updated_at],v);
@@ -6280,6 +7065,10 @@ pub fn import_case_data(
             .transpose()?;
         let ioc_ids = serde_json::to_string(&v.ioc_ids).map_err(|e| e.to_string())?;
         insert_item!("attack_edges","attack_edge",&v.id,"INSERT OR IGNORE INTO attack_edges(id,source_kind,source_id,target_kind,target_id,title,description,edge_type,confidence,mitre_tactic,mitre_technique,occurred_at,timeline_event_id,sequence,ioc_ids,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",params![v.id,v.source_kind,v.source_id,v.target_kind,v.target_id,v.title,v.description,v.edge_type,v.confidence,v.mitre_tactic,v.mitre_technique,v.occurred_at,v.timeline_event_id,v.sequence,ioc_ids,v.created_at],&v);
+    }
+    for v in &data.captures {
+        let links = capture_links_text(&v.links)?;
+        insert_item!("captures","capture",&v.id,"INSERT OR IGNORE INTO captures(id,content,source,status,captured_by,team,links,resolution,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![v.id,v.content,v.source,v.status,v.captured_by,v.team,links,v.resolution,v.created_at,v.updated_at],v);
     }
     // Investigation views are presentation state: imported for convenience but
     // deliberately excluded from evidence history.
@@ -6354,7 +7143,8 @@ pub fn upsert_entity_json(tx: &Transaction<'_>, entity_type: &str, value: &Value
                         Some(parse_timestamp_preview(raw, zone, 0)?.interpreted_utc);
                 }
             }
-            tx.execute("INSERT INTO timeline_events(id,asset_id,timestamp,raw_timestamp,raw_timezone,server_timestamp_utc,correct_timestamp_raw,correct_timezone,clock_profile_id,clock_offset_ms,time_precision,correct_time_precision,event_type,description,severity,source,mitre_tactic,mitre_technique,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19) ON CONFLICT(id) DO UPDATE SET asset_id=excluded.asset_id,timestamp=excluded.timestamp,raw_timestamp=excluded.raw_timestamp,raw_timezone=excluded.raw_timezone,server_timestamp_utc=excluded.server_timestamp_utc,correct_timestamp_raw=excluded.correct_timestamp_raw,correct_timezone=excluded.correct_timezone,clock_profile_id=excluded.clock_profile_id,clock_offset_ms=excluded.clock_offset_ms,time_precision=excluded.time_precision,correct_time_precision=excluded.correct_time_precision,event_type=excluded.event_type,description=excluded.description,severity=excluded.severity,source=excluded.source,mitre_tactic=excluded.mitre_tactic,mitre_technique=excluded.mitre_technique",params![v.id,v.asset_id,v.timestamp,v.raw_timestamp,v.raw_timezone,v.server_timestamp_utc,v.correct_timestamp_raw,v.correct_timezone,v.clock_profile_id,v.clock_offset_ms,v.time_precision,v.correct_time_precision,v.event_type,v.description,v.severity,v.source,v.mitre_tactic,v.mitre_technique,v.created_at]).map_err(|e|e.to_string())?;
+            let source_ref_text = json_value_text(&v.source_ref)?;
+            tx.execute("INSERT INTO timeline_events(id,asset_id,timestamp,raw_timestamp,raw_timezone,server_timestamp_utc,correct_timestamp_raw,correct_timezone,clock_profile_id,clock_offset_ms,time_precision,correct_time_precision,event_type,description,severity,source,mitre_tactic,mitre_technique,created_at,source_ref) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) ON CONFLICT(id) DO UPDATE SET asset_id=excluded.asset_id,timestamp=excluded.timestamp,raw_timestamp=excluded.raw_timestamp,raw_timezone=excluded.raw_timezone,server_timestamp_utc=excluded.server_timestamp_utc,correct_timestamp_raw=excluded.correct_timestamp_raw,correct_timezone=excluded.correct_timezone,clock_profile_id=excluded.clock_profile_id,clock_offset_ms=excluded.clock_offset_ms,time_precision=excluded.time_precision,correct_time_precision=excluded.correct_time_precision,event_type=excluded.event_type,description=excluded.description,severity=excluded.severity,source=excluded.source,mitre_tactic=excluded.mitre_tactic,mitre_technique=excluded.mitre_technique,source_ref=excluded.source_ref",params![v.id,v.asset_id,v.timestamp,v.raw_timestamp,v.raw_timezone,v.server_timestamp_utc,v.correct_timestamp_raw,v.correct_timezone,v.clock_profile_id,v.clock_offset_ms,v.time_precision,v.correct_time_precision,v.event_type,v.description,v.severity,v.source,v.mitre_tactic,v.mitre_technique,v.created_at,source_ref_text]).map_err(|e|e.to_string())?;
         }
         "note" => {
             let v: Note = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
@@ -6436,6 +7226,12 @@ pub fn upsert_entity_json(tx: &Transaction<'_>, entity_type: &str, value: &Value
                 .transpose()?;
             let ioc_ids = serde_json::to_string(&v.ioc_ids).map_err(|e| e.to_string())?;
             tx.execute("INSERT INTO attack_edges(id,source_kind,source_id,target_kind,target_id,title,description,edge_type,confidence,mitre_tactic,mitre_technique,occurred_at,timeline_event_id,sequence,ioc_ids,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16) ON CONFLICT(id) DO UPDATE SET source_kind=excluded.source_kind,source_id=excluded.source_id,target_kind=excluded.target_kind,target_id=excluded.target_id,title=excluded.title,description=excluded.description,edge_type=excluded.edge_type,confidence=excluded.confidence,mitre_tactic=excluded.mitre_tactic,mitre_technique=excluded.mitre_technique,occurred_at=excluded.occurred_at,timeline_event_id=excluded.timeline_event_id,sequence=excluded.sequence,ioc_ids=excluded.ioc_ids",params![v.id,v.source_kind,v.source_id,v.target_kind,v.target_id,v.title,v.description,v.edge_type,v.confidence,v.mitre_tactic,v.mitre_technique,v.occurred_at,v.timeline_event_id,v.sequence,ioc_ids,v.created_at]).map_err(|e|e.to_string())?;
+        }
+        "capture" => {
+            let v: Capture = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            validate_capture_model(&v)?;
+            let links = capture_links_text(&v.links)?;
+            tx.execute("INSERT INTO captures(id,content,source,status,captured_by,team,links,resolution,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET content=excluded.content,source=excluded.source,status=excluded.status,captured_by=excluded.captured_by,team=excluded.team,links=excluded.links,resolution=excluded.resolution,updated_at=excluded.updated_at",params![v.id,v.content,v.source,v.status,v.captured_by,v.team,links,v.resolution,v.created_at,v.updated_at]).map_err(|e|e.to_string())?;
         }
         _ => return Err(format!("Unsupported entity type: {entity_type}")),
     }
@@ -6530,6 +7326,7 @@ pub fn delete_entity_direct(tx: &Transaction<'_>, entity_type: &str, id: &str) -
         "network_connection" => "network_connections",
         "ioc_sighting" => "ioc_sightings",
         "attack_edge" => "attack_edges",
+        "capture" => "captures",
         _ => return Err(format!("Unsupported deletion type: {entity_type}")),
     };
     tx.execute(&format!("DELETE FROM {table} WHERE id=?1"), params![id])
@@ -6658,11 +7455,9 @@ mod tests {
         );
         let history = get_history(&conn, 1).unwrap();
         assert!(history[0].message.contains("linked"));
-        assert!(history[0]
-            .changes
-            .iter()
-            .any(|change| change.entity_type == "network_interface"
-                && change.operation == "update"));
+        assert!(history[0].changes.iter().any(
+            |change| change.entity_type == "network_interface" && change.operation == "update"
+        ));
     }
 
     #[test]
@@ -6987,7 +7782,9 @@ mod tests {
             None,
             Some("open ports: 22"),
         );
-        assert!(not_json.unwrap_err().contains("Scan results must be valid JSON"));
+        assert!(not_json
+            .unwrap_err()
+            .contains("Scan results must be valid JSON"));
         let unknown = create_asset(
             &mut conn,
             &active_expert,
@@ -7053,12 +7850,30 @@ mod tests {
         )
         .unwrap();
 
-        set_quick_note(&mut conn, &active_expert, "asset", &asset.id, Some("Reimaged on site"))
-            .unwrap();
-        set_quick_note(&mut conn, &active_expert, "network", &network.id, Some("Client HQ segment"))
-            .unwrap();
-        set_quick_note(&mut conn, &active_expert, "firewall", &firewall.id, Some("Terminates the site VPN"))
-            .unwrap();
+        set_quick_note(
+            &mut conn,
+            &active_expert,
+            "asset",
+            &asset.id,
+            Some("Reimaged on site"),
+        )
+        .unwrap();
+        set_quick_note(
+            &mut conn,
+            &active_expert,
+            "network",
+            &network.id,
+            Some("Client HQ segment"),
+        )
+        .unwrap();
+        set_quick_note(
+            &mut conn,
+            &active_expert,
+            "firewall",
+            &firewall.id,
+            Some("Terminates the site VPN"),
+        )
+        .unwrap();
 
         assert_eq!(
             get_assets(&conn)
@@ -7094,8 +7909,7 @@ mod tests {
 
         // A whitespace-only note clears the field instead of storing blanks,
         // and unsupported entities are rejected.
-        set_quick_note(&mut conn, &active_expert, "asset", &asset.id, Some("   "))
-            .unwrap();
+        set_quick_note(&mut conn, &active_expert, "asset", &asset.id, Some("   ")).unwrap();
         assert!(get_assets(&conn)
             .unwrap()
             .iter()
@@ -7150,7 +7964,7 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            7
+            8
         );
         // The v7 investigation tables exist after migrating a legacy case.
         for table in ["ioc_sightings", "attack_edges", "investigation_views"] {
@@ -8043,5 +8857,294 @@ mod tests {
             .changes
             .iter()
             .any(|change| change.entity_type == "attack_edge"));
+    }
+
+    #[test]
+    fn captures_keep_the_text_and_who_captured_it_through_history_and_snapshots() {
+        let (mut conn, _, _) = fresh_case();
+        let alice = actor("Alice")
+            .with_team(Some("Log analysis".into()))
+            .unwrap();
+        let text = "APP01, 10.0.0.15, probably on ESX03.\nFinance says they own it.";
+        let capture = create_capture(
+            &mut conn,
+            &alice,
+            &format!("  {text}\n"),
+            " Finance interview ",
+        )
+        .unwrap();
+        assert_eq!(capture.content, text);
+        assert_eq!(capture.source, "Finance interview");
+        assert_eq!(capture.status, "open");
+        assert_eq!(capture.captured_by, "Alice");
+        assert_eq!(capture.team.as_deref(), Some("Log analysis"));
+        assert!(create_capture(&mut conn, &alice, "   ", "")
+            .unwrap_err()
+            .contains("Captured text is required"));
+
+        let asset = create_asset(
+            &mut conn,
+            &alice,
+            None,
+            "APP01",
+            "10.0.0.15",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        let link = |title: &str| CaptureLink {
+            entity_type: "asset".into(),
+            entity_id: asset.id.clone(),
+            title: title.into(),
+        };
+        let processed = update_capture(
+            &mut conn,
+            &alice,
+            &capture.id,
+            text,
+            "Finance interview",
+            "processed",
+            vec![link("APP01"), link("duplicate")],
+            "Asset recorded",
+        )
+        .unwrap();
+        assert_eq!(processed.links, vec![link("APP01")]);
+        assert_eq!(
+            get_history(&conn, 1).unwrap()[0].message,
+            "Processed capture"
+        );
+        assert!(update_capture(
+            &mut conn,
+            &alice,
+            &capture.id,
+            text,
+            "",
+            "archived",
+            Vec::new(),
+            ""
+        )
+        .unwrap_err()
+        .contains("Invalid capture status"));
+
+        // Snapshots carry captures, and the add-only import restores them.
+        let snapshot = export_case_data(&conn).unwrap();
+        assert_eq!(snapshot.captures.len(), 1);
+        delete_capture(&mut conn, &alice, &capture.id).unwrap();
+        assert!(get_captures(&conn).unwrap().is_empty());
+        let summary = import_case_data(&mut conn, &alice, &snapshot).unwrap();
+        assert_eq!(summary.entities["captures"].inserted, 1);
+        let restored = get_captures(&conn).unwrap();
+        assert_eq!(restored[0].links, processed.links);
+        assert_eq!(restored[0].team.as_deref(), Some("Log analysis"));
+    }
+
+    #[test]
+    fn drafts_are_per_expert_and_never_become_history_or_snapshot_content() {
+        let (mut conn, _, _) = fresh_case();
+        let head = get_history(&conn, 1).unwrap()[0].id.clone();
+        let mut drafts = serde_json::Map::new();
+        drafts.insert(
+            "assets.form".into(),
+            serde_json::json!({ "name": "DRAFT-HOST-7" }),
+        );
+        drafts.insert("notes.title".into(), Value::String("Half written".into()));
+        assert_eq!(save_drafts(&mut conn, "Alice", &drafts).unwrap(), 2);
+        assert_eq!(load_drafts(&conn, "Alice").unwrap().len(), 2);
+        assert!(load_drafts(&conn, "Bob").unwrap().is_empty());
+
+        let mut clear = serde_json::Map::new();
+        clear.insert("notes.title".into(), Value::Null);
+        save_drafts(&mut conn, "Alice", &clear).unwrap();
+        let left = load_drafts(&conn, "Alice").unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left["assets.form"]["name"], "DRAFT-HOST-7");
+        assert_eq!(get_history(&conn, 1).unwrap()[0].id, head);
+        assert!(!serde_json::to_string(&export_case_data(&conn).unwrap())
+            .unwrap()
+            .contains("DRAFT-HOST-7"));
+
+        let mut huge = serde_json::Map::new();
+        huge.insert("big".into(), Value::String("x".repeat(MAX_DRAFT_BYTES + 1)));
+        assert!(save_drafts(&mut conn, "Alice", &huge)
+            .unwrap_err()
+            .contains("stays unsaved"));
+        let mut blank_key = serde_json::Map::new();
+        blank_key.insert(" ".into(), Value::Bool(true));
+        assert!(save_drafts(&mut conn, "Alice", &blank_key).is_err());
+    }
+
+    #[test]
+    fn case_search_finds_hosts_addresses_macs_hashes_and_text() {
+        let (mut conn, _, alice) = fresh_case();
+        let asset = create_asset(
+            &mut conn,
+            &alice,
+            None,
+            "APP01",
+            "10.0.0.15",
+            Some("00:1A:2B:3C:4D:5E"),
+            "server",
+            Some("Windows Server 2019"),
+            None,
+            "unknown",
+            "not_started",
+            Some("Finance owns it"),
+            None,
+        )
+        .unwrap();
+        create_asset(
+            &mut conn,
+            &alice,
+            None,
+            "APP01-OLD",
+            "",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        create_network_interface(
+            &mut conn,
+            &alice,
+            &asset.id,
+            "Backup NIC",
+            "192.168.50.7",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        create_ioc(
+            &mut conn,
+            &alice,
+            "Hash",
+            "44d88612fea8a8f36de82e1278abb02f",
+            "EICAR test",
+            "high",
+            None,
+            None,
+        )
+        .unwrap();
+        create_note(
+            &mut conn,
+            &alice,
+            "Interview",
+            "The finance team mentioned ESX03 twice",
+        )
+        .unwrap();
+        create_capture(
+            &mut conn,
+            &alice,
+            "Ask infra for VPN logs from 2026-11-01",
+            "Standup",
+        )
+        .unwrap();
+
+        let first = |query: &str| {
+            search_case(&conn, query, 20)
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap()
+        };
+        // An exact name outranks a longer one that only starts with it.
+        let by_name = first("app01");
+        assert_eq!(
+            (
+                by_name.entity_type.as_str(),
+                by_name.entity_id.as_str(),
+                by_name.field.as_str()
+            ),
+            ("asset", asset.id.as_str(), "name")
+        );
+        let by_nic = first("192.168.50.7");
+        assert_eq!(
+            (by_nic.entity_id.as_str(), by_nic.field.as_str()),
+            (asset.id.as_str(), "interface IP")
+        );
+        assert_eq!(first("00-1a-2b-3c-4d-5e").field, "MAC");
+        assert_eq!(first("44D88612FEA8A8F36DE82E1278ABB02F").entity_type, "ioc");
+        assert_eq!(first("esx03").entity_type, "note");
+        let capture = first("vpn logs");
+        assert_eq!(capture.entity_type, "capture");
+        assert!(capture.detail.contains("VPN logs"), "{}", capture.detail);
+        let finance = search_case(&conn, "finance", 20).unwrap();
+        assert!(finance
+            .iter()
+            .any(|hit| hit.entity_type == "asset" && hit.field == "details"));
+        assert!(finance.iter().any(|hit| hit.entity_type == "note"));
+        // LIKE wildcards in the query are literal, and one character is too short.
+        assert!(search_case(&conn, "%_", 20).unwrap().is_empty());
+        assert!(search_case(&conn, "a", 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn file_and_process_indicators_are_validated() {
+        let (mut conn, _, alice) = fresh_case();
+        for (kind, value) in [
+            ("FilePath", r"C:\Users\Public\svc.exe"),
+            ("FilePath", "/tmp/.x/payload"),
+            ("FileName", "invoice.pdf.exe"),
+            ("Process", "rundll32.exe shell32.dll,Control_RunDLL"),
+        ] {
+            create_ioc(&mut conn, &alice, kind, value, "", "medium", None, None).unwrap();
+        }
+        assert!(
+            create_ioc(&mut conn, &alice, "FilePath", "svc.exe", "", "medium", None, None)
+                .unwrap_err()
+                .contains("directory")
+        );
+        assert!(create_ioc(
+            &mut conn,
+            &alice,
+            "FileName",
+            r"C:\svc.exe",
+            "",
+            "medium",
+            None,
+            None
+        )
+        .unwrap_err()
+        .contains("without a directory"));
+        assert!(
+            create_ioc(&mut conn, &alice, "Process", "a\nb", "", "medium", None, None)
+                .unwrap_err()
+                .contains("one line")
+        );
+        assert!(
+            create_ioc(&mut conn, &alice, "Malware", "x", "", "medium", None, None)
+                .unwrap_err()
+                .contains("Invalid IOC type")
+        );
+    }
+
+    #[test]
+    fn schema_8_migration_adds_captures_drafts_and_source_references() {
+        let (mut conn, _, _) = fresh_case();
+        conn.execute_batch(
+            "DROP TABLE captures; DROP TABLE drafts; DROP TABLE history_merged_commits;
+             ALTER TABLE timeline_events DROP COLUMN source_ref; PRAGMA user_version = 7;",
+        )
+        .unwrap();
+        validate_and_migrate_case(&mut conn).unwrap();
+        for table in ["captures", "drafts", "history_merged_commits"] {
+            assert!(table_exists(&conn, table).unwrap(), "{table}");
+        }
+        assert!(column_exists(&conn, "timeline_events", "source_ref").unwrap());
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
     }
 }

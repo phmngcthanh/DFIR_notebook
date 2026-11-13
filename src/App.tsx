@@ -1,11 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
-  Clock, Download, FileText, FolderOpen, GitGraph, LayoutDashboard,
-  Info, LockKeyhole, Network, Plus, Route, ScrollText, Server, ShieldAlert, SquareKanban, UserRound, Users,
+  Clock, Download, FileText, FolderOpen, GitGraph, Inbox, LayoutDashboard,
+  Info, LockKeyhole, Network, NotebookPen, Plus, Route, ScrollText, Search, Server, ShieldAlert, SquareKanban, UserRound, Users,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import type { ApiResponse, Case, ExpertIdentity, View } from '@/types';
+import type { ApiResponse, Case, ExpertIdentity, SearchHit, View } from '@/types';
+import CaptureDialog from '@/components/CaptureDialog';
+import CaseSearch from '@/components/CaseSearch';
 import CaseSetup from '@/components/CaseSetup';
 import LocalCaseSetup from '@/components/LocalCaseSetup';
 import ExpertSetup from '@/components/ExpertSetup';
@@ -18,10 +20,13 @@ import {
   getObservedRevision, getServerState, getToken, invoke, isDesktop, logout, noteRevision,
   resetRevision, session, SESSION_EXPIRED_EVENT, setToken, type SessionPayload,
 } from '@/lib/api';
-import { draftScope, pruneDrafts } from '@/lib/drafts';
+import {
+  configureDraftPersistence, draftScope, endDraftPersistence, flushDrafts, hydrateDrafts, pruneDrafts, setDraftValue,
+} from '@/lib/drafts';
 import './App.css';
 
 const Dashboard = lazy(() => import('@/components/Dashboard'));
+const CaptureInbox = lazy(() => import('@/components/CaptureInbox'));
 const NetworkManager = lazy(() => import('@/components/NetworkManager'));
 const AssetManager = lazy(() => import('@/components/AssetManager'));
 const NetworkTopology = lazy(() => import('@/components/NetworkTopology'));
@@ -36,6 +41,7 @@ const AboutPage = lazy(() => import('@/components/AboutPage'));
 
 const NAV_ITEMS: { view: View; label: string; icon: React.ReactNode }[] = [
   { view: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
+  { view: 'inbox', label: 'Capture inbox', icon: <Inbox size={18} /> },
   { view: 'networks', label: 'Networks', icon: <Network size={18} /> },
   { view: 'assets', label: 'Assets', icon: <Server size={18} /> },
   { view: 'topology', label: 'Topology', icon: <GitGraph size={18} /> },
@@ -63,6 +69,11 @@ function App() {
   const [caseSetupMode, setCaseSetupMode] = useState<'new' | 'open'>('new');
   const [restoring, setRestoring] = useState(() => session.hasSessions && Boolean(getToken()));
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const [showCapture, setShowCapture] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  /** Bumped to remount the open view, e.g. when a search result presets its filters. */
+  const [viewKey, setViewKey] = useState(0);
+  const [draftsReady, setDraftsReady] = useState(false);
 
   const endSession = useCallback(() => {
     setToken(null);
@@ -183,6 +194,8 @@ function App() {
 
   const closeLocalCase = async () => {
     try {
+      // Save pending drafts while the case is still open to receive them.
+      await flushDrafts();
       const response = await invoke<ApiResponse<boolean>>('close_current_case');
       if (!response.success) throw new Error(response.error || 'Could not lock case');
       setCurrentCase(null);
@@ -213,6 +226,7 @@ function App() {
 
   const closeSession = async () => {
     try {
+      await flushDrafts();
       await logout();
       toast.success('Session closed');
     } catch (reason) {
@@ -223,22 +237,138 @@ function App() {
   };
 
   const signedIn = Boolean(currentCase && currentExpert);
+  const workspaceOpen = signedIn && !showExpertSetup && !showCaseSetup;
   const caseId = currentCase?.id ?? null;
+  const expertName = currentExpert?.name ?? null;
+  // Drafts belong to one case and one expert. Switching either, locking, or
+  // ending the session forgets every other scope's drafts.
+  const scope = caseId ? `${caseId}\u0001${expertName ?? ''}` : null;
 
-  // Unsaved forms and pasted text are kept per case in memory while a view is
-  // off screen. Opening another case, locking, or ending the session forgets
-  // every other case's drafts.
   useEffect(() => {
-    pruneDrafts(caseId);
-  }, [caseId]);
+    pruneDrafts(scope);
+  }, [scope]);
+
+  // Persisted drafts: restore them before the views mount, then keep saving
+  // them (debounced) for this expert while the case is open.
+  useEffect(() => {
+    if (!signedIn || !scope) {
+      setDraftsReady(false);
+      return;
+    }
+    let cancelled = false;
+    setDraftsReady(false);
+    void (async () => {
+      try {
+        const response = await invoke<ApiResponse<Record<string, unknown>>>('load_case_drafts');
+        if (!cancelled && response.success && response.data) hydrateDrafts(scope, response.data);
+      } catch {
+        // Drafts are a convenience; the case opens without them.
+      }
+      if (cancelled) return;
+      configureDraftPersistence(scope, async (drafts) => {
+        const response = await invoke<ApiResponse<number>>('save_case_drafts', { drafts });
+        if (!response.success) throw new Error(response.error || 'Could not save drafts');
+      });
+      setDraftsReady(true);
+    })();
+    return () => {
+      cancelled = true;
+      void endDraftPersistence();
+    };
+  }, [signedIn, scope]);
+
+  // Capture (Alt+C) and search (Ctrl/Cmd+K) work from every screen, even
+  // while typing in a field. `code` keeps Alt+C working on layouts where
+  // Option+C types a character.
+  useEffect(() => {
+    if (!workspaceOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey && !event.ctrlKey && !event.metaKey && event.code === 'KeyC') {
+        event.preventDefault();
+        setShowSearch(false);
+        setShowCapture(true);
+      } else if ((event.ctrlKey || event.metaKey) && !event.altKey && event.code === 'KeyK') {
+        event.preventDefault();
+        setShowCapture(false);
+        setShowSearch(true);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [workspaceOpen]);
+
+  // Open a search result: preset the target screen's filters so the record is
+  // in view, then remount that screen so it reads them.
+  const openSearchResult = (hit: SearchHit) => {
+    setShowSearch(false);
+    if (!scope) return;
+    const title = hit.title.replace(/\u2026$/, '');
+    let view: View = 'dashboard';
+    switch (hit.entity_type) {
+      case 'asset':
+        setDraftValue(scope, 'assets.search', title);
+        setDraftValue(scope, 'assets.expandedAssetId', hit.entity_id);
+        view = 'assets';
+        break;
+      case 'network':
+        setDraftValue(scope, 'networks.section', 'zones');
+        setDraftValue(scope, 'networks.search', title);
+        view = 'networks';
+        break;
+      case 'firewall':
+        setDraftValue(scope, 'networks.section', 'firewalls');
+        setDraftValue(scope, 'networks.search', title);
+        setDraftValue(scope, 'networks.selectedFirewallId', hit.entity_id);
+        view = 'networks';
+        break;
+      case 'ioc':
+        setDraftValue(scope, 'iocs.search', title);
+        view = 'iocs';
+        break;
+      case 'timeline_event':
+        setDraftValue(scope, 'timeline.search', title);
+        view = 'timeline';
+        break;
+      case 'note':
+        setDraftValue(scope, 'notes.search', title);
+        view = 'notes';
+        break;
+      case 'capture':
+        setDraftValue(scope, 'inbox.search', '');
+        setDraftValue(scope, 'inbox.focusId', hit.entity_id);
+        view = 'inbox';
+        break;
+      case 'attack_edge':
+        view = 'investigation';
+        break;
+    }
+    setCurrentView(view);
+    setViewKey((value) => value + 1);
+  };
+
+  const captured = () => {
+    setRefreshTrigger((value) => value + 1);
+    toast.success('Captured', {
+      description: 'It is waiting in the Capture inbox.',
+      action: { label: 'Open inbox', onClick: () => setCurrentView('inbox') },
+    });
+  };
+
+  const overlays = workspaceOpen && (
+    <draftScope.Provider value={scope ?? ''}>
+      {showCapture && <CaptureDialog onClose={() => setShowCapture(false)} onCaptured={captured} />}
+      {showSearch && <CaseSearch onClose={() => setShowSearch(false)} onOpen={openSearchResult} />}
+    </draftScope.Provider>
+  );
 
   // One route table for every shell. The chrome around it differs — a sidebar on
   // desktop and in the browser, a touch shell on Android — but which screen is
   // shown, and what it is given, never does.
-  const viewContent = (
-    <draftScope.Provider value={caseId ?? ''}>
-      <Suspense fallback={<WorkspaceLoading />}>
+  const viewContent = !draftsReady ? <WorkspaceLoading /> : (
+    <draftScope.Provider value={scope ?? ''}>
+      <Suspense key={viewKey} fallback={<WorkspaceLoading />}>
         {currentView === 'dashboard' && <Dashboard refreshTrigger={refreshTrigger} onCaseUpdated={() => void reloadCase()} />}
+        {currentView === 'inbox' && <CaptureInbox refreshTrigger={refreshTrigger} onCapture={() => setShowCapture(true)} />}
         {currentView === 'networks' && <NetworkManager refreshTrigger={refreshTrigger} />}
         {currentView === 'assets' && currentExpert && <AssetManager refreshTrigger={refreshTrigger} expert={currentExpert} />}
         {currentView === 'topology' && <NetworkTopology refreshTrigger={refreshTrigger} />}
@@ -277,6 +407,7 @@ function App() {
             {currentView === 'about' ? <Suspense fallback={<WorkspaceLoading />}><AboutPage /></Suspense> : viewContent}
           </MobileShell>
         )}
+        {overlays}
       </div>
     );
   }
@@ -299,7 +430,7 @@ function App() {
                   <UserRound size={14} className="text-cyan-400" />
                   <span className="min-w-0">
                     <span className="block truncate text-slate-200">{currentExpert.name}</span>
-                    <span className="block truncate text-slate-500">{currentExpert.scope_label || 'All zones'}</span>
+                    <span className="block truncate text-slate-500">{[currentExpert.team, currentExpert.scope_label].filter(Boolean).join(' · ') || 'All zones'}</span>
                   </span>
                 </button>
               )}
@@ -312,6 +443,16 @@ function App() {
             </div>
           ) : <p className="text-xs text-slate-500">{session.hasSessions ? 'No case unlocked' : 'No case loaded'}</p>}
         </div>
+        {workspaceOpen && (
+          <div className="space-y-1 border-b border-slate-700 p-2">
+            <button onClick={() => setShowCapture(true)} className="flex w-full items-center gap-3 rounded-md bg-cyan-900/40 px-3 py-2 text-sm text-cyan-100 hover:bg-cyan-800/60" title="Record something you just learned (Alt+C)">
+              <NotebookPen size={18} />Capture<kbd className="ml-auto text-[10px] text-cyan-300">Alt+C</kbd>
+            </button>
+            <button onClick={() => setShowSearch(true)} className="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-300 hover:bg-slate-800" title="Search the whole case (Ctrl+K)">
+              <Search size={18} />Search<kbd className="ml-auto text-[10px] text-slate-500">Ctrl+K</kbd>
+            </button>
+          </div>
+        )}
         <nav className="flex-1 space-y-1 overflow-y-auto px-2 py-2">
           {NAV_ITEMS.map((item) => (
             <button key={item.view} onClick={() => (item.view === 'about' || signedIn) && setCurrentView(item.view)} disabled={item.view !== 'about' && !signedIn}
@@ -371,6 +512,7 @@ function App() {
           <div className="h-full overflow-auto">{viewContent}</div>
         )}
       </main>
+      {overlays}
     </div>
   );
 }

@@ -2,6 +2,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
@@ -16,6 +17,11 @@ pub struct ActorIdentity {
     pub session_id: String,
     pub scope_label: Option<String>,
     pub scope_network_ids: Vec<String>,
+    /// The expert's team (log analysis, reverse engineering, collection...).
+    /// Self-declared like the name, and recorded in every commit's scope so
+    /// work can be followed per team.
+    #[serde(default)]
+    pub team: Option<String>,
 }
 
 impl ActorIdentity {
@@ -34,21 +40,42 @@ impl ActorIdentity {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty()),
             scope_network_ids,
+            team: None,
         })
     }
 
+    /// Attach the expert's team; blank clears it.
+    pub fn with_team(mut self, team: Option<String>) -> AppResult<Self> {
+        let team = team
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if team
+            .as_ref()
+            .is_some_and(|value| value.chars().count() > MAX_TEAM_CHARS)
+        {
+            return Err(format!(
+                "Team name is limited to {MAX_TEAM_CHARS} characters"
+            ));
+        }
+        self.team = team;
+        Ok(self)
+    }
+
     fn scope_json(&self) -> AppResult<Option<String>> {
-        if self.scope_label.is_none() && self.scope_network_ids.is_empty() {
+        if self.scope_label.is_none() && self.scope_network_ids.is_empty() && self.team.is_none() {
             return Ok(None);
         }
         serde_json::to_string(&serde_json::json!({
             "label": self.scope_label,
             "network_ids": self.scope_network_ids,
+            "team": self.team,
         }))
         .map(Some)
         .map_err(|e| e.to_string())
     }
 }
+
+const MAX_TEAM_CHARS: usize = 80;
 
 #[derive(Debug, Clone)]
 pub struct EntityChangeInput {
@@ -84,6 +111,34 @@ pub struct HistoryCommit {
     pub created_at: String,
     pub parent_ids: Vec<String>,
     pub changes: Vec<HistoryChange>,
+    /// On a merge commit: the contributors' original commits it brought in,
+    /// with their own authors, times, and teams. Travels inside later bundles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merged_commits: Vec<MergedCommit>,
+}
+
+/// One change of a contributor's original commit, and whether the merge
+/// that brought the commit in actually took it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MergedChange {
+    pub id: String,
+    pub entity_type: String,
+    pub entity_id: String,
+    pub operation: String,
+    pub applied: bool,
+}
+
+/// A contributor's original commit as received in a change bundle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MergedCommit {
+    pub commit_id: String,
+    pub bundle_id: String,
+    pub author_name: String,
+    pub session_id: String,
+    pub message: String,
+    pub scope: Option<Value>,
+    pub created_at: String,
+    pub changes: Vec<MergedChange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -97,6 +152,76 @@ pub struct ChangeBundle {
     pub exported_by: String,
     pub exported_at: String,
     pub commits: Vec<HistoryCommit>,
+    /// SHA-256 over the bundle's canonical JSON (sorted keys, this field
+    /// removed), written at export and checked on load by every shell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<BundleIntegrity>,
+    /// Set when the recorded checksum was verified on load.
+    #[serde(skip)]
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BundleIntegrity {
+    pub algorithm: String,
+    pub content_sha256: String,
+}
+
+/// JSON with object keys sorted at every level and no whitespace, so equal
+/// content hashes equally in every shell however `serde_json` was built (the
+/// desktop build keeps insertion order, the server build sorts).
+pub fn canonical_json(value: &Value) -> String {
+    let mut output = String::new();
+    write_canonical(value, &mut output);
+    output
+}
+
+fn write_canonical(value: &Value, output: &mut String) {
+    match value {
+        Value::Object(map) => {
+            output.push('{');
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for (index, key) in keys.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                output.push_str(&Value::String(key.clone()).to_string());
+                output.push(':');
+                if let Some(item) = map.get(key) {
+                    write_canonical(item, output);
+                }
+            }
+            output.push('}');
+        }
+        Value::Array(items) => {
+            output.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    output.push(',');
+                }
+                write_canonical(item, output);
+            }
+            output.push(']');
+        }
+        other => output.push_str(&other.to_string()),
+    }
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Digest of a bundle as JSON, ignoring its own `integrity` field.
+fn bundle_content_digest(bundle: &Value) -> String {
+    let mut content = bundle.clone();
+    if let Some(object) = content.as_object_mut() {
+        object.remove("integrity");
+    }
+    sha256_hex(canonical_json(&content).as_bytes())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +261,10 @@ pub struct MergePreview {
     pub exported_at: String,
     pub common_base: bool,
     pub changes: Vec<MergePreviewChange>,
+    /// "verified" when the bundle's checksum matched, "absent" for bundles
+    /// exported before checksums existed. A mismatch never gets this far.
+    #[serde(default)]
+    pub integrity: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -344,6 +473,43 @@ fn load_commit(conn: &Connection, id: &str) -> AppResult<HistoryCommit> {
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
+    let mut merged_stmt = conn
+        .prepare(
+            "SELECT commit_id,bundle_id,author_name,session_id,message,scope_json,created_at,changes_json
+             FROM history_merged_commits WHERE merge_commit_id=?1 ORDER BY created_at,commit_id",
+        )
+        .map_err(|e| e.to_string())?;
+    let merged_rows = merged_stmt
+        .query_map(params![id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    let merged_commits = merged_rows
+        .into_iter()
+        .map(|row| {
+            Ok(MergedCommit {
+                commit_id: row.0,
+                bundle_id: row.1,
+                author_name: row.2,
+                session_id: row.3,
+                message: row.4,
+                scope: parse_optional_json(row.5)?,
+                created_at: row.6,
+                changes: serde_json::from_str(&row.7).unwrap_or_default(),
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
     Ok(HistoryCommit {
         id: id.to_string(),
         author_name,
@@ -353,6 +519,7 @@ fn load_commit(conn: &Connection, id: &str) -> AppResult<HistoryCommit> {
         created_at,
         parent_ids,
         changes,
+        merged_commits,
     })
 }
 
@@ -389,7 +556,7 @@ pub fn export_change_bundle(conn: &Connection, actor: &ActorIdentity) -> AppResu
         .into_iter()
         .map(|id| load_commit(conn, &id))
         .collect::<AppResult<Vec<_>>>()?;
-    Ok(ChangeBundle {
+    let mut bundle = ChangeBundle {
         format: "dfir-investigator-changes".to_string(),
         format_version: 1,
         bundle_id: Uuid::new_v4().to_string(),
@@ -399,17 +566,45 @@ pub fn export_change_bundle(conn: &Connection, actor: &ActorIdentity) -> AppResu
         exported_by: actor.name.clone(),
         exported_at: Utc::now().to_rfc3339(),
         commits,
-    })
+        integrity: None,
+        verified: false,
+    };
+    let digest = bundle_content_digest(&serde_json::to_value(&bundle).map_err(|e| e.to_string())?);
+    bundle.integrity = Some(BundleIntegrity {
+        algorithm: "sha256".to_string(),
+        content_sha256: digest,
+    });
+    bundle.verified = true;
+    Ok(bundle)
 }
 
+/// Parse a bundle and check its recorded checksum against the JSON exactly as
+/// received, so a field added by a newer version never breaks verification.
 pub fn parse_change_bundle(json: &str) -> AppResult<ChangeBundle> {
-    let bundle: ChangeBundle =
+    let raw: Value =
         serde_json::from_str(json).map_err(|e| format!("Invalid change bundle: {e}"))?;
+    let mut bundle: ChangeBundle =
+        serde_json::from_value(raw.clone()).map_err(|e| format!("Invalid change bundle: {e}"))?;
     if bundle.format != "dfir-investigator-changes" || bundle.format_version != 1 {
         return Err("Unsupported change bundle format".to_string());
     }
+    if let Some(integrity) = &bundle.integrity {
+        if !integrity.algorithm.eq_ignore_ascii_case("sha256") {
+            return Err(format!(
+                "Unsupported change bundle checksum '{}'",
+                integrity.algorithm
+            ));
+        }
+        if !bundle_content_digest(&raw).eq_ignore_ascii_case(integrity.content_sha256.trim()) {
+            return Err(BUNDLE_INTEGRITY_MESSAGE.to_string());
+        }
+        bundle.verified = true;
+    }
     Ok(bundle)
 }
+
+/// Wording of the checksum refusal, shared with the review screen.
+pub const BUNDLE_INTEGRITY_MESSAGE: &str = "This change bundle failed its integrity check: its content does not match the checksum recorded when it was exported, so it may be incomplete or altered. Ask for a fresh copy.";
 
 #[derive(Clone)]
 struct AggregatedChange {
@@ -503,6 +698,12 @@ pub fn preview_bundle(conn: &Connection, bundle: &ChangeBundle) -> AppResult<Mer
         exported_at: bundle.exported_at.clone(),
         common_base,
         changes,
+        integrity: if bundle.verified {
+            "verified"
+        } else {
+            "absent"
+        }
+        .to_string(),
     })
 }
 
@@ -704,7 +905,11 @@ pub fn apply_bundle(
     // before writing anything and asks for a fresh review.
     let mut stale = Vec::new();
     for (change, resolved) in &selected {
-        let current = comparable(&get_entity_json(&tx, &change.entity_type, &change.entity_id)?);
+        let current = comparable(&get_entity_json(
+            &tx,
+            &change.entity_type,
+            &change.entity_id,
+        )?);
         if current == comparable(resolved) {
             continue;
         }
@@ -736,7 +941,10 @@ pub fn apply_bundle(
     let mut interface_asset_before: HashMap<String, Option<Value>> = HashMap::new();
     let mut interface_firewall_before: HashMap<String, Option<Value>> = HashMap::new();
     let mut applied_selected = 0usize;
+    // Incoming change ids now present in the case, for the contributors' record.
+    let mut applied_source_ids: HashSet<String> = HashSet::new();
     for (change, resolved) in selected {
+        applied_source_ids.extend(change.source_change_ids.iter().cloned());
         let current = get_entity_json(&tx, &change.entity_type, &change.entity_id)?;
         if current == resolved {
             continue;
@@ -849,6 +1057,7 @@ pub fn apply_bundle(
         local_changes,
         &[bundle.head_commit_id.clone()],
     )?;
+    record_merged_commits(&tx, &commit_id, bundle, &applied_source_ids)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(MergeApplySummary {
         applied: applied_selected,
@@ -893,6 +1102,185 @@ fn preview_change_label(change: &MergePreviewChange) -> String {
     format!("'{}'", change.entity_id)
 }
 
+/// Keep each contributor's original commits beside the merge commit. Commits
+/// that themselves came from an earlier merge carry their own contributors,
+/// which are kept too; such a nested change counts as applied here only when
+/// the change that carried it into the bundle was applied.
+fn record_merged_commits(
+    tx: &Transaction<'_>,
+    merge_commit_id: &str,
+    bundle: &ChangeBundle,
+    applied: &HashSet<String>,
+) -> AppResult<()> {
+    for commit in &bundle.commits {
+        insert_merged_commit(
+            tx,
+            merge_commit_id,
+            &MergedCommit {
+                commit_id: commit.id.clone(),
+                bundle_id: bundle.bundle_id.clone(),
+                author_name: commit.author_name.clone(),
+                session_id: commit.session_id.clone(),
+                message: commit.message.clone(),
+                scope: commit.scope.clone(),
+                created_at: commit.created_at.clone(),
+                changes: commit
+                    .changes
+                    .iter()
+                    .map(|change| MergedChange {
+                        id: change.id.clone(),
+                        entity_type: change.entity_type.clone(),
+                        entity_id: change.entity_id.clone(),
+                        operation: change.operation.clone(),
+                        applied: applied.contains(&change.id),
+                    })
+                    .collect(),
+            },
+        )?;
+        let carried: HashMap<&str, &str> = commit
+            .changes
+            .iter()
+            .flat_map(|change| {
+                let parent = change.id.as_str();
+                change
+                    .source_change_id
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split(',')
+                    .filter(|id| !id.is_empty())
+                    .map(move |id| (id, parent))
+            })
+            .collect();
+        for nested in &commit.merged_commits {
+            let mut record = nested.clone();
+            for change in &mut record.changes {
+                change.applied = change.applied
+                    && carried
+                        .get(change.id.as_str())
+                        .is_some_and(|parent| applied.contains(*parent));
+            }
+            insert_merged_commit(tx, merge_commit_id, &record)?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_merged_commit(
+    tx: &Transaction<'_>,
+    merge_commit_id: &str,
+    record: &MergedCommit,
+) -> AppResult<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO history_merged_commits
+         (merge_commit_id,commit_id,bundle_id,author_name,session_id,message,scope_json,created_at,changes_json)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            merge_commit_id,
+            record.commit_id,
+            record.bundle_id,
+            record.author_name,
+            record.session_id,
+            record.message,
+            option_json_string(&record.scope)?,
+            record.created_at,
+            serde_json::to_string(&record.changes).map_err(|e| e.to_string())?
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Where this copy stands against the shared baseline: what an expert's
+/// handover bundle would contain right now.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoverStatus {
+    pub head_commit_id: String,
+    pub shared_base_commit_id: String,
+    pub base_created_at: Option<String>,
+    /// False when the baseline is not an ancestor on the main history line,
+    /// in which case no bundle can be exported until a new baseline is set.
+    pub base_on_main_path: bool,
+    pub commits_since_base: usize,
+    pub changes_since_base: usize,
+    pub last_change_at: Option<String>,
+}
+
+pub fn handover_status(conn: &Connection) -> AppResult<HandoverStatus> {
+    let (head, base): (String, String) = conn
+        .query_row(
+            "SELECT head_commit_id,shared_base_commit_id FROM history_state WHERE id=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let base_created_at: Option<String> = conn
+        .query_row(
+            "SELECT created_at FROM history_commits WHERE id=?1",
+            params![base],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let mut commits = 0usize;
+    let mut changes = 0usize;
+    let mut last_change_at: Option<String> = None;
+    let mut on_path = true;
+    let mut cursor = head.clone();
+    let mut guard = 0usize;
+    while cursor != base {
+        let created_at: Option<String> = conn
+            .query_row(
+                "SELECT created_at FROM history_commits WHERE id=?1",
+                params![cursor],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(created_at) = created_at else {
+            on_path = false;
+            break;
+        };
+        if last_change_at.is_none() {
+            last_change_at = Some(created_at);
+        }
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM history_changes WHERE commit_id=?1",
+                params![cursor],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        commits += 1;
+        changes += usize::try_from(count).unwrap_or(0);
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_commit_id FROM history_commit_parents WHERE commit_id=?1 AND position=0",
+                params![cursor],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some(parent) = parent else {
+            on_path = false;
+            break;
+        };
+        cursor = parent;
+        guard += 1;
+        if guard > 100_000 {
+            return Err("History traversal exceeded safety limit".to_string());
+        }
+    }
+    Ok(HandoverStatus {
+        head_commit_id: head,
+        shared_base_commit_id: base,
+        base_created_at,
+        base_on_main_path: on_path,
+        commits_since_base: commits,
+        changes_since_base: changes,
+        last_change_at,
+    })
+}
+
 fn interface_asset_ids(current: &Option<Value>, resolved: &Option<Value>) -> Vec<String> {
     let mut ids = Vec::new();
     for value in [current, resolved].into_iter().flatten() {
@@ -931,6 +1319,7 @@ fn entity_order(entity_type: &str, deleting: bool) -> usize {
         "timeline_event" => 6,
         "note" => 6,
         "ioc" => 6,
+        "capture" => 6,
         "ioc_sighting" => 7,
         "attack_edge" => 7,
         _ => 9,
@@ -1293,5 +1682,221 @@ mod tests {
         let asset = &get_assets(&local).unwrap()[0];
         assert_eq!(asset.os.as_deref(), Some("Windows 11"));
         assert_eq!(asset.network_name.as_deref(), Some("Office floor 2"));
+    }
+
+    #[test]
+    fn commits_record_the_experts_team() {
+        let mut conn = seeded_case();
+        let bob = actor("Bob")
+            .with_team(Some("  Log analysis ".into()))
+            .unwrap();
+        update_network(
+            &mut conn,
+            &bob,
+            "network-1",
+            "Shared",
+            "10.0.0.0/24",
+            "LAN",
+            "Seen in proxy logs",
+            None,
+        )
+        .unwrap();
+        let latest = &get_history(&conn, 1).unwrap()[0];
+        assert_eq!(latest.scope.as_ref().unwrap()["team"], "Log analysis");
+        assert!(actor("Eve").with_team(Some("x".repeat(81))).is_err());
+        assert_eq!(
+            actor("Eve").with_team(Some("   ".into())).unwrap().team,
+            None
+        );
+    }
+
+    #[test]
+    fn bundles_carry_a_checksum_that_survives_reformatting_but_not_edits() {
+        let mut incoming = seeded_case();
+        let bob = actor("Bob");
+        update_network(
+            &mut incoming,
+            &bob,
+            "network-1",
+            "Renamed",
+            "10.0.0.0/24",
+            "LAN",
+            "Base description",
+            None,
+        )
+        .unwrap();
+        let bundle = export_change_bundle(&incoming, &bob).unwrap();
+        let compact = serde_json::to_string(&bundle).unwrap();
+        // Pretty-printing and reordered keys are the same content.
+        let reordered = canonical_json(&serde_json::from_str::<Value>(&compact).unwrap());
+        let pretty = serde_json::to_string_pretty(&bundle).unwrap();
+        for text in [&compact, &reordered, &pretty] {
+            assert!(parse_change_bundle(text).unwrap().verified);
+        }
+        let local = seeded_case();
+        let preview = preview_bundle(&local, &parse_change_bundle(&pretty).unwrap()).unwrap();
+        assert_eq!(preview.integrity, "verified");
+
+        // Any edit to the content fails the check.
+        let tampered = compact.replace("Renamed", "Renamad");
+        assert_eq!(
+            parse_change_bundle(&tampered).unwrap_err(),
+            BUNDLE_INTEGRITY_MESSAGE
+        );
+
+        // Bundles from before checksums still load, flagged as unchecked.
+        let mut legacy: Value = serde_json::from_str(&compact).unwrap();
+        legacy.as_object_mut().unwrap().remove("integrity");
+        let parsed = parse_change_bundle(&legacy.to_string()).unwrap();
+        assert!(!parsed.verified);
+        assert_eq!(preview_bundle(&local, &parsed).unwrap().integrity, "absent");
+    }
+
+    fn applied_by_entity(commits: &[MergedCommit], author: &str) -> Vec<(String, bool)> {
+        commits
+            .iter()
+            .filter(|commit| commit.author_name == author)
+            .flat_map(|commit| {
+                commit
+                    .changes
+                    .iter()
+                    .map(|change| (change.entity_id.clone(), change.applied))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn merging_keeps_each_contributors_original_commits() {
+        let mut local = seeded_asset_case();
+        let mut incoming = seeded_asset_case();
+        let bob = actor("Bob")
+            .with_team(Some("Network exploration".into()))
+            .unwrap();
+        let alice = actor("Alice");
+        update_network(
+            &mut incoming,
+            &bob,
+            "network-1",
+            "Shared",
+            "10.0.0.0/24",
+            "LAN",
+            "Bob mapped it",
+            None,
+        )
+        .unwrap();
+        update_network(
+            &mut incoming,
+            &bob,
+            "network-2",
+            "DMZ",
+            "172.16.0.0/24",
+            "DMZ",
+            "Bob saw a web server",
+            None,
+        )
+        .unwrap();
+        let bundle = export_change_bundle(&incoming, &bob).unwrap();
+        let preview = preview_bundle(&local, &bundle).unwrap();
+        let decisions: Vec<MergeDecision> = preview
+            .changes
+            .iter()
+            .map(|change| MergeDecision {
+                change_id: change.id.clone(),
+                selected: change.entity_id == "network-1",
+                resolved_after: None,
+            })
+            .collect();
+        apply_bundle(&mut local, &alice, &bundle, &preview, &decisions).unwrap();
+
+        let merge = &get_history(&local, 1).unwrap()[0];
+        assert_eq!(merge.author_name, "Alice");
+        assert_eq!(merge.merged_commits.len(), 2);
+        for original in &merge.merged_commits {
+            assert_eq!(original.author_name, "Bob");
+            assert_eq!(original.bundle_id, bundle.bundle_id);
+            assert_eq!(
+                original.scope.as_ref().unwrap()["team"],
+                "Network exploration"
+            );
+        }
+        let bob_changes = applied_by_entity(&merge.merged_commits, "Bob");
+        assert!(bob_changes.contains(&("network-1".to_string(), true)));
+        assert!(bob_changes.contains(&("network-2".to_string(), false)));
+
+        // Alice's next bundle carries Bob's commits inside her merge commit, and
+        // Carol's merge keeps both contributors.
+        let relayed = export_change_bundle(&local, &alice).unwrap();
+        let mut carol_copy = seeded_asset_case();
+        let carol_preview = preview_bundle(&carol_copy, &relayed).unwrap();
+        let all: Vec<MergeDecision> = carol_preview
+            .changes
+            .iter()
+            .map(|change| MergeDecision {
+                change_id: change.id.clone(),
+                selected: true,
+                resolved_after: None,
+            })
+            .collect();
+        apply_bundle(
+            &mut carol_copy,
+            &actor("Carol"),
+            &relayed,
+            &carol_preview,
+            &all,
+        )
+        .unwrap();
+        let carol_merge = &get_history(&carol_copy, 1).unwrap()[0];
+        assert!(carol_merge
+            .merged_commits
+            .iter()
+            .any(|commit| commit.author_name == "Alice"));
+        let relayed_bob = applied_by_entity(&carol_merge.merged_commits, "Bob");
+        assert!(relayed_bob.contains(&("network-1".to_string(), true)));
+        assert!(relayed_bob.contains(&("network-2".to_string(), false)));
+    }
+
+    #[test]
+    fn handover_status_counts_work_since_the_shared_baseline() {
+        let mut conn = seeded_case();
+        let bob = actor("Bob");
+        let status = handover_status(&conn).unwrap();
+        assert_eq!(
+            (
+                status.commits_since_base,
+                status.changes_since_base,
+                status.base_on_main_path
+            ),
+            (0, 0, true)
+        );
+        update_network(
+            &mut conn,
+            &bob,
+            "network-1",
+            "A",
+            "10.0.0.0/24",
+            "LAN",
+            "",
+            None,
+        )
+        .unwrap();
+        update_network(
+            &mut conn,
+            &bob,
+            "network-1",
+            "B",
+            "10.0.0.0/24",
+            "LAN",
+            "",
+            None,
+        )
+        .unwrap();
+        let status = handover_status(&conn).unwrap();
+        assert_eq!(
+            (status.commits_since_base, status.changes_since_base),
+            (2, 2)
+        );
+        assert!(status.last_change_at.is_some());
+        mark_shared_baseline(&conn).unwrap();
+        assert_eq!(handover_status(&conn).unwrap().commits_since_base, 0);
     }
 }

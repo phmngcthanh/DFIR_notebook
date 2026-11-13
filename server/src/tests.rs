@@ -54,6 +54,7 @@ fn create(state: &Arc<AppState>, password: &str) -> Result<SessionPayload, Strin
             client_name: "ACME".to_string(),
             expert_name: "Expert A".to_string(),
             database_password: password.to_string(),
+            team: None,
         },
     )
 }
@@ -73,6 +74,7 @@ fn unlock(
             expert_name: expert.to_string(),
             scope_label: None,
             scope_network_ids: Vec::new(),
+            team: None,
         },
     )
 }
@@ -344,4 +346,85 @@ fn a_wrong_current_password_cannot_rekey_the_case() {
         "Expert B"
     )
     .is_ok());
+}
+
+#[test]
+fn captures_drafts_and_search_work_through_the_dispatcher() {
+    let server = TempServer::new(true);
+    let payload = create(&server.state, "correct-horse-battery").unwrap();
+    let context = session(&server.state, &payload);
+
+    // A capture is case content: other browsers must hear about it.
+    let capture = run(
+        &server.state,
+        &context,
+        "create_new_capture",
+        json!({ "content": "APP01, 10.0.0.15. Finance owns it.", "source": "Interview" }),
+    )
+    .unwrap();
+    assert_eq!(capture["captured_by"], "Expert A");
+    assert_eq!(context.case.revision(), 1);
+
+    // Drafts are one expert's working state: saving them must not wake others.
+    run(
+        &server.state,
+        &context,
+        "save_case_drafts",
+        json!({ "drafts": { "notes.title": "Half written" } }),
+    )
+    .unwrap();
+    assert_eq!(
+        context.case.revision(),
+        1,
+        "drafts must not bump the revision"
+    );
+    let drafts = run(&server.state, &context, "load_case_drafts", json!({})).unwrap();
+    assert_eq!(drafts["notes.title"], "Half written");
+
+    let hits = run(
+        &server.state,
+        &context,
+        "search_case_records",
+        json!({ "query": "finance" }),
+    )
+    .unwrap();
+    assert_eq!(hits[0]["entity_type"], "capture");
+    let status = run(&server.state, &context, "get_handover_status", json!({})).unwrap();
+    assert!(status["commits_since_base"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn the_expert_team_travels_with_the_session_into_history() {
+    let server = TempServer::new(true);
+    let created = create(&server.state, "correct-horse-battery").unwrap();
+    let payload = unlock_inner(
+        &server.state,
+        peer(),
+        UnlockRequest {
+            case_id: created.case_id.clone(),
+            password: "correct-horse-battery".to_string(),
+            expert_name: "Expert B".to_string(),
+            scope_label: None,
+            scope_network_ids: Vec::new(),
+            team: Some("Log analysis".to_string()),
+        },
+    )
+    .unwrap();
+    assert_eq!(payload.expert.team.as_deref(), Some("Log analysis"));
+    let context = session(&server.state, &payload);
+    run(
+        &server.state,
+        &context,
+        "create_new_capture",
+        json!({ "content": "Proxy logs show beaconing every 60s" }),
+    )
+    .unwrap();
+    let history = run(
+        &server.state,
+        &context,
+        "list_case_history",
+        json!({ "limit": 1 }),
+    )
+    .unwrap();
+    assert_eq!(history[0]["scope"]["team"], "Log analysis");
 }

@@ -42,6 +42,13 @@ mod ioc_export;
 #[allow(dead_code)]
 #[path = "../../src-tauri/src/event_logs.rs"]
 mod event_logs;
+// Full backups and handover manifests are a desktop workflow (the operator
+// copies server case files directly); compiled here only so `server-test`
+// runs its suite alongside the rest of the core.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../src-tauri/src/handover.rs"]
+mod handover;
 
 mod auth;
 mod cases;

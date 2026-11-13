@@ -64,6 +64,7 @@ export interface UnlockRequest {
   expertName: string;
   scopeLabel?: string | null;
   scopeNetworkIds?: string[];
+  team?: string | null;
 }
 
 export interface CreateCaseRequest {
@@ -72,6 +73,7 @@ export interface CreateCaseRequest {
   clientName: string;
   expertName: string;
   databasePassword: string;
+  team?: string | null;
 }
 
 export function getToken(): string | null {

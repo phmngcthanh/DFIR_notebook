@@ -25,6 +25,7 @@ argon2 = "0.5"
 base64 = "0.22"
 getrandom = "0.2"
 zeroize = "1.8"
+sha2 = "0.10"
 
 # Server only.
 axum = { version = "0.8", features = ["macros"] }
@@ -33,7 +34,6 @@ tower-http = { version = "0.6", features = ["fs", "set-header"] }
 axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rcgen = "0.13"
-sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
 evtx = { version = "0.12.2", default-features = false }
 syslog_loose = "0.23"

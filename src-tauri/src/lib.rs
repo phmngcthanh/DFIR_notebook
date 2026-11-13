@@ -1,5 +1,6 @@
 mod db;
 mod event_logs;
+mod handover;
 mod history;
 mod ioc_export;
 mod partial_import;
@@ -139,8 +140,11 @@ fn set_current_expert(
     name: String,
     scope_label: Option<String>,
     scope_network_ids: Vec<String>,
+    team: Option<String>,
 ) -> Response<ActorIdentity> {
-    match ActorIdentity::new(name, scope_label, scope_network_ids) {
+    match ActorIdentity::new(name, scope_label, scope_network_ids)
+        .and_then(|actor| actor.with_team(team))
+    {
         Ok(actor) => match state.actor.lock() {
             Ok(mut guard) => {
                 *guard = Some(actor.clone());
@@ -169,9 +173,12 @@ fn create_new_case(
     client_name: String,
     expert_name: String,
     database_password: String,
+    team: Option<String>,
 ) -> Response<String> {
     let database_password = Zeroizing::new(database_password);
-    let actor = match ActorIdentity::new(expert_name.clone(), None, Vec::new()) {
+    let actor = match ActorIdentity::new(expert_name.clone(), None, Vec::new())
+        .and_then(|actor| actor.with_team(team))
+    {
         Ok(actor) => actor,
         Err(error) => return Response::err(error),
     };
@@ -351,8 +358,9 @@ struct PlatformInfo {
 #[tauri::command]
 fn get_platform_info(app_handle: tauri::AppHandle) -> Response<PlatformInfo> {
     let dirs = storage::cases_dir(&app_handle).and_then(|cases| {
-        storage::exports_dir(&app_handle)
-            .and_then(|exports| storage::inbox_dir(&app_handle).map(|inbox| (cases, exports, inbox)))
+        storage::exports_dir(&app_handle).and_then(|exports| {
+            storage::inbox_dir(&app_handle).map(|inbox| (cases, exports, inbox))
+        })
     });
     match dirs {
         Ok((cases, exports, inbox)) => Response::ok(PlatformInfo {
@@ -724,9 +732,8 @@ fn import_event_log_file(
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let read_text = || {
-        fs::read_to_string(&path).map_err(|error| format!("Could not read the file: {error}"))
-    };
+    let read_text =
+        || fs::read_to_string(&path).map_err(|error| format!("Could not read the file: {error}"));
     with_event_logs(&state, |conn| match extension.as_str() {
         "evtx" => import_evtx_file(conn, &options, &path),
         "json" => import_windows_json_text(conn, &options, &read_text()?),
@@ -805,6 +812,90 @@ fn promote_event_logs_to_timeline(
         Ok(summary) => Response::ok(summary),
         Err(error) => Response::err(error),
     }
+}
+
+// ---- capture inbox ---------------------------------------------------------
+
+#[tauri::command]
+fn list_captures(state: State<DbState>) -> Response<Vec<Capture>> {
+    with_conn(&state, |conn| get_captures(conn))
+}
+
+#[tauri::command]
+fn create_new_capture(
+    state: State<DbState>,
+    content: String,
+    source: Option<String>,
+) -> Response<Capture> {
+    with_actor_conn(&state, |conn, actor| {
+        create_capture(conn, actor, &content, source.as_deref().unwrap_or(""))
+    })
+}
+
+#[tauri::command]
+fn update_existing_capture(
+    state: State<DbState>,
+    id: String,
+    content: String,
+    source: Option<String>,
+    status: String,
+    links: Vec<CaptureLink>,
+    resolution: Option<String>,
+) -> Response<Capture> {
+    with_actor_conn(&state, |conn, actor| {
+        update_capture(
+            conn,
+            actor,
+            &id,
+            &content,
+            source.as_deref().unwrap_or(""),
+            &status,
+            links,
+            resolution.as_deref().unwrap_or(""),
+        )
+    })
+}
+
+#[tauri::command]
+fn remove_capture(state: State<DbState>, id: String) -> Response<bool> {
+    with_actor_conn(&state, |conn, actor| {
+        delete_capture(conn, actor, &id).map(|_| true)
+    })
+}
+
+// ---- drafts and search ------------------------------------------------------
+
+/// Drafts belong to the expert name of the session, like the commits do.
+#[tauri::command]
+fn load_case_drafts(state: State<DbState>) -> Response<serde_json::Map<String, serde_json::Value>> {
+    let owner = match current_actor(&state) {
+        Ok(actor) => actor.name,
+        Err(error) => return Response::err(error),
+    };
+    with_conn(&state, |conn| load_drafts(conn, &owner))
+}
+
+#[tauri::command]
+fn save_case_drafts(
+    state: State<DbState>,
+    drafts: serde_json::Map<String, serde_json::Value>,
+) -> Response<usize> {
+    let owner = match current_actor(&state) {
+        Ok(actor) => actor.name,
+        Err(error) => return Response::err(error),
+    };
+    with_conn(&state, |conn| save_drafts(conn, &owner, &drafts))
+}
+
+#[tauri::command]
+fn search_case_records(
+    state: State<DbState>,
+    query: String,
+    limit: Option<usize>,
+) -> Response<Vec<SearchHit>> {
+    with_conn(&state, |conn| {
+        search_case(conn, &query, limit.unwrap_or(60))
+    })
 }
 
 #[tauri::command]
@@ -2143,7 +2234,7 @@ fn save_change_bundle_to_file(
         Ok(encoded) => encoded,
         Err(error) => return Response::err(error),
     };
-    if password.is_some() {
+    let saved = if password.is_some() {
         save_text_file(
             &app_handle,
             format!("changes-{}.dfirx", sanitize_filename(&actor.name)),
@@ -2162,7 +2253,177 @@ fn save_change_bundle_to_file(
             "json",
             &encoded,
         )
+    };
+    // A `.sha256` beside the bundle lets anyone check the handover by hand;
+    // the bundle also carries its own checksum, verified on load.
+    match saved {
+        Response {
+            success: true,
+            data: Some(path),
+            ..
+        } => match handover::write_manifest(Path::new(&path), &[PathBuf::from(&path)]) {
+            Ok(_) => Response::ok(path),
+            Err(error) => Response::err(format!(
+                "Bundle saved to {path}, but its checksum file could not be written: {error}"
+            )),
+        },
+        other => other,
     }
+}
+
+#[tauri::command]
+fn get_handover_status(state: State<DbState>) -> Response<HandoverStatus> {
+    with_conn(&state, |conn| handover_status(conn))
+}
+
+// ---- full backup and restore ----------------------------------------------
+// A byte copy of the encrypted case (and its event-log store) with a SHA-256
+// manifest: the backup, and the file a lead redistributes after a merge.
+
+#[tauri::command]
+fn save_full_backup(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    password: String,
+) -> Response<handover::BackupSummary> {
+    save_full_backup_impl(app_handle, state, password)
+}
+
+#[cfg(target_os = "android")]
+fn save_full_backup_impl(
+    _app_handle: tauri::AppHandle,
+    _state: State<'_, DbState>,
+    _password: String,
+) -> Response<handover::BackupSummary> {
+    Response::err("Full backups are made in the desktop build; export a change bundle instead")
+}
+
+#[cfg(not(target_os = "android"))]
+fn save_full_backup_impl(
+    app_handle: tauri::AppHandle,
+    state: State<'_, DbState>,
+    password: String,
+) -> Response<handover::BackupSummary> {
+    let password = Zeroizing::new(password);
+    let case_path = match open_case_path(&state) {
+        Ok(path) => path,
+        Err(error) => return Response::err(error),
+    };
+    // Prove the password before asking where to write anything.
+    if let Err(error) = open_encrypted_connection(&case_path, password.as_str()) {
+        return Response::err(error);
+    }
+    let stem = case_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("case")
+        .to_string();
+    let default_name = format!(
+        "{}-backup-{}.db",
+        sanitize_filename(&stem),
+        chrono::Local::now().format("%Y%m%d-%H%M")
+    );
+    let selection = app_handle
+        .dialog()
+        .file()
+        .set_file_name(default_name)
+        .add_filter("DFIR case backup", &["db"])
+        .blocking_save_file();
+    let target = match selection
+        .and_then(|value| selected_path(value).ok())
+        .map(|path| ensure_extension(path, "db"))
+    {
+        Some(path) => path,
+        None => return Response::err("Backup cancelled"),
+    };
+    // Hold the case connection, then the event-log store (the usual order),
+    // so neither file can change while it is copied.
+    let case_guard = match state.conn.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Response::err("Database lock poisoned"),
+    };
+    if case_guard.is_none() {
+        return Response::err("No case is open");
+    }
+    let log_guard = match state.event_logs.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Response::err("Event-log store lock poisoned"),
+    };
+    let result = handover::write_backup(&case_path, &target, password.as_str());
+    drop(log_guard);
+    drop(case_guard);
+    match result {
+        Ok(summary) => Response::ok(summary),
+        Err(error) => Response::err(error),
+    }
+}
+
+#[tauri::command]
+fn restore_full_backup(
+    app_handle: tauri::AppHandle,
+    state: State<DbState>,
+    password: String,
+) -> Response<handover::RestoreSummary> {
+    restore_full_backup_impl(app_handle, state, password)
+}
+
+#[cfg(target_os = "android")]
+fn restore_full_backup_impl(
+    _app_handle: tauri::AppHandle,
+    _state: State<'_, DbState>,
+    _password: String,
+) -> Response<handover::RestoreSummary> {
+    Response::err("Restoring a full backup is a desktop workflow")
+}
+
+#[cfg(not(target_os = "android"))]
+fn restore_full_backup_impl(
+    app_handle: tauri::AppHandle,
+    state: State<'_, DbState>,
+    password: String,
+) -> Response<handover::RestoreSummary> {
+    let password = Zeroizing::new(password);
+    let source = match app_handle
+        .dialog()
+        .file()
+        .add_filter("DFIR case backup", &["db"])
+        .blocking_pick_file()
+        .and_then(|value| selected_path(value).ok())
+    {
+        Some(path) => path,
+        None => return Response::err("Restore cancelled"),
+    };
+    let default_name = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| format!("{}-restored.db", sanitize_filename(value)))
+        .unwrap_or_else(|| "dfir-case-restored.db".to_string());
+    let target = match app_handle
+        .dialog()
+        .file()
+        .set_file_name(default_name)
+        .add_filter("DFIR Case", &["db"])
+        .blocking_save_file()
+        .and_then(|value| selected_path(value).ok())
+        .map(|path| ensure_extension(path, "db"))
+    {
+        Some(path) => path,
+        None => return Response::err("Restore cancelled"),
+    };
+    let summary = match handover::restore_backup(&source, &target, password.as_str()) {
+        Ok(summary) => summary,
+        Err(error) => return Response::err(error),
+    };
+    // Open the restored working copy exactly like Open Case.
+    let opened = open_case_at(&state, target, password.as_str());
+    if !opened.success {
+        return Response::err(format!(
+            "The backup was restored to {}, but it could not be opened: {}",
+            summary.path,
+            opened.error.unwrap_or_default()
+        ));
+    }
+    Response::ok(summary)
 }
 #[tauri::command]
 fn load_change_bundle_from_file(
@@ -2466,7 +2727,8 @@ fn pick_named_text_file(app_handle: &tauri::AppHandle) -> AppResult<Option<Picke
         .file_name()
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_default();
-    let text = fs::read_to_string(&path).map_err(|error| format!("Failed to read file: {error}"))?;
+    let text =
+        fs::read_to_string(&path).map_err(|error| format!("Failed to read file: {error}"))?;
     Ok(Some(PickedTextFile { name, text }))
 }
 
@@ -2599,6 +2861,16 @@ pub fn run() {
             discard_pending_change_bundle,
             render_export_report,
             load_change_bundle_text,
+            get_handover_status,
+            save_full_backup,
+            restore_full_backup,
+            list_captures,
+            create_new_capture,
+            update_existing_capture,
+            remove_capture,
+            load_case_drafts,
+            save_case_drafts,
+            search_case_records,
             export_iocs_csv,
             export_iocs_stix,
             save_text_download,

@@ -89,6 +89,24 @@ function contains(cidr: { family: 4 | 6; network: bigint; prefix: number }, addr
   return address.value >> BigInt(bits - cidr.prefix) === cidr.network;
 }
 
+/** True for a plain IPv4 or IPv6 address (no prefix length). */
+export function isIpAddress(text: string): boolean {
+  return parseAddress(text) !== null;
+}
+
+/** True for addresses in private, loopback, link-local, or CGNAT space. */
+export function isPrivateAddress(text: string): boolean {
+  const address = parseAddress(text);
+  if (!address) return false;
+  const ranges = address.family === 4
+    ? ['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '127.0.0.0/8', '169.254.0.0/16', '100.64.0.0/10']
+    : ['fc00::/7', 'fe80::/10', '::1/128'];
+  return ranges.some((range) => {
+    const cidr = parseCidr(range);
+    return cidr !== null && contains(cidr, address);
+  });
+}
+
 /** Which recorded network an address belongs to, if exactly one is the most specific fit. */
 export function matchNetworkForIp(networks: Network[], ipAddress: string): SubnetMatch {
   const address = parseAddress(ipAddress);

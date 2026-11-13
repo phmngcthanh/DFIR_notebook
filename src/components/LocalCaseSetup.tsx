@@ -6,7 +6,11 @@
  */
 import { useState } from 'react';
 import { invoke } from '@/lib/api';
-import { FolderOpen, Loader2, LockKeyhole, Plus } from 'lucide-react';
+import { ArchiveRestore, FolderOpen, Loader2, LockKeyhole, Plus } from 'lucide-react';
+import { toast } from 'sonner';
+import TeamField from '@/components/TeamField';
+import { rememberedTeam, rememberTeam } from '@/lib/teams';
+import type { ApiResponse, RestoreSummary } from '@/types';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -32,6 +36,8 @@ export default function CaseSetup({ mode, onComplete, onCancel }: Props) {
   const [description, setDescription] = useState('');
   const [clientName, setClientName] = useState('');
   const [expertName, setExpertName] = useState(() => localStorage.getItem('dfir-expert-name') ?? '');
+  const [team, setTeam] = useState(rememberedTeam);
+  const [showRestore, setShowRestore] = useState(false);
   const [databasePassword, setDatabasePassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showLegacyConversion, setShowLegacyConversion] = useState(false);
@@ -65,9 +71,11 @@ export default function CaseSetup({ mode, onComplete, onCancel }: Props) {
         clientName: clientName.trim(),
         expertName: expertName.trim(),
         databasePassword,
+        team: team.trim() || null,
       });
       if (!response.success) throw new Error(response.error || 'Failed to create case');
       localStorage.setItem('dfir-expert-name', expertName.trim());
+      rememberTeam(team);
       onComplete();
     } catch (reason) {
       setError(String(reason));
@@ -88,6 +96,33 @@ export default function CaseSetup({ mode, onComplete, onCancel }: Props) {
     try {
       const response = await invoke<CommandResponse>('open_existing_case', { databasePassword });
       if (!response.success) throw new Error(response.error || 'Failed to open case');
+      onComplete();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setDatabasePassword('');
+      setLoading(false);
+    }
+  };
+
+  // A full backup (or the master copy a lead redistributes) is checked against
+  // its .sha256 manifest and password, copied to a new file, and opened.
+  const handleRestore = async () => {
+    if (!databasePassword) {
+      setError('Enter the backup password before selecting the backup');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      const response = await invoke<ApiResponse<RestoreSummary>>('restore_full_backup', { password: databasePassword });
+      if (!response.success || !response.data) throw new Error(response.error || 'Failed to restore the backup');
+      const { caseName, manifest, restoredEventLogs } = response.data;
+      toast.success(`Restored ${caseName}${restoredEventLogs ? ' with its event logs' : ''}`, {
+        description: manifest.status === 'verified'
+          ? `Checksums verified for ${manifest.files.join(', ')}.`
+          : 'No .sha256 file came with this backup, so its integrity was not checked.',
+      });
       onComplete();
     } catch (reason) {
       setError(String(reason));
@@ -134,6 +169,7 @@ export default function CaseSetup({ mode, onComplete, onCancel }: Props) {
               <Field label="Description" htmlFor="description"><Textarea id="description" value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></Field>
               <Field label="Session expert name *" htmlFor="expert-name"><Input id="expert-name" value={expertName} onChange={(event) => setExpertName(event.target.value)} placeholder="Name recorded on changes" /></Field>
               <p className="text-xs text-slate-500">This session name is recorded on changes. It is attribution only, is not checked against the password, and can change between sessions.</p>
+              <TeamField value={team} onChange={setTeam} />
               <PasswordFields password={databasePassword} confirmation={confirmPassword} onPassword={setDatabasePassword} onConfirmation={setConfirmPassword} />
               <p className="text-xs text-slate-500">This password encrypts only the selected .db file. Copies initially share it; each copy can later be given a different password.</p>
               {error && <ErrorText text={error} />}
@@ -157,14 +193,26 @@ export default function CaseSetup({ mode, onComplete, onCancel }: Props) {
               <div className="flex flex-wrap gap-3 pt-2">
                 {showLegacyConversion ? (
                   <Button onClick={() => void handleLegacyConversion()} disabled={loading} className="flex-1 bg-cyan-600 hover:bg-cyan-700"><LockKeyhole size={16} className="mr-2" />Convert and Open Copy</Button>
+                ) : showRestore ? (
+                  <Button onClick={() => void handleRestore()} disabled={loading} className="flex-1 bg-cyan-600 hover:bg-cyan-700">{loading ? <Loader2 size={16} className="mr-2 animate-spin" /> : <ArchiveRestore size={16} className="mr-2" />}Select Backup and Restore</Button>
                 ) : (
                   <Button onClick={() => void handleOpen()} disabled={loading} className="flex-1 bg-cyan-600 hover:bg-cyan-700">{loading ? <Loader2 size={16} className="mr-2 animate-spin" /> : <FolderOpen size={16} className="mr-2" />}Select and Unlock Case</Button>
                 )}
                 <Button onClick={onCancel} variant="outline">Cancel</Button>
               </div>
-              <Button variant="link" className="h-auto p-0 text-xs" onClick={() => { setShowLegacyConversion((value) => !value); setError(''); setConfirmPassword(''); }}>
-                {showLegacyConversion ? 'Back to encrypted case login' : 'Convert a legacy unencrypted case'}
-              </Button>
+              {showRestore && <p className="rounded bg-cyan-50 p-3 text-xs text-cyan-900">Pick a full backup (.db). Its .sha256 checksum file is checked when present, then the backup is copied to a new file you choose and opened. The backup itself is never changed.</p>}
+              <div className="flex flex-wrap gap-4">
+                {!showRestore && (
+                  <Button variant="link" className="h-auto p-0 text-xs" onClick={() => { setShowLegacyConversion((value) => !value); setError(''); setConfirmPassword(''); }}>
+                    {showLegacyConversion ? 'Back to encrypted case login' : 'Convert a legacy unencrypted case'}
+                  </Button>
+                )}
+                {!showLegacyConversion && (
+                  <Button variant="link" className="h-auto p-0 text-xs" onClick={() => { setShowRestore((value) => !value); setError(''); }}>
+                    {showRestore ? 'Back to encrypted case login' : 'Restore a full backup or redistributed master'}
+                  </Button>
+                )}
+              </div>
             </>
           )}
         </CardContent>

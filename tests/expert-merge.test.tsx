@@ -64,6 +64,33 @@ describe('offline expert bundle review', () => {
     expect(onImport).toHaveBeenCalled();
   });
 
+  it('shows whether each loaded bundle passed its checksum', async () => {
+    const user = userEvent.setup();
+    pickTextFileMock
+      .mockResolvedValueOnce({ name: 'changes-Bob.json', text: '{"bundle":1}' })
+      .mockResolvedValueOnce({ name: 'changes-Carol.json', text: '{"bundle":2}' });
+    invokeMock.mockImplementation(async (command: string, args?: { contents?: string }) => {
+      if (command === 'list_case_history') return { success: true, data: [] };
+      if (command === 'load_change_bundle_text') {
+        return {
+          success: true,
+          data: args?.contents === '{"bundle":1}'
+            ? { ...preview, integrity: 'verified' }
+            : { ...preview, bundle_id: 'bundle-2', exported_by: 'Carol', integrity: 'absent' },
+        };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    render(<ExportImport refreshTrigger={0} onImport={vi.fn()} />);
+
+    await user.click(screen.getByRole('button', { name: 'Load for review' }));
+    expect(await screen.findByText('Checksum verified')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Load for review' }));
+    // An older export carries no checksum; it still loads, flagged for the reviewer.
+    expect(await screen.findByText('No checksum')).toBeInTheDocument();
+    expect(screen.getByText('Carol')).toBeInTheDocument();
+  });
+
   it('passes a confirmed portable password only for encrypted snapshot downloads', async () => {
     invokeMock.mockImplementation(async (command: string) => {
       if (command === 'list_case_history') return { success: true, data: [] };

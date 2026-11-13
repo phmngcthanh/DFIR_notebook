@@ -47,6 +47,8 @@ pub struct CreateCaseRequest {
     pub client_name: String,
     pub expert_name: String,
     pub database_password: String,
+    #[serde(default)]
+    pub team: Option<String>,
 }
 
 /// Creates the encrypted case file and immediately starts a session on it, the
@@ -79,7 +81,8 @@ pub(crate) fn create_case_inner(
     if request.name.trim().is_empty() {
         return Err("Case name is required".to_string());
     }
-    let actor = ActorIdentity::new(request.expert_name, None, Vec::new())?;
+    let actor =
+        ActorIdentity::new(request.expert_name, None, Vec::new())?.with_team(request.team)?;
 
     let case_id = case_id_from_name(&request.name, &state.config.cases_dir);
     let path = state.case_path(&case_id)?;

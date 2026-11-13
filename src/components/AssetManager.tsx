@@ -40,20 +40,20 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
   const [networks, setNetworks] = useState<Network[]>([]);
   const [interfaces, setInterfaces] = useState<NetworkInterface[]>([]);
   // Open forms survive switching screens (see `useDraft`).
-  const [form, setForm] = useDraft<AssetFormState>('assets.form', EMPTY_ASSET);
-  const [showForm, setShowForm] = useDraft('assets.showForm', false);
-  const [editingId, setEditingId] = useDraft<string | null>('assets.editingId', null);
+  const [form, setForm] = useDraft<AssetFormState>('assets.form', EMPTY_ASSET, { persist: true });
+  const [showForm, setShowForm] = useDraft('assets.showForm', false, { persist: true });
+  const [editingId, setEditingId] = useDraft<string | null>('assets.editingId', null, { persist: true });
   const [expandedAssetId, setExpandedAssetId] = useDraft<string | null>('assets.expandedAssetId', null);
-  const [interfaceForm, setInterfaceForm] = useDraft<InterfaceFormState>('assets.interfaceForm', EMPTY_INTERFACE);
-  const [editingInterfaceId, setEditingInterfaceId] = useDraft<string | null>('assets.editingInterfaceId', null);
-  const [showInterfaceForm, setShowInterfaceForm] = useDraft('assets.showInterfaceForm', false);
-  const [search, setSearch] = useState('');
+  const [interfaceForm, setInterfaceForm] = useDraft<InterfaceFormState>('assets.interfaceForm', EMPTY_INTERFACE, { persist: true });
+  const [editingInterfaceId, setEditingInterfaceId] = useDraft<string | null>('assets.editingInterfaceId', null, { persist: true });
+  const [showInterfaceForm, setShowInterfaceForm] = useDraft('assets.showInterfaceForm', false, { persist: true });
+  const [search, setSearch] = useDraft('assets.search', '');
   const [sort, setSort] = useState<AssetSort | null>(null);
   const [networkFilter, setNetworkFilter] = useState('all');
   const [compromiseFilter, setCompromiseFilter] = useState('all');
   const [investigationFilter, setInvestigationFilter] = useState('all');
   const [focusOnly, setFocusOnly] = useState(expert.scope_network_ids.length > 0);
-  const [showVmImport, setShowVmImport] = useDraft('assets.showImport', false);
+  const [showVmImport, setShowVmImport] = useDraft('assets.showImport', false, { persist: true });
 
   const [infection, setInfection] = useState<InfectionSummary>({ entities: [], iocs: [] });
 

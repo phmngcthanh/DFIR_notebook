@@ -44,13 +44,18 @@ use crate::db::{
     update_network, update_network_connection, update_network_interface, update_note,
     update_timeline_event, ExportData, Ioc, TopologyNodePosition,
 };
+use crate::db::{
+    create_capture, delete_capture, get_captures, load_drafts, save_drafts, search_case,
+    update_capture, CaptureLink,
+};
 use crate::event_logs::{
     delete_batch, import_syslog_text, import_windows_json_text, list_batches, open_store,
     promote_records, search_event_logs, sidecar_path, store_counts, EventLogSearchParams,
     ImportOptions, PromoteOptions, StoreCounts,
 };
 use crate::history::{
-    apply_bundle, get_history, parse_change_bundle, preview_bundle, ActorIdentity, MergeDecision,
+    apply_bundle, get_history, handover_status, parse_change_bundle, preview_bundle, ActorIdentity,
+    MergeDecision,
 };
 use crate::partial_import::{
     apply_partial_import, partial_import_template, preview_partial_import,
@@ -87,12 +92,12 @@ pub async fn dispatch(
         actor: session.actor.clone(),
     };
     let outcome = match args {
-        Ok(args) => tokio::task::spawn_blocking(move || {
-            run(&worker_state, &worker_session, &command, args)
-        })
-        .await
-        .map_err(|join_error| format!("The command worker failed: {join_error}"))
-        .and_then(std::convert::identity),
+        Ok(args) => {
+            tokio::task::spawn_blocking(move || run(&worker_state, &worker_session, &command, args))
+                .await
+                .map_err(|join_error| format!("The command worker failed: {join_error}"))
+                .and_then(std::convert::identity)
+        }
         Err(error) => Err(error),
     };
     let payload = Json(match outcome {
@@ -148,7 +153,8 @@ pub(crate) fn run(
         // ---- session and case -------------------------------------------
         "set_current_expert" => {
             let p: ExpertParams = from_args(args)?;
-            let actor = ActorIdentity::new(p.name, p.scope_label, p.scope_network_ids)?;
+            let actor = ActorIdentity::new(p.name, p.scope_label, p.scope_network_ids)?
+                .with_team(p.team)?;
             state.set_session_actor(&session.token, actor.clone())?;
             to_json(actor)
         }
@@ -268,9 +274,7 @@ pub(crate) fn run(
                 "syslog" => import_syslog_text(conn, &options, &p.text)?,
                 "windows-json" => import_windows_json_text(conn, &options, &p.text)?,
                 _ => {
-                    return Err(
-                        "Unsupported event-log kind; use syslog or windows-json".to_string()
-                    )
+                    return Err("Unsupported event-log kind; use syslog or windows-json".to_string())
                 }
             };
             to_json(summary)
@@ -327,6 +331,48 @@ pub(crate) fn run(
             case.bump();
             to_json(value)
         }
+
+        // ---- capture inbox ---------------------------------------------------
+        "list_captures" => read_cmd!(NoParams, |conn, _p| get_captures(conn)),
+        "create_new_capture" => write_cmd!(CaptureParams, |conn, actor, p| create_capture(
+            conn,
+            actor,
+            &p.content,
+            p.source.as_deref().unwrap_or("")
+        )),
+        "update_existing_capture" => write_cmd!(CaptureUpdateParams, |conn, actor, p| {
+            update_capture(
+                conn,
+                actor,
+                &p.id,
+                &p.content,
+                p.source.as_deref().unwrap_or(""),
+                &p.status,
+                p.links.clone(),
+                p.resolution.as_deref().unwrap_or(""),
+            )
+        }),
+        "remove_capture" => write_cmd!(IdParams, |conn, actor, p| {
+            delete_capture(conn, actor, &p.id).map(|_| true)
+        }),
+
+        // ---- drafts and search -------------------------------------------------
+        // Drafts are per expert name and are working state, not case content:
+        // saving one must not bump the revision, or every other open browser
+        // would be told the case changed each time someone typed.
+        "load_case_drafts" => {
+            read_cmd!(NoParams, |conn, _p| load_drafts(conn, &session.actor.name))
+        }
+        "save_case_drafts" => {
+            let p: DraftsParams = from_args(args)?;
+            to_json(case.with_conn(|conn| save_drafts(conn, &session.actor.name, &p.drafts))?)
+        }
+        "search_case_records" => read_cmd!(SearchParams, |conn, p| search_case(
+            conn,
+            &p.query,
+            p.limit.unwrap_or(60)
+        )),
+        "get_handover_status" => read_cmd!(NoParams, |conn, _p| handover_status(conn)),
 
         // ---- networks -----------------------------------------------------
         "create_new_network" => write_cmd!(NetworkParams, |conn, actor, p| create_network(
@@ -1062,7 +1108,19 @@ params! {
         name: String,
         #[serde(default)] scope_label: Option<String>,
         #[serde(default)] scope_network_ids: Vec<String>,
+        #[serde(default)] team: Option<String>,
     }
+    struct CaptureParams { content: String, #[serde(default)] source: Option<String> }
+    struct CaptureUpdateParams {
+        id: String,
+        content: String,
+        #[serde(default)] source: Option<String>,
+        status: String,
+        #[serde(default)] links: Vec<CaptureLink>,
+        #[serde(default)] resolution: Option<String>,
+    }
+    struct DraftsParams { drafts: serde_json::Map<String, Value> }
+    struct SearchParams { query: String, #[serde(default)] limit: Option<usize> }
     struct CaseParams { name: String, description: String, client_name: String, status: String }
     struct ChangePasswordParams { current_password: String, new_password: String }
     struct EventLogOpenParams { password: String }

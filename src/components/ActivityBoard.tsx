@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@/lib/api';
-import { GitMerge, RefreshCw, SquareKanban, UserRound } from 'lucide-react';
+import { GitMerge, RefreshCw, SquareKanban, Users, UserRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -9,15 +9,27 @@ import type { ApiResponse, HistoryChange, HistoryCommit, JsonValue } from '@/typ
 
 interface Props { refreshTrigger: number }
 
+/**
+ * A commit as shown on the board. Contributors' original commits that arrived
+ * through a merge appear in their own authors' lanes, marked with who merged
+ * them and which of their changes were taken.
+ */
+interface BoardCommit extends HistoryCommit {
+  merged_by?: string;
+  merged_at?: string;
+  applied?: Record<string, boolean>;
+}
+
 interface SessionGroup {
   sessionId: string;
-  commits: HistoryCommit[];
+  commits: BoardCommit[];
   firstAt: Date;
   lastAt: Date;
 }
 
 interface ExpertColumn {
   name: string;
+  teams: string[];
   sessions: SessionGroup[];
   changeCount: number;
   lastAt: Date;
@@ -37,6 +49,7 @@ const ENTITY_COLORS: Record<string, string> = {
   note: 'bg-amber-100 text-amber-800',
   topology_view: 'bg-cyan-100 text-cyan-800',
   case: 'bg-slate-200 text-slate-700',
+  capture: 'bg-cyan-100 text-cyan-800',
 };
 
 const IGNORED_DIFF_FIELDS = new Set(['id', 'created_at', 'updated_at', 'case_id']);
@@ -44,6 +57,7 @@ const IGNORED_DIFF_FIELDS = new Set(['id', 'created_at', 'updated_at', 'case_id'
 export default function ActivityBoard({ refreshTrigger }: Props) {
   const [commits, setCommits] = useState<HistoryCommit[]>([]);
   const [entityFilter, setEntityFilter] = useState('all');
+  const [teamFilter, setTeamFilter] = useState('all');
   const [loading, setLoading] = useState(false);
 
   const loadHistory = useCallback(async () => {
@@ -51,7 +65,7 @@ export default function ActivityBoard({ refreshTrigger }: Props) {
     try {
       const response = await invoke<ApiResponse<HistoryCommit[]>>('list_case_history', { limit: 1000 });
       if (!response.success) throw new Error(response.error || 'Could not load case history');
-      setCommits((response.data ?? []).filter((commit) => commit.author_name !== 'system'));
+      setCommits(withContributions((response.data ?? []).filter((commit) => commit.author_name !== 'system')));
     } catch (reason) {
       toast.error(String(reason));
     } finally {
@@ -67,12 +81,14 @@ export default function ActivityBoard({ refreshTrigger }: Props) {
     return [...types].sort();
   }, [commits]);
 
-  const columns = useMemo(
-    () => buildColumns(entityFilter === 'all' ? commits : commits
+  const teams = useMemo(() => [...new Set(commits.map(teamOf).filter(Boolean))].sort(), [commits]);
+
+  const columns = useMemo(() => {
+    const byTeam = teamFilter === 'all' ? commits : commits.filter((commit) => teamOf(commit) === teamFilter);
+    return buildColumns(entityFilter === 'all' ? byTeam : byTeam
       .map((commit) => ({ ...commit, changes: commit.changes.filter((change) => change.entity_type === entityFilter) }))
-      .filter((commit) => commit.changes.length > 0 || commit.parent_ids.length > 1)),
-    [commits, entityFilter],
-  );
+      .filter((commit) => commit.changes.length > 0 || commit.parent_ids.length > 1));
+  }, [commits, entityFilter, teamFilter]);
 
   const sessionCount = columns.reduce((total, column) => total + column.sessions.length, 0);
   const changeCount = columns.reduce((total, column) => total + column.changeCount, 0);
@@ -87,6 +103,15 @@ export default function ActivityBoard({ refreshTrigger }: Props) {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {teams.length > 0 && (
+            <Select value={teamFilter} onValueChange={setTeamFilter}>
+              <SelectTrigger className="w-48" aria-label="Filter by team"><SelectValue placeholder="All teams" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All teams</SelectItem>
+                {teams.map((team) => <SelectItem key={team} value={team}>{team}</SelectItem>)}
+              </SelectContent>
+            </Select>
+          )}
           <Select value={entityFilter} onValueChange={setEntityFilter}>
             <SelectTrigger className="w-44"><SelectValue placeholder="All record types" /></SelectTrigger>
             <SelectContent>
@@ -127,7 +152,10 @@ function ExpertLane({ column }: { column: ExpertColumn }) {
           <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-cyan-600 text-xs font-semibold text-white">
             {initials(column.name)}
           </span>
-          <span className="truncate text-sm font-semibold text-slate-800">{column.name}</span>
+          <span className="min-w-0">
+            <span className="block truncate text-sm font-semibold text-slate-800">{column.name}</span>
+            {column.teams.length > 0 && <span className="flex items-center gap-1 truncate text-[11px] text-slate-500"><Users size={11} />{column.teams.join(', ')}</span>}
+          </span>
         </div>
         <Badge variant="outline" className="flex-shrink-0">{column.changeCount}</Badge>
       </div>
@@ -147,8 +175,9 @@ function ExpertLane({ column }: { column: ExpertColumn }) {
   );
 }
 
-function CommitCard({ commit }: { commit: HistoryCommit }) {
+function CommitCard({ commit }: { commit: BoardCommit }) {
   const isMerge = commit.parent_ids.length > 1;
+  const contributions = commit.merged_commits?.length ?? 0;
   const counts = new Map<string, { entityType: string; label: string; count: number }>();
   for (const change of commit.changes) {
     const key = `${change.operation}|${change.entity_type}`;
@@ -162,8 +191,13 @@ function CommitCard({ commit }: { commit: HistoryCommit }) {
         <div className="flex items-start justify-between gap-2">
           <p className="min-w-0 flex-1 text-sm font-medium text-slate-800">{commit.message}</p>
           {isMerge && <Badge className="flex-shrink-0 bg-purple-100 text-purple-800"><GitMerge size={11} className="mr-1" />merge</Badge>}
+          {commit.merged_by && <Badge variant="outline" className="flex-shrink-0 border-purple-300 text-purple-800"><GitMerge size={11} className="mr-1" />merged by {commit.merged_by}</Badge>}
         </div>
-        <p className="mt-1 text-[11px] text-slate-400">{localTime(commit.created_at)}</p>
+        <p className="mt-1 text-[11px] text-slate-400">
+          {localTime(commit.created_at)}
+          {commit.merged_at && ` · merged ${localTime(commit.merged_at)}`}
+          {contributions > 0 && ` · brings in ${contributions} original commit${contributions === 1 ? '' : 's'}`}
+        </p>
         {counts.size > 0 && (
           <div className="mt-2 flex flex-wrap gap-1">
             {[...counts.entries()].map(([key, entry]) => (
@@ -176,19 +210,20 @@ function CommitCard({ commit }: { commit: HistoryCommit }) {
       </summary>
       <div className="space-y-2 border-t bg-slate-50/60 p-2.5">
         {commit.changes.length === 0 && <p className="text-xs text-slate-500">No record changes (merge bookkeeping only).</p>}
-        {commit.changes.map((change) => <ChangeDetail key={change.id} change={change} />)}
+        {commit.changes.map((change) => <ChangeDetail key={change.id} change={change} notApplied={commit.applied?.[change.id] === false} />)}
       </div>
     </details>
   );
 }
 
-function ChangeDetail({ change }: { change: HistoryChange }) {
+function ChangeDetail({ change, notApplied = false }: { change: HistoryChange; notApplied?: boolean }) {
   const diffs = fieldDiffs(change);
   return (
-    <div className="rounded border bg-white p-2 text-xs">
+    <div className={`rounded border bg-white p-2 text-xs ${notApplied ? 'opacity-60' : ''}`}>
       <p className="font-medium text-slate-700">
         <OperationWord operation={change.operation} /> {humanEntity(change.entity_type)}
         <span className="text-slate-500"> — {changeTitle(change)}</span>
+        {notApplied && <span className="ml-1 rounded bg-slate-100 px-1 text-[10px] text-slate-500">not taken in the merge</span>}
       </p>
       {change.operation === 'update' && diffs.length > 0 && (
         <div className="mt-1.5 space-y-1">
@@ -212,10 +247,51 @@ function OperationWord({ operation }: { operation: string }) {
   return <span className={color}>{word}</span>;
 }
 
-function buildColumns(commits: HistoryCommit[]): ExpertColumn[] {
-  const byExpert = new Map<string, Map<string, HistoryCommit[]>>();
+/**
+ * Add the contributors' original commits carried by merge commits, once each
+ * (history is newest first, so the latest merge that carried one wins).
+ */
+function withContributions(commits: HistoryCommit[]): BoardCommit[] {
+  const result: BoardCommit[] = [...commits];
+  const seen = new Set(commits.map((commit) => commit.id));
   for (const commit of commits) {
-    const sessions = byExpert.get(commit.author_name) ?? new Map<string, HistoryCommit[]>();
+    for (const merged of commit.merged_commits ?? []) {
+      if (seen.has(merged.commit_id)) continue;
+      seen.add(merged.commit_id);
+      result.push({
+        id: merged.commit_id,
+        author_name: merged.author_name,
+        session_id: merged.session_id,
+        message: merged.message,
+        scope: merged.scope,
+        created_at: merged.created_at,
+        parent_ids: [],
+        changes: merged.changes.map((change) => ({
+          id: change.id,
+          entity_type: change.entity_type,
+          entity_id: change.entity_id,
+          operation: change.operation,
+          base_revision: 0,
+          new_revision: 0,
+          created_at: merged.created_at,
+        })),
+        merged_by: commit.author_name,
+        merged_at: commit.created_at,
+        applied: Object.fromEntries(merged.changes.map((change) => [change.id, change.applied])),
+      });
+    }
+  }
+  return result;
+}
+
+function teamOf(commit: HistoryCommit): string {
+  return isObject(commit.scope) && typeof commit.scope.team === 'string' ? commit.scope.team : '';
+}
+
+function buildColumns(commits: BoardCommit[]): ExpertColumn[] {
+  const byExpert = new Map<string, Map<string, BoardCommit[]>>();
+  for (const commit of commits) {
+    const sessions = byExpert.get(commit.author_name) ?? new Map<string, BoardCommit[]>();
     const group = sessions.get(commit.session_id) ?? [];
     group.push(commit);
     sessions.set(commit.session_id, group);
@@ -234,6 +310,7 @@ function buildColumns(commits: HistoryCommit[]): ExpertColumn[] {
     }).sort((a, b) => b.lastAt.valueOf() - a.lastAt.valueOf());
     columns.push({
       name,
+      teams: [...new Set([...sessions.values()].flat().map(teamOf).filter(Boolean))].sort(),
       sessions: groups,
       changeCount: [...sessions.values()].flat().reduce((total, commit) => total + commit.changes.length, 0),
       lastAt: groups[0].lastAt,

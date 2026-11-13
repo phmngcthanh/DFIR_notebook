@@ -5,7 +5,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
+import TeamField from '@/components/TeamField';
 import { createCase, listCases, unlockCase, type SessionPayload } from '@/lib/api';
+import { rememberedTeam, rememberTeam } from '@/lib/teams';
 
 interface Props {
   onSession: (session: SessionPayload) => void;
@@ -28,6 +30,7 @@ export default function CaseSetup({ onSession, onCancel }: Props) {
   const [description, setDescription] = useState('');
   const [clientName, setClientName] = useState('');
   const [expertName, setExpertName] = useState(() => localStorage.getItem('dfir-expert-name') ?? '');
+  const [team, setTeam] = useState(rememberedTeam);
   const [databasePassword, setDatabasePassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -51,6 +54,7 @@ export default function CaseSetup({ onSession, onCancel }: Props) {
 
   const complete = (session: SessionPayload) => {
     localStorage.setItem('dfir-expert-name', session.expert.name);
+    rememberTeam(session.expert.team ?? '');
     onSession(session);
   };
 
@@ -70,7 +74,7 @@ export default function CaseSetup({ onSession, onCancel }: Props) {
     setLoading(true);
     setError('');
     try {
-      complete(await unlockCase({ caseId, password: databasePassword, expertName: expertName.trim() }));
+      complete(await unlockCase({ caseId, password: databasePassword, expertName: expertName.trim(), team: team.trim() || null }));
     } catch (reason) {
       setError(String(reason instanceof Error ? reason.message : reason));
     } finally {
@@ -102,6 +106,7 @@ export default function CaseSetup({ onSession, onCancel }: Props) {
           clientName: clientName.trim(),
           expertName: expertName.trim(),
           databasePassword,
+          team: team.trim() || null,
         }),
       );
     } catch (reason) {
@@ -129,6 +134,7 @@ export default function CaseSetup({ onSession, onCancel }: Props) {
               <Field label="Description" htmlFor="description"><Textarea id="description" value={description} onChange={(event) => setDescription(event.target.value)} rows={3} /></Field>
               <Field label="Session expert name *" htmlFor="expert-name"><Input id="expert-name" value={expertName} onChange={(event) => setExpertName(event.target.value)} placeholder="Name recorded on changes" /></Field>
               <p className="text-xs text-slate-500">This session name is recorded on changes. It is attribution only, is not checked against the password, and can change between sessions.</p>
+              <TeamField value={team} onChange={setTeam} id="create-team" />
               <div className="grid gap-4 sm:grid-cols-2">
                 <Field label="Case database password *" htmlFor="database-password"><Input id="database-password" type="password" autoComplete="new-password" value={databasePassword} onChange={(event) => setDatabasePassword(event.target.value)} /></Field>
                 <Field label="Confirm password *" htmlFor="confirm-password"><Input id="confirm-password" type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></Field>
@@ -155,6 +161,7 @@ export default function CaseSetup({ onSession, onCancel }: Props) {
                 )}
               </Field>
               <Field label="Expert name *" htmlFor="expert-name"><Input id="expert-name" value={expertName} onChange={(event) => setExpertName(event.target.value)} placeholder="Name recorded on changes" /></Field>
+              <TeamField value={team} onChange={setTeam} id="unlock-team" />
               <Field label="Case database password *" htmlFor="database-password"><Input id="database-password" type="password" autoComplete="current-password" value={databasePassword} onChange={(event) => setDatabasePassword(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && void handleUnlock()} /></Field>
               <p className="text-xs text-slate-500">Repeated wrong passwords from one address are locked out for a while.</p>
               {error && <ErrorText text={error} />}

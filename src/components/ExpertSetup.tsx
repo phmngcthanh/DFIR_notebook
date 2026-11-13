@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import TeamField from '@/components/TeamField';
+import { rememberedTeam, rememberTeam } from '@/lib/teams';
 import type { ApiResponse, ExpertIdentity, Network } from '@/types';
 
 interface Props {
@@ -15,6 +17,7 @@ interface Props {
 export default function ExpertSetup({ onComplete, onCancel }: Props) {
   const [name, setName] = useState(() => localStorage.getItem('dfir-expert-name') ?? '');
   const [scopeLabel, setScopeLabel] = useState('');
+  const [team, setTeam] = useState(rememberedTeam);
   const [scopeNetworkIds, setScopeNetworkIds] = useState<string[]>([]);
   const [networks, setNetworks] = useState<Network[]>([]);
   const [error, setError] = useState('');
@@ -45,9 +48,11 @@ export default function ExpertSetup({ onComplete, onCancel }: Props) {
         name: name.trim(),
         scopeLabel: scopeLabel.trim() || null,
         scopeNetworkIds,
+        team: team.trim() || null,
       });
       if (!response.success || !response.data) throw new Error(response.error || 'Failed to set expert');
       localStorage.setItem('dfir-expert-name', name.trim());
+      rememberTeam(team);
       onComplete(response.data);
     } catch (reason) {
       setError(String(reason));
@@ -73,6 +78,7 @@ export default function ExpertSetup({ onComplete, onCancel }: Props) {
             <Label htmlFor="expert-name">Expert name *</Label>
             <Input id="expert-name" value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Alice" />
           </div>
+          <TeamField value={team} onChange={setTeam} />
           <div className="space-y-2">
             <Label htmlFor="scope-label">Optional assignment</Label>
             <Input id="scope-label" value={scopeLabel} onChange={(event) => setScopeLabel(event.target.value)} placeholder="e.g. Finance department / Room 204" />

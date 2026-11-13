@@ -13,7 +13,7 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
-import type { ApiResponse, Asset, ClockProfile, TimelineEvent, TimePreview } from '@/types';
+import type { ApiResponse, Asset, ClockProfile, EventLogSourceRef, TimelineEvent, TimePreview } from '@/types';
 
 interface Props { refreshTrigger: number }
 interface EventForm {
@@ -64,13 +64,13 @@ export default function TimelineView({ refreshTrigger }: Props) {
   const [assets, setAssets] = useState<Asset[]>([]);
   const [profiles, setProfiles] = useState<ClockProfile[]>([]);
   // An event being written, and the clock-profile panel, survive switching screens.
-  const [form, setForm] = useDraft<EventForm>('timeline.form', EMPTY_EVENT);
-  const [showForm, setShowForm] = useDraft('timeline.showForm', false);
+  const [form, setForm] = useDraft<EventForm>('timeline.form', EMPTY_EVENT, { persist: true });
+  const [showForm, setShowForm] = useDraft('timeline.showForm', false, { persist: true });
   const [showProfiles, setShowProfiles] = useDraft('timeline.showProfiles', false);
-  const [editingId, setEditingId] = useDraft<string | null>('timeline.editingId', null);
+  const [editingId, setEditingId] = useDraft<string | null>('timeline.editingId', null, { persist: true });
   const [viewMode, setViewMode] = useState<'timeline' | 'table'>('table');
   const [displayTimezone, setDisplayTimezone] = useState(localTimezone);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useDraft('timeline.search', '');
   const [assetFilter, setAssetFilter] = useState('all');
   const [severityFilter, setSeverityFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all');
@@ -108,7 +108,7 @@ export default function TimelineView({ refreshTrigger }: Props) {
         && (assetFilter === 'all' || (assetFilter === '__none__' ? !event.asset_id : event.asset_id === assetFilter))
         && (severityFilter === 'all' || event.severity === severityFilter)
         && (typeFilter === 'all' || event.event_type === typeFilter)
-        && (!term || [event.description,event.source,event.mitre_tactic,event.mitre_technique,event.asset_name,event.event_type,event.raw_timestamp,event.clock_profile_name]
+        && (!term || [event.description,event.source,event.mitre_tactic,event.mitre_technique,event.asset_name,event.event_type,event.raw_timestamp,event.clock_profile_name,event.source_ref?.message,event.source_ref?.file_name]
           .some((value) => value?.toLowerCase().includes(term)));
     });
   }, [events, search, assetFilter, severityFilter, typeFilter, fromFilter, toFilter, fromPreview.value, toPreview.value]);
@@ -139,12 +139,13 @@ export default function TimelineView({ refreshTrigger }: Props) {
   // The list exactly as shown leaves the app as CSV or clipboard text, with the
   // corrected time in the display zone, in UTC, and the raw server evidence time.
   const visibleEventTable = (): ListTable => ({
-    header: [`Corrected time (${displayTimezone})`, 'Corrected time (UTC)', 'Server time (raw)', 'Server timezone', 'Asset', 'Type', 'Severity', 'Description', 'Source', 'MITRE tactic', 'MITRE technique', 'Clock correction'],
+    header: [`Corrected time (${displayTimezone})`, 'Corrected time (UTC)', 'Server time (raw)', 'Server timezone', 'Asset', 'Type', 'Severity', 'Description', 'Source', 'MITRE tactic', 'MITRE technique', 'Clock correction', 'Source record'],
     rows: filteredEvents.map((event) => [
       event.timestamp ? formatInZone(event.timestamp, displayTimezone) : '',
       event.timestamp, event.raw_timestamp, event.raw_timezone, event.asset_name, label(event.event_type), event.severity,
       event.description, event.source, event.mitre_tactic, event.mitre_technique,
       event.clock_offset_ms ? `${event.clock_profile_name || 'Direct comparison'} ${formatOffset(event.clock_offset_ms)}` : '',
+      sourceRecordLabel(event.source_ref),
     ]),
   });
   const exportVisibleEvents = async () => {
@@ -246,7 +247,7 @@ export default function TimelineView({ refreshTrigger }: Props) {
         <TableCell>{event.asset_name || '—'}</TableCell>
         <TableCell><div>{label(event.event_type)}</div><div className="max-w-sm text-sm text-slate-600">{event.description}</div></TableCell>
         <TableCell><Severity value={event.severity} /></TableCell>
-        <TableCell><div>{event.source || '—'}</div><div className="text-xs text-slate-500">{event.mitre_technique || event.mitre_tactic || '—'}</div></TableCell>
+        <TableCell><div>{event.source || '—'}</div><div className="text-xs text-slate-500">{event.mitre_technique || event.mitre_tactic || '—'}</div>{event.source_ref && <SourceRecord value={event.source_ref} />}</TableCell>
         <TableCell><div className="flex"><Button size="sm" variant="ghost" onClick={() => startEdit(event)}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={() => void deleteEvent(event.id)}><Trash2 size={14} className="text-red-500" /></Button></div></TableCell>
       </TableRow>) : <TableRow><TableCell colSpan={7} className="py-10 text-center text-slate-400">No matching events.</TableCell></TableRow>}</TableBody></Table></CardContent></Card>}
   </div>;
@@ -299,8 +300,8 @@ function EventEditor({ form, setForm, assets, profiles, editing, onSave, onCance
 }
 
 function ClockProfileManager({ profiles, onChanged }: { profiles: ClockProfile[]; onChanged: () => Promise<void> }) {
-  const [form, setForm] = useDraft<ProfileForm>('timeline.clockProfileForm', EMPTY_PROFILE);
-  const [editingId, setEditingId] = useDraft<string | null>('timeline.clockProfileEditingId', null);
+  const [form, setForm] = useDraft<ProfileForm>('timeline.clockProfileForm', EMPTY_PROFILE, { persist: true });
+  const [editingId, setEditingId] = useDraft<string | null>('timeline.clockProfileEditingId', null, { persist: true });
   const serverPreview = useTimestampPreview(form.serverReferenceRaw, form.serverTimezone, 0);
   const correctPreview = useTimestampPreview(form.correctReferenceRaw, form.correctTimezone, 0);
   const calculatedOffset = serverPreview.value && correctPreview.value
@@ -409,6 +410,24 @@ function formatOffset(milliseconds: number) {
   const seconds = Math.floor((absolute % 60_000) / 1_000);
   const millis = absolute % 1_000;
   return `${sign}${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
+}
+/** The raw event-log record a promoted event came from, kept with the event. */
+function SourceRecord({ value }: { value: EventLogSourceRef }) {
+  if (value.type !== 'event_log_record') return null;
+  const facts = [value.batch_kind, value.host, value.provider || value.channel, value.event_id && `event ${value.event_id}`, value.level].filter(Boolean);
+  return <details className="mt-1 text-xs">
+    <summary className="cursor-pointer text-cyan-700">{sourceRecordLabel(value)}</summary>
+    <div className="mt-1 max-w-md space-y-1 rounded border bg-slate-50 p-2">
+      {facts.length > 0 && <p className="text-slate-600">{facts.join(' · ')}</p>}
+      {value.raw_time && <p className="font-mono text-slate-600">Raw time: {value.raw_time}</p>}
+      {value.message && <p className="whitespace-pre-wrap break-words font-mono text-[11px] text-slate-700">{value.message}{value.truncated ? ' …' : ''}</p>}
+      <p className="text-[10px] text-slate-400">Event-log batch {value.batch_id?.slice(0, 8)} · record {value.record_id}</p>
+    </div>
+  </details>;
+}
+function sourceRecordLabel(value: EventLogSourceRef | null | undefined) {
+  if (!value || value.type !== 'event_log_record') return '';
+  return `Log record${value.ordinal !== undefined ? ` #${value.ordinal}` : ''}${value.file_name ? ` · ${value.file_name}` : ''}`;
 }
 function TimezoneOptions() { return <datalist id="dfir-timezones">{TIMEZONES.map((timezone) => <option key={timezone} value={timezone} />)}</datalist>; }
 function TimezoneField({ labelText, value, onChange, className = '' }: { labelText: string; value: string; onChange: (value: string) => void; className?: string }) { return <Field text={labelText} className={className}><Input list="dfir-timezones" value={value} onChange={(event) => onChange(event.target.value)} placeholder="UTC, +07:00, or IANA zone" /></Field>; }

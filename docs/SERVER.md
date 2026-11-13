@@ -87,8 +87,27 @@ in the login picker under its filename stem, and each has its own password.
   cases from the browser; otherwise drop `.db` files into the directory yourself.
 - A case's connection opens on the first successful unlock and closes when the
   last expert working on it logs out or times out.
-- The `.db` files are the backup. Copy them while no one is editing, or use
-  **Case Transfer → Download snapshot**.
+- The `.db` files are the backup, together with any `.dfirlogs` event-log store
+  beside them (same password). Copy both while no one is editing. A
+  **Case Transfer → Download snapshot** holds the records but not the history,
+  so it is not a full backup.
+- To hand a copy to experts working offline, add a checksum file in the folder
+  that holds the copies (file names only, no paths). The desktop build's
+  **Restore a full backup** checks it, then opens a new working copy, and
+  anyone can check it with `sha256sum -c case.db.sha256`:
+
+  ```sh
+  sha256sum case.db case.dfirlogs > case.db.sha256
+  ```
+
+  ```powershell
+  Get-FileHash case.db, case.dfirlogs -Algorithm SHA256 |
+    ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+    Set-Content case.db.sha256 -Encoding ascii
+  ```
+- Saved drafts (unsent form text an expert opted to keep) live in the case file
+  under each expert's name. They never reach history, snapshots, or bundles,
+  and saving one does not tell other browsers the case changed.
 - Converting a legacy unencrypted `.db` is not exposed over HTTP because it
   needs two local paths. Use the desktop build for that, then drop the encrypted
   result into the case directory.
