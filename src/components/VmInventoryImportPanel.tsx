@@ -60,6 +60,7 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
   const [parsed, setParsed] = useDraft<ParsedVmInventory | null>('assetImport.parsed', null);
   const [preview, setPreview] = useDraft<PartialImportPreview | null>('assetImport.preview', null);
   const [warnings, setWarnings] = useDraft<string[]>('assetImport.warnings', []);
+  const [includeHosts, setIncludeHosts] = useDraft('assetImport.includeHosts', true, { persist: true });
   const [busy, setBusy] = useState(false);
 
   const selectedChanges = useMemo(
@@ -99,7 +100,7 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
         sourceFile: sourceFile || undefined,
         inventoryScope: inventoryScope || undefined,
       });
-      const built = buildVmInventoryImport(value, inventory);
+      const built = buildVmInventoryImport(value, inventory, { includeHosts });
       const response = await invoke<ApiResponse<PartialImportPreview>>('preview_partial_import_text', {
         jsonData: built.document,
       });
@@ -221,6 +222,12 @@ export default function VmInventoryImportPanel({ inventory, onApplied, onClose }
             ? 'Paste devices here — one per line: name, ip, mac, os, type — or adb devices / hostname list output…'
             : `Paste ${platformLabel(platform)} VM inventory here…`}
         />
+        {platform !== 'generic' && (
+          <label className="flex items-center gap-2 text-xs text-slate-700">
+            <input type="checkbox" checked={includeHosts} onChange={(event) => { setIncludeHosts(event.target.checked); setParsed(null); void clearPreview(); }} />
+            Also record the hypervisor hosts as assets, and which VM runs on which
+          </label>
+        )}
         <div className="flex flex-wrap gap-2">
           <Button onClick={() => void prepare()} disabled={busy || !text.trim()} className="bg-violet-600 hover:bg-violet-700">
             {busy ? <Loader2 size={16} className="animate-spin" /> : <ShieldCheck size={16} />}Parse and review

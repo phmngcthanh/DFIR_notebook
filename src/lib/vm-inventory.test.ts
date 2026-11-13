@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Asset } from '@/types';
+import type { Asset, AssetRelation, NetworkInterface } from '@/types';
 import {
   buildVmHostTree,
   buildVmInventoryImport,
@@ -390,5 +390,101 @@ describe('VM host grouping and XMind export', () => {
     expect(buildVmHostTree([
       { id: 'x', name: 'laptop', ip_address: '', asset_type: 'laptop', suspicious: false, compromise_status: 'unknown', investigation_status: 'not_started', created_at: '' },
     ])).toBeNull();
+  });
+});
+
+describe('hypervisor hosts, runs-on links, and machines typed by hand', () => {
+  const CSV = [
+    'Name,VMHost,IPAddress,MacAddress',
+    'APP01,esx01.corp.local,10.0.0.15,00:50:56:AA:BB:01',
+    'DB02,esx01.corp.local,10.0.0.16,00:50:56:AA:BB:02',
+    'WEB03,esx02.corp.local,10.0.0.17,00:50:56:AA:BB:03',
+  ].join('\n');
+  type Change = { change_id: string; entity_type: string; target_id: string; values: Record<string, unknown> };
+  const changesOf = (built: ReturnType<typeof buildVmInventoryImport>) => (JSON.parse(built.document) as { changes: Change[] }).changes;
+  const manual = (overrides: Partial<Asset> & { id: string; name: string }): Asset => ({
+    ip_address: '', asset_type: 'server', suspicious: false, compromise_status: 'unknown', investigation_status: 'not_started', created_at: '', ...overrides,
+  });
+
+  it('records each hypervisor once as a hypervisor asset, links every VM to it, and marks all of it as the client\'s own inventory', () => {
+    const changes = changesOf(buildVmInventoryImport(parseVmInventory('esxi', CSV), emptyInventory()));
+    const hosts = changes.filter((item) => item.entity_type === 'asset' && item.values.asset_type === 'hypervisor');
+    expect(hosts.map((item) => item.values.name)).toEqual(['esx01.corp.local', 'esx02.corp.local']);
+    expect(hosts.every((item) => item.values.origin === 'client_inventory')).toBe(true);
+
+    const vms = changes.filter((item) => item.entity_type === 'asset' && item.values.asset_type !== 'hypervisor');
+    expect(vms.map((item) => [item.values.name, item.values.origin])).toEqual([['APP01', 'client_inventory'], ['DB02', 'client_inventory'], ['WEB03', 'client_inventory']]);
+    const links = changes.filter((item) => item.entity_type === 'asset_relation');
+    expect(links).toHaveLength(3);
+    expect(links.map((item) => [item.values.source_asset_id, item.values.target_asset_id, item.values.relation_type])).toEqual([
+      [vms[0].target_id, hosts[0].target_id, 'runs_on'],
+      [vms[1].target_id, hosts[0].target_id, 'runs_on'],
+      [vms[2].target_id, hosts[1].target_id, 'runs_on'],
+    ]);
+  });
+
+  it('uses a host that is already in the case, raises its origin, and does not repeat a link it already has', () => {
+    const host = manual({ id: 'host-1', name: 'ESX01', asset_type: 'server', origin: 'discovered' });
+    const vm = manual({
+      id: 'vm-1', name: 'APP01', asset_type: 'vm', ip_address: '10.0.0.15',
+      properties: JSON.stringify({ schema: VM_INVENTORY_SCHEMA, platform: 'esxi', kind: 'virtual-machine', identityKey: 'esxi:name:app01:host:esx01.corp.local', name: 'APP01', hypervisor: 'esx01.corp.local', ipAddresses: ['10.0.0.15'], macAddresses: [], sourceFormat: 'csv', raw: {} }),
+    });
+    const link: AssetRelation = { id: 'rel-1', source_asset_id: 'vm-1', target_asset_id: 'host-1', relation_type: 'runs_on', note: '', created_at: '' };
+    const built = buildVmInventoryImport(parseVmInventory('esxi', CSV), { ...emptyInventory(), assets: [host, vm], relations: [link] });
+    const changes = changesOf(built);
+    expect(changes.filter((item) => item.entity_type === 'asset' && item.values.asset_type === 'hypervisor').map((item) => item.values.name)).toEqual(['esx02.corp.local']);
+    expect(changes.find((item) => item.target_id === 'host-1')?.values).toEqual({ origin: 'client_inventory' });
+    // APP01 is already linked to ESX01: no second link. DB02 and WEB03 are new.
+    expect(changes.filter((item) => item.entity_type === 'asset_relation')).toHaveLength(2);
+  });
+
+  it('re-points the link of a VM that moved to another host and says so', () => {
+    const hosts = [manual({ id: 'host-1', name: 'esx01.corp.local', asset_type: 'hypervisor' }), manual({ id: 'host-2', name: 'esx02.corp.local', asset_type: 'hypervisor' })];
+    // vCenter ids follow a VM from host to host, so the importer knows it is the same VM.
+    const before = parseVmInventory('esxi', 'Id,Name,VMHost\nVirtualMachine-vm-42,APP01,esx01.corp.local\n').records[0];
+    const vm = manual({ id: 'vm-1', name: 'APP01', asset_type: 'vm', properties: JSON.stringify(before) });
+    const link: AssetRelation = { id: 'rel-1', source_asset_id: 'vm-1', target_asset_id: 'host-1', relation_type: 'runs_on', note: '', created_at: '', target_name: 'esx01.corp.local' };
+    const moved = 'Id,Name,VMHost\nVirtualMachine-vm-42,APP01,esx02.corp.local\n';
+    const built = buildVmInventoryImport(parseVmInventory('esxi', moved), { ...emptyInventory(), assets: [...hosts, vm], relations: [link] });
+    const repointed = changesOf(built).find((item) => item.entity_type === 'asset_relation');
+    expect(repointed).toEqual(expect.objectContaining({ target_id: 'rel-1', values: { source_asset_id: 'vm-1', target_asset_id: 'host-2', relation_type: 'runs_on' } }));
+    expect(built.warnings).toContain('APP01 now runs on esx02.corp.local (the case had it on esx01.corp.local).');
+  });
+
+  it('records no hosts or links when asked not to, or for a pasted device list', () => {
+    const off = changesOf(buildVmInventoryImport(parseVmInventory('esxi', CSV), emptyInventory(), { includeHosts: false }));
+    expect(off.some((item) => item.entity_type === 'asset_relation' || item.values.asset_type === 'hypervisor')).toBe(false);
+    const list = changesOf(buildVmInventoryImport(parseVmInventory('generic', 'APP01, 10.0.0.15'), emptyInventory()));
+    expect(list.some((item) => item.entity_type === 'asset_relation')).toBe(false);
+    // A pasted list says nothing about where the machines came from.
+    expect(list.find((item) => item.entity_type === 'asset')?.values.origin).toBe('unknown');
+  });
+
+  it('updates a machine typed by hand when the MAC matches, instead of adding a duplicate', () => {
+    const typed = manual({ id: 'typed-1', name: 'old-name', ip_address: '10.0.0.15', mac_address: '00:50:56:aa:bb:01' });
+    const built = buildVmInventoryImport(parseVmInventory('esxi', CSV, { inventoryScope: 'vcenter' }), { ...emptyInventory(), assets: [typed] });
+    const asset = changesOf(built).find((item) => item.target_id === 'typed-1');
+    // The investigator's own name for the machine is kept; the inventory's name is in its stored details.
+    expect(asset?.values).toEqual(expect.objectContaining({ name: 'old-name', origin: 'client_inventory' }));
+    expect(asset?.values.properties).toEqual(expect.objectContaining({ name: 'APP01' }));
+    expect(built.warnings).toContain('APP01: matched the existing asset old-name (same MAC address and IP address) and updated it instead of adding a duplicate; its name was kept.');
+  });
+
+  it('gives the interface the investigator typed its MAC instead of adding a twin beside it', () => {
+    const typed = manual({ id: 'typed-1', name: 'APP01', ip_address: '10.0.0.15', mac_address: '00:50:56:aa:bb:01' });
+    const own = { id: 'nic-typed', asset_id: 'typed-1', name: 'Ethernet', ip_address: '10.0.0.15', mac_address: '', is_primary: true } as NetworkInterface;
+    const built = buildVmInventoryImport(parseVmInventory('esxi', 'Name,VMHost,IPAddress,MacAddress,IPAddress2\nAPP01,esx01.corp.local,10.0.0.15;172.16.0.4,00:50:56:AA:BB:01;00:50:56:AA:BB:09,x\n'), { ...emptyInventory(), assets: [typed], networkInterfaces: [own] });
+    const nics = changesOf(built).filter((item) => item.entity_type === 'network_interface');
+    expect(nics.map((item) => [item.target_id, item.values.name, item.values.ip_address, item.values.mac_address, item.values.is_primary])).toEqual([
+      ['nic-typed', 'Ethernet', '10.0.0.15', '00:50:56:AA:BB:01', true],
+      [expect.any(String), 'Inventory NIC 2', '172.16.0.4', '00:50:56:AA:BB:09', false],
+    ]);
+  });
+
+  it('only reports a hand-typed machine that shares just a name or just an address', () => {
+    const sameAddress = manual({ id: 'typed-1', name: 'something-else', ip_address: '10.0.0.15' });
+    const built = buildVmInventoryImport(parseVmInventory('esxi', CSV), { ...emptyInventory(), assets: [sameAddress] });
+    expect(changesOf(built).some((item) => item.target_id === 'typed-1')).toBe(false);
+    expect(built.warnings).toContain('APP01 may be the same machine as something-else (same IP address); it was added as a separate asset. Use Possible duplicates to merge them if so.');
   });
 });

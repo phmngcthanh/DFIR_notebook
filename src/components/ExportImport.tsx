@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { downloadText, invoke, pickTextFile, session } from '@/lib/api';
 import { useDraft } from '@/lib/drafts';
+import { relationTitle } from '@/lib/environment';
 import {
   AlertTriangle, CheckCircle2, Clock3, Database, GitCompare, HardDriveDownload,
   FileOutput, History, LockKeyhole, Network, RefreshCw, Send, ShieldCheck, Trash2, Upload, Users,
@@ -513,5 +514,5 @@ function humanEntity(value: string) { return value.replaceAll('_', ' '); }
 function localTime(value: string) { const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : date.toLocaleString(); }
 function isObject(value: JsonValue | undefined): value is Record<string, JsonValue> { return Boolean(value) && typeof value === 'object' && !Array.isArray(value); }
 function displayValue(value: JsonValue | undefined) { if (value === undefined) return '∅'; if (value === null) return 'null'; return typeof value === 'string' ? value || '""' : JSON.stringify(value); }
-function entityTitle(change: MergePreviewChange) { const values = [change.incoming, change.local, change.before]; for (const value of values) { if (isObject(value)) { for (const key of ['name', 'title', 'value', 'description', 'ip_address']) { const item = value[key]; if (typeof item === 'string' && item) return item; } } } return change.entity_id; }
+function entityTitle(change: MergePreviewChange) { const values = [change.incoming, change.local, change.before]; for (const value of values) { const relation = relationTitle(value); if (relation) return relation; if (isObject(value)) { for (const key of ['name', 'title', 'value', 'description', 'ip_address']) { const item = value[key]; if (typeof item === 'string' && item) return item; } } } return change.entity_id; }
 function scopeText(scope?: JsonValue) { if (!isObject(scope)) return ''; const label = scope.label; return typeof label === 'string' && label ? ` · scope: ${label}` : ''; }

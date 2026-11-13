@@ -315,6 +315,11 @@ function App() {
         setDraftValue(scope, 'networks.search', title);
         view = 'networks';
         break;
+      case 'site':
+        setDraftValue(scope, 'networks.section', 'sites');
+        setDraftValue(scope, 'networks.search', title);
+        view = 'networks';
+        break;
       case 'firewall':
         setDraftValue(scope, 'networks.section', 'firewalls');
         setDraftValue(scope, 'networks.search', title);

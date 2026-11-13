@@ -150,3 +150,32 @@ describe('ActivityBoard teams and merged work', () => {
     expect(screen.getByText('1 expert')).toBeInTheDocument();
   });
 });
+
+describe('ActivityBoard environment changes', () => {
+  it('reads a relation and a site in plain words', async () => {
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue({
+      success: true,
+      data: [
+        commit({
+          id: 'link', message: 'Linked APP01 runs on ESX01',
+          changes: [{
+            id: 'c1', entity_type: 'asset_relation', entity_id: 'rel-1', operation: 'create', base_revision: 0, new_revision: 1, created_at: '2026-11-13T09:00:00Z',
+            after: { source_name: 'APP01', target_name: 'ESX01', relation_type: 'runs_on' },
+          }, {
+            id: 'c2', entity_type: 'site', entity_id: 'site-1', operation: 'create', base_revision: 0, new_revision: 1, created_at: '2026-11-13T09:00:00Z',
+            after: { name: 'HQ Berlin', location: 'Alexanderplatz 1' },
+          }],
+        }),
+      ],
+    });
+    render(<ActivityBoard refreshTrigger={0} />);
+    await waitFor(() => expect(screen.getByText('Linked APP01 runs on ESX01')).toBeInTheDocument());
+    const card = screen.getByText('Linked APP01 runs on ESX01').closest('details') as HTMLElement;
+    card.setAttribute('open', '');
+    // The change titles, not the commit message.
+    expect(within(card).getByText('— APP01 runs on ESX01')).toBeInTheDocument();
+    expect(within(card).getByText('— HQ Berlin')).toBeInTheDocument();
+    expect(within(card).getByText('create asset relation')).toBeInTheDocument();
+  });
+});

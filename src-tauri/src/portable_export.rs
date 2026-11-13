@@ -236,8 +236,10 @@ fn render_case_snapshot(root: &Value) -> Result<String, String> {
         render_single_object(&mut output, "CASE INFORMATION", case)?;
     }
     for (field, title) in [
+        ("sites", "SITES"),
         ("networks", "NETWORK ZONES"),
         ("assets", "ASSETS / COMPUTERS"),
+        ("asset_relations", "ASSET RELATIONS"),
         ("network_interfaces", "NETWORK INTERFACES"),
         ("clock_profiles", "SERVER CLOCK PROFILES"),
         ("network_connections", "NETWORK CONNECTIONS"),
@@ -484,5 +486,16 @@ mod tests {
         assert!(report.contains("DFIR CASE SNAPSHOT"));
         assert!(!report.contains("Investigator:"));
         assert!(report.contains("[1] DMZ"));
+    }
+
+    #[test]
+    fn sites_and_asset_relations_appear_in_the_readable_report() {
+        let json = r#"{"format_version":4,"exported_at":"2026-01-01T00:00:00Z","case_info":{"id":"case-1","name":"Example"},"sites":[{"id":"site-1","name":"HQ Berlin","location":"Alexanderplatz 1"}],"networks":[],"assets":[{"id":"a","name":"APP01","origin":"discovered","owner":"Finance"}],"asset_relations":[{"id":"r","source_name":"APP01","target_name":"ESX01","relation_type":"runs_on"}]}"#;
+        let report = render_export_text(json).unwrap();
+        assert!(report.contains("SITES"));
+        assert!(report.contains("HQ Berlin"));
+        assert!(report.contains("ASSET RELATIONS"));
+        assert!(report.contains("runs_on"));
+        assert!(report.contains("Finance"));
     }
 }

@@ -26,27 +26,29 @@ use zeroize::Zeroizing;
 
 use crate::auth::SessionContext;
 use crate::db::{
-    create_asset, create_attack_edge, create_clock_profile, create_firewall,
-    create_firewall_interface, create_firewall_nat_rule, create_ioc, create_ioc_sighting,
-    create_network, create_network_connection, create_network_interface, create_note,
-    create_timeline_event, delete_asset, delete_attack_edge, delete_clock_profile, delete_firewall,
-    delete_firewall_interface, delete_firewall_nat_rule, delete_investigation_view, delete_ioc,
-    delete_ioc_sighting, delete_network, delete_network_connection, delete_network_interface,
-    delete_note, delete_timeline_event, export_case_data, get_assets, get_assets_by_network,
-    get_attack_edges, get_case, get_clock_profiles, get_firewall_interfaces,
-    get_firewall_nat_rules, get_firewalls, get_infection_summary, get_investigation_view,
-    get_investigation_views, get_ioc_sightings, get_iocs, get_network_connections,
-    get_network_interfaces, get_networks, get_notes, get_timeline_events, get_topology_view,
-    import_case_data, parse_timestamp_preview, save_investigation_view, save_topology_view,
-    set_primary_interface, set_quick_note, update_asset, update_asset_suspicious,
-    update_attack_edge, update_case, update_clock_profile, update_firewall,
-    update_firewall_interface, update_firewall_nat_rule, update_ioc, update_ioc_sighting,
-    update_network, update_network_connection, update_network_interface, update_note,
-    update_timeline_event, ExportData, Ioc, TopologyNodePosition,
+    create_asset_relation, create_asset_with_context, create_capture, create_network_with_context,
+    create_site, delete_asset_relation, delete_capture, delete_site, get_asset_relations,
+    get_captures, get_sites, load_drafts, merge_assets, save_drafts, search_case,
+    update_asset_relation, update_asset_with_context, update_capture, update_network_with_context,
+    update_site, AssetContext, CaptureLink, NetworkContext,
 };
 use crate::db::{
-    create_capture, delete_capture, get_captures, load_drafts, save_drafts, search_case,
-    update_capture, CaptureLink,
+    create_attack_edge, create_clock_profile, create_firewall, create_firewall_interface,
+    create_firewall_nat_rule, create_ioc, create_ioc_sighting, create_network_connection,
+    create_network_interface, create_note, create_timeline_event, delete_asset, delete_attack_edge,
+    delete_clock_profile, delete_firewall, delete_firewall_interface, delete_firewall_nat_rule,
+    delete_investigation_view, delete_ioc, delete_ioc_sighting, delete_network,
+    delete_network_connection, delete_network_interface, delete_note, delete_timeline_event,
+    export_case_data, get_assets, get_assets_by_network, get_attack_edges, get_case,
+    get_clock_profiles, get_firewall_interfaces, get_firewall_nat_rules, get_firewalls,
+    get_infection_summary, get_investigation_view, get_investigation_views, get_ioc_sightings,
+    get_iocs, get_network_connections, get_network_interfaces, get_networks, get_notes,
+    get_timeline_events, get_topology_view, import_case_data, parse_timestamp_preview,
+    save_investigation_view, save_topology_view, set_primary_interface, set_quick_note,
+    update_asset_suspicious, update_attack_edge, update_case, update_clock_profile,
+    update_firewall, update_firewall_interface, update_firewall_nat_rule, update_ioc,
+    update_ioc_sighting, update_network_connection, update_network_interface, update_note,
+    update_timeline_event, ExportData, Ioc, TopologyNodePosition,
 };
 use crate::event_logs::{
     delete_batch, import_syslog_text, import_windows_json_text, list_batches, open_store,
@@ -375,17 +377,20 @@ pub(crate) fn run(
         "get_handover_status" => read_cmd!(NoParams, |conn, _p| handover_status(conn)),
 
         // ---- networks -----------------------------------------------------
-        "create_new_network" => write_cmd!(NetworkParams, |conn, actor, p| create_network(
-            conn,
-            actor,
-            &p.name,
-            &p.subnet,
-            &p.network_type,
-            &p.description,
-            p.vlan_id.as_deref()
-        )),
+        "create_new_network" => write_cmd!(NetworkParams, |conn, actor, p| {
+            create_network_with_context(
+                conn,
+                actor,
+                &p.name,
+                &p.subnet,
+                &p.network_type,
+                &p.description,
+                p.vlan_id.as_deref(),
+                &p.context.clone().unwrap_or_default(),
+            )
+        }),
         "update_existing_network" => write_cmd!(NetworkUpdateParams, |conn, actor, p| {
-            update_network(
+            update_network_with_context(
                 conn,
                 actor,
                 &p.id,
@@ -394,6 +399,7 @@ pub(crate) fn run(
                 &p.network_type,
                 &p.description,
                 p.vlan_id.as_deref(),
+                &p.context.clone().unwrap_or_default(),
             )
         }),
         "list_networks" => read_cmd!(NoParams, |conn, _p| get_networks(conn)),
@@ -416,7 +422,7 @@ pub(crate) fn run(
         }
 
         // ---- assets -------------------------------------------------------
-        "create_new_asset" => write_cmd!(AssetParams, |conn, actor, p| create_asset(
+        "create_new_asset" => write_cmd!(AssetParams, |conn, actor, p| create_asset_with_context(
             conn,
             actor,
             p.network_id.as_deref(),
@@ -429,24 +435,74 @@ pub(crate) fn run(
             &p.compromise_status,
             &p.investigation_status,
             p.properties.as_deref(),
-            p.scan_results.as_deref()
+            p.scan_results.as_deref(),
+            &p.context.clone().unwrap_or_default()
         )),
-        "update_existing_asset" => write_cmd!(AssetUpdateParams, |conn, actor, p| update_asset(
+        "update_existing_asset" => write_cmd!(AssetUpdateParams, |conn, actor, p| {
+            update_asset_with_context(
+                conn,
+                actor,
+                &p.id,
+                p.network_id.as_deref(),
+                &p.name,
+                &p.ip_address,
+                p.mac_address.as_deref(),
+                &p.asset_type,
+                p.os.as_deref(),
+                p.user_name.as_deref(),
+                &p.compromise_status,
+                &p.investigation_status,
+                p.properties.as_deref(),
+                p.scan_results.as_deref(),
+                &p.context.clone().unwrap_or_default(),
+            )
+        }),
+        // ---- sites, asset relations, merging duplicate assets ---------------------
+        "list_sites" => read_cmd!(NoParams, |conn, _p| get_sites(conn)),
+        "create_new_site" => write_cmd!(SiteParams, |conn, actor, p| create_site(
+            conn,
+            actor,
+            &p.name,
+            p.location.as_deref().unwrap_or(""),
+            p.description.as_deref().unwrap_or("")
+        )),
+        "update_existing_site" => write_cmd!(SiteUpdateParams, |conn, actor, p| update_site(
             conn,
             actor,
             &p.id,
-            p.network_id.as_deref(),
             &p.name,
-            &p.ip_address,
-            p.mac_address.as_deref(),
-            &p.asset_type,
-            p.os.as_deref(),
-            p.user_name.as_deref(),
-            &p.compromise_status,
-            &p.investigation_status,
-            p.properties.as_deref(),
-            p.scan_results.as_deref()
+            p.location.as_deref().unwrap_or(""),
+            p.description.as_deref().unwrap_or("")
         )),
+        "remove_site" => write_cmd!(IdParams, |conn, actor, p| {
+            delete_site(conn, actor, &p.id).map(|_| true)
+        }),
+        "list_asset_relations" => read_cmd!(NoParams, |conn, _p| get_asset_relations(conn)),
+        "create_new_asset_relation" => write_cmd!(RelationParams, |conn, actor, p| {
+            create_asset_relation(
+                conn,
+                actor,
+                &p.source_asset_id,
+                &p.target_asset_id,
+                &p.relation_type,
+                p.note.as_deref().unwrap_or(""),
+            )
+        }),
+        "update_existing_asset_relation" => write_cmd!(RelationUpdateParams, |conn, actor, p| {
+            update_asset_relation(
+                conn,
+                actor,
+                &p.id,
+                &p.relation_type,
+                p.note.as_deref().unwrap_or(""),
+            )
+        }),
+        "remove_asset_relation" => write_cmd!(IdParams, |conn, actor, p| {
+            delete_asset_relation(conn, actor, &p.id).map(|_| true)
+        }),
+        "merge_asset_records" => write_cmd!(MergeAssetsParams, |conn, actor, p| {
+            merge_assets(conn, actor, &p.keep_id, &p.remove_id)
+        }),
         "list_assets" => read_cmd!(NoParams, |conn, _p| get_assets(conn)),
         "list_assets_by_network" => read_cmd!(NetworkIdParams, |conn, p| get_assets_by_network(
             conn,
@@ -1163,6 +1219,7 @@ params! {
         network_type: String,
         description: String,
         #[serde(default)] vlan_id: Option<String>,
+        #[serde(default)] context: Option<NetworkContext>,
     }
     struct NetworkUpdateParams {
         id: String,
@@ -1171,7 +1228,31 @@ params! {
         network_type: String,
         description: String,
         #[serde(default)] vlan_id: Option<String>,
+        #[serde(default)] context: Option<NetworkContext>,
     }
+    struct SiteParams {
+        name: String,
+        #[serde(default)] location: Option<String>,
+        #[serde(default)] description: Option<String>,
+    }
+    struct SiteUpdateParams {
+        id: String,
+        name: String,
+        #[serde(default)] location: Option<String>,
+        #[serde(default)] description: Option<String>,
+    }
+    struct RelationParams {
+        source_asset_id: String,
+        target_asset_id: String,
+        relation_type: String,
+        #[serde(default)] note: Option<String>,
+    }
+    struct RelationUpdateParams {
+        id: String,
+        relation_type: String,
+        #[serde(default)] note: Option<String>,
+    }
+    struct MergeAssetsParams { keep_id: String, remove_id: String }
     struct TopologyViewParams {
         layout: String,
         positions: Vec<TopologyNodePosition>,
@@ -1192,6 +1273,7 @@ params! {
         investigation_status: String,
         #[serde(default)] properties: Option<String>,
         #[serde(default)] scan_results: Option<String>,
+        #[serde(default)] context: Option<AssetContext>,
     }
     struct AssetUpdateParams {
         id: String,
@@ -1206,6 +1288,7 @@ params! {
         investigation_status: String,
         #[serde(default)] properties: Option<String>,
         #[serde(default)] scan_results: Option<String>,
+        #[serde(default)] context: Option<AssetContext>,
     }
     struct SuspiciousParams { id: String, suspicious: bool }
     struct QuickNoteParams {

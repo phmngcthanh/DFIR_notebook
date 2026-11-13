@@ -29,6 +29,7 @@ A portable workbench for 3rd-party DFIR teams on client sites without SIEM acces
 - **Partial import** — case-aware JSON template for LLM/human filling, previewed and applied transactionally with add-only or incoming-overwrite policy.
 - **Portable exports** — every snapshot/bundle can be plain JSON or an encrypted `.dfirx` (Argon2id + AES-256-GCM) with an independent export password.
 - **Capture and search** — Alt+C records text verbatim (with author, team, source) into a Capture inbox, where it is processed into reviewed records; Ctrl+K searches the whole case; IOCs can be pasted in bulk (refanged, typed, deduplicated).
+- **Environment** — sites, owner/operator on zones and assets, asset relations (VM *runs on* hypervisor), asset origin (client inventory vs discovered) and last-observed time, duplicate detection and a one-commit merge of two assets, and pasted discovery output (ARP, ipconfig, ip addr, nmap, DHCP leases).
 - **Teams and handover** — an optional team on the expert identity is recorded in every commit and filterable in the Activity Board; bundles carry a content checksum; the desktop build saves/restores full backups with `.sha256` manifests for the offline daily handover.
 
 ## Technology Stack
@@ -115,10 +116,12 @@ Outside the command route: `GET /api/cases`, `POST /api/cases`, `POST /api/auth/
 
 ## Database
 
-All DDL and migrations live in `db.rs`; current schema version is tracked via `PRAGMA user_version` (see `validate_and_migrate_case`), now **8**. Tables:
+All DDL and migrations live in `db.rs`; current schema version is tracked via `PRAGMA user_version` (see `validate_and_migrate_case`), now **9**. Tables:
 
-`cases`, `networks`, `assets`, `network_interfaces`, `network_connections`, `firewalls`, `firewall_interfaces`, `firewall_nat_rules`, `clock_profiles`, `timeline_events` (incl. `source_ref` for events promoted from raw logs), `notes`, `iocs`, `captures`, `drafts`, `topology_views`, plus history tables (`history_commits`, `history_commit_parents`, `history_changes`, `history_entity_heads`, `history_state`, `history_merged_commits`).
+`cases`, `networks`, `assets`, `sites`, `asset_relations`, `network_interfaces`, `network_connections`, `firewalls`, `firewall_interfaces`, `firewall_nat_rules`, `clock_profiles`, `timeline_events` (incl. `source_ref` for events promoted from raw logs), `notes`, `iocs`, `captures`, `drafts`, `topology_views`, plus history tables (`history_commits`, `history_commit_parents`, `history_changes`, `history_entity_heads`, `history_state`, `history_merged_commits`).
 
+- Schema 9 adds `sites`, `asset_relations`, `site_id`/`owner`/`operator` on `networks` and `assets`, and `origin`/`last_observed` on `assets`. New columns on existing tables are added by `ALTER TABLE` after `init_database` and get **no index**, because `init_database` runs on legacy files before the column exists. `create_asset`/`update_asset`/`create_network`/`update_network` keep their old signatures; the `*_with_context` variants take an `AssetContext`/`NetworkContext` (on update, a missing field keeps the stored value and `""` clears it). Both shells' commands pass one optional `context` object.
+- `merge_assets` records every touched row as an ordinary entity change in one commit, so bundles replay it; `same_interface` (`db.rs`) and `sameNic` (`src/lib/asset-match.ts`) are the same rule and must change together.
 - `drafts` (per expert name) is working state like `topology_views`: never in history, snapshots, or bundles. `captures` is evidence: history, snapshots, bundles, partial import, and search all include it.
 - A merge commit records the contributors' original commits in `history_merged_commits` (with per-change applied flags) so the Activity Board can attribute merged work to its authors.
 
@@ -147,6 +150,8 @@ All DDL and migrations live in `db.rs`; current schema version is tracked via `P
 
 - **Frontend:** functional components, default exports for features; `@/` imports; Tailwind + `cn()`; local state via `useState`/`useEffect` with a `refreshTrigger` counter prop for re-fetch signaling; errors surfaced with sonner `toast.error`.
 - **Unsaved input** (open forms, pasted text, pending import/merge reviews) uses `useDraft` from `src/lib/drafts.ts` instead of `useState`, so it survives switching screens. Drafts are scoped to the open case and expert and pruned when either changes; never put a password in a draft.
+- **Matching assets** (`src/lib/asset-match.ts`) is the one recognizer for "is this the machine we already have?": the Add Asset form, the VM and discovery importers, and Possible duplicates all use it. A MAC match, or the same name at the same address, is strong; an address or a short name alone is weak; two different MACs cap a match at weak. The VM importer is stricter than the form: it updates a hand-typed asset only on a MAC match or name+address, never on a name alone (an existing test depends on that).
+- **Discovery** (`discovery-parse.ts` → `discovery-import.ts` → `DiscoveryImportPanel`) never writes directly: rows become reviewed partial-import changes. A matched asset only gains what it lacked and keeps its origin and name.
 - **Persisted drafts:** `useDraft(key, initial, { persist: true })` also saves the value (debounced, ≤256 KiB) to the case under the expert's name and restores it on the next unlock — use it for text that is slow to retype. A component that closes by **unmounting** must forget its draft with `useDraftDiscard()(prefix)` on save/cancel: a `setX('')` issued in the same batch as the parent's unmount never renders, so the draft (and its saved copy) would come back.
 - **Merge apply** refuses any selected record that changed after its preview (`STALE_PREVIEW_MESSAGE` in `history.rs`); the Case Transfer screen refreshes the preview when it sees that message.
 - **Server:** snake_case command names matching the desktop ones; DB access only through `OpenCase::with_conn`; no `unwrap()` in request paths; multi-step writes always inside `conn.transaction()` with a history commit recorded in the same transaction. Adding a command means adding one `match` arm and one params struct with `#[serde(rename_all = "camelCase")]`.

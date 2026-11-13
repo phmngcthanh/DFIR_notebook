@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -150,6 +150,8 @@ fn normalized_entity_type(value: &str) -> AppResult<String> {
         "attack_edge" | "attack_edges" | "attack_path" | "attack_paths" => "attack_edge",
         "note" | "notes" => "note",
         "capture" | "captures" | "inbox" => "capture",
+        "site" | "sites" | "location" | "locations" => "site",
+        "asset_relation" | "asset_relations" | "relation" | "relations" => "asset_relation",
         _ => return Err(format!("Unsupported entity type '{value}'")),
     };
     Ok(entity.to_string())
@@ -157,10 +159,10 @@ fn normalized_entity_type(value: &str) -> AppResult<String> {
 
 fn entity_rank(entity_type: &str) -> usize {
     match entity_type {
-        "case" => 0,
+        "case" | "site" => 0,
         "network" => 1,
         "asset" => 2,
-        "network_interface" | "clock_profile" | "firewall" => 3,
+        "network_interface" | "clock_profile" | "firewall" | "asset_relation" => 3,
         "firewall_interface" => 4,
         "firewall_nat_rule" | "network_connection" => 5,
         "timeline_event" | "ioc" | "note" | "capture" => 6,
@@ -190,8 +192,10 @@ fn snapshot_changes(data: ExportData) -> Vec<PartialImportChange> {
             }
         };
     }
+    add_values!("site", data.sites);
     add_values!("network", data.networks);
     add_values!("asset", data.assets);
+    add_values!("asset_relation", data.asset_relations);
     add_values!("network_interface", data.network_interfaces);
     add_values!("clock_profile", data.clock_profiles);
     add_values!("firewall", data.firewalls);
@@ -270,10 +274,16 @@ fn stringify_json_fields(entity_type: &str, object: &mut Map<String, Value>) -> 
 fn new_entity(entity_type: &str, id: &str, now: &str) -> AppResult<Map<String, Value>> {
     let value = match entity_type {
         "network" => {
-            json!({"id":id,"name":"","subnet":"","network_type":"LAN","description":"","vlan_id":null,"quick_note":null,"created_at":now})
+            json!({"id":id,"name":"","subnet":"","network_type":"LAN","description":"","vlan_id":null,"quick_note":null,"site_id":null,"owner":null,"operator":null,"created_at":now})
+        }
+        "site" => {
+            json!({"id":id,"name":"","location":"","description":"","created_at":now})
+        }
+        "asset_relation" => {
+            json!({"id":id,"source_asset_id":"","source_name":null,"target_asset_id":"","target_name":null,"relation_type":"runs_on","note":"","created_at":now})
         }
         "asset" => {
-            json!({"id":id,"network_id":null,"network_name":null,"name":"","ip_address":"","mac_address":null,"asset_type":"workstation","os":null,"user_name":null,"suspicious":false,"compromise_status":"unknown","investigation_status":"not_started","properties":null,"scan_results":null,"quick_note":null,"created_at":now})
+            json!({"id":id,"network_id":null,"network_name":null,"name":"","ip_address":"","mac_address":null,"asset_type":"workstation","os":null,"user_name":null,"suspicious":false,"compromise_status":"unknown","investigation_status":"not_started","properties":null,"scan_results":null,"quick_note":null,"site_id":null,"owner":null,"operator":null,"origin":"unknown","last_observed":null,"created_at":now})
         }
         "network_interface" => {
             json!({"id":id,"asset_id":"","name":"","ip_address":"","mac_address":null,"network_id":null,"network_name":null,"is_primary":false})
@@ -545,6 +555,33 @@ fn prepare_after(
     if entity_type == "note" && !creating {
         object.insert("updated_at".into(), Value::String(now));
     }
+    if entity_type == "asset_relation" {
+        // Names of the two assets for the review; the earlier changes of this
+        // same document are already in the dry-run transaction.
+        for (id_field, name_field) in [
+            ("source_asset_id", "source_name"),
+            ("target_asset_id", "target_name"),
+        ] {
+            let name: Option<String> =
+                object
+                    .get(id_field)
+                    .and_then(Value::as_str)
+                    .and_then(|asset_id| {
+                        tx.query_row(
+                            "SELECT name FROM assets WHERE id=?1",
+                            params![asset_id],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .ok()
+                        .flatten()
+                    });
+            object.insert(
+                name_field.into(),
+                name.map(Value::String).unwrap_or(Value::Null),
+            );
+        }
+    }
     if entity_type == "asset" {
         if let Some(status) = object.get("compromise_status").and_then(Value::as_str) {
             object.insert(
@@ -584,6 +621,19 @@ fn field_diffs(before: &Option<Value>, after: &Value) -> Vec<PartialFieldDiff> {
 
 fn entity_title(entity_type: &str, value: &Value, id: &str) -> String {
     let object = value.as_object();
+    // "APP01 runs on ESX01": a relation has no name of its own.
+    if entity_type == "asset_relation" {
+        let name = |field: &str| {
+            object
+                .and_then(|item| item.get(field))
+                .and_then(value_string)
+                .filter(|text| !text.trim().is_empty())
+        };
+        if let (Some(source), Some(target)) = (name("source_name"), name("target_name")) {
+            let kind = name("relation_type").unwrap_or_default();
+            return format!("{source} {} {target}", crate::db::relation_phrase(&kind));
+        }
+    }
     for field in ["name", "title", "value", "description", "timestamp"] {
         if let Some(text) = object
             .and_then(|item| item.get(field))
@@ -1020,8 +1070,10 @@ pub fn partial_import_template(conn: &Connection) -> AppResult<String> {
     let to_values = |value: Value| value.as_array().cloned().unwrap_or_default();
     let catalog = json!({
         "case": [{"id": case.id, "name": case.name}],
+        "sites": compact(to_values(serde_json::to_value(export.sites).map_err(|e|e.to_string())?), &["name","location"]),
         "networks": compact(to_values(serde_json::to_value(export.networks).map_err(|e|e.to_string())?), &["name","subnet"]),
         "assets": compact(to_values(serde_json::to_value(export.assets).map_err(|e|e.to_string())?), &["name","ip_address"]),
+        "asset_relations": compact(to_values(serde_json::to_value(export.asset_relations).map_err(|e|e.to_string())?), &["source_asset_id","target_asset_id","relation_type"]),
         "network_interfaces": compact(to_values(serde_json::to_value(export.network_interfaces).map_err(|e|e.to_string())?), &["name","asset_id","ip_address"]),
         "clock_profiles": compact(to_values(serde_json::to_value(export.clock_profiles).map_err(|e|e.to_string())?), &["name"]),
         "firewalls": compact(to_values(serde_json::to_value(export.firewalls).map_err(|e|e.to_string())?), &["name"]),
@@ -1045,10 +1097,12 @@ pub fn partial_import_template(conn: &Connection) -> AppResult<String> {
             "operations": ["create", "update", "upsert"],
             "safety": "Deletion is not supported. update requires target_id. create may include a UUID in values.id; use explicit UUIDs when newly created records reference one another.",
             "selection": "The app validates and previews every record. The investigator chooses Skip, Add only, or Use incoming before confirmation.",
-            "entity_types": ["case","network","asset","network_interface","clock_profile","firewall","firewall_interface","firewall_nat_rule","network_connection","timeline_event","ioc","ioc_sighting","attack_edge","note","capture"],
+            "entity_types": ["case","site","network","asset","asset_relation","network_interface","clock_profile","firewall","firewall_interface","firewall_nat_rule","network_connection","timeline_event","ioc","ioc_sighting","attack_edge","note","capture"],
             "field_notes": {
-                "network": "name, subnet, network_type, description, vlan_id, quick_note (short investigator remark)",
-                "asset": "network_id, name, ip_address, mac_address, asset_type, os, user_name, compromise_status, investigation_status, properties, scan_results, quick_note (short investigator remark)",
+                "site": "name, location, description",
+                "network": "name, subnet, network_type, description, vlan_id, site_id, owner (who the client says owns it), operator (who runs it), quick_note (short investigator remark)",
+                "asset": "network_id, name, ip_address, mac_address, asset_type (workstation/server/vm/hypervisor/mobile/laptop/router/switch/firewall/other), os, user_name, compromise_status, investigation_status, properties, scan_results, site_id, owner, operator, origin (unknown/client_inventory/discovered), last_observed (RFC 3339), quick_note (short investigator remark)",
+                "asset_relation": "source_asset_id, target_asset_id, relation_type (runs_on/managed_by/backs_up_to/depends_on/connects_to/other; \"VM runs_on its hypervisor host\"), note",
                 "network_interface": "asset_id, name, ip_address, mac_address, network_id, is_primary",
                 "clock_profile": "name, description, server_reference_raw, server_timezone, correct_reference_raw, correct_timezone",
                 "firewall": "network_id, name, vendor, model, rules, config_text, quick_note (short investigator remark)",
@@ -1160,6 +1214,68 @@ mod tests {
             (named.captured_by.as_str(), named.team.as_deref()),
             ("Alice", Some("Network exploration"))
         );
+    }
+
+    #[test]
+    fn sites_hosts_and_runs_on_links_import_together_in_dependency_order() {
+        let mut conn = case();
+        let case_id = current_case_id(&conn).unwrap();
+        // Listed in the worst order on purpose: the link first, the site last.
+        let document = json!({
+            "format": PARTIAL_IMPORT_FORMAT,
+            "format_version": 1,
+            "case_id": case_id,
+            "source": "vCenter inventory",
+            "changes": [
+                {"change_id":"link","entity_type":"asset_relation","operation":"create","values":{"source_asset_id":"22222222-2222-4222-8222-222222222222","target_asset_id":"33333333-3333-4333-8333-333333333333","relation_type":"runs_on"}},
+                {"change_id":"vm","entity_type":"asset","operation":"create","values":{"id":"22222222-2222-4222-8222-222222222222","name":"APP01","ip_address":"10.0.0.15","asset_type":"vm","origin":"client_inventory","site_id":"11111111-1111-4111-8111-111111111111","owner":"Finance"}},
+                {"change_id":"host","entity_type":"asset","operation":"create","values":{"id":"33333333-3333-4333-8333-333333333333","name":"ESX01","ip_address":"10.0.9.10","asset_type":"hypervisor","origin":"client_inventory","operator":"Infrastructure"}},
+                {"change_id":"site","entity_type":"locations","operation":"create","values":{"id":"11111111-1111-4111-8111-111111111111","name":"DC East"}}
+            ]
+        });
+        let pending = preview_partial_import(&mut conn, &document.to_string()).unwrap();
+        assert!(
+            pending.preview.changes.iter().all(|change| change.valid),
+            "{:?}",
+            pending
+                .preview
+                .changes
+                .iter()
+                .map(|c| (&c.id, &c.error))
+                .collect::<Vec<_>>()
+        );
+        // The review names the two assets, even though both are created by this same document.
+        let link = pending
+            .preview
+            .changes
+            .iter()
+            .find(|change| change.id == "link")
+            .unwrap();
+        assert_eq!(link.title, "APP01 runs on ESX01");
+        let selected: Vec<String> = ["site", "host", "vm", "link"]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        assert!(validate_partial_selection(&mut conn, &pending, &selected).valid);
+        let summary = apply_partial_import(&mut conn, &actor(), &pending, &selected).unwrap();
+        assert_eq!(summary.created, 4);
+
+        let vm = crate::db::get_assets(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.name == "APP01")
+            .unwrap();
+        assert_eq!(vm.origin, "client_inventory");
+        assert_eq!(vm.owner.as_deref(), Some("Finance"));
+        assert_eq!(
+            vm.site_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        let relations = crate::db::get_asset_relations(&conn).unwrap();
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].relation_type, "runs_on");
+        assert_eq!(relations[0].target_name.as_deref(), Some("ESX01"));
+        assert_eq!(crate::db::get_sites(&conn).unwrap()[0].name, "DC East");
     }
 
     #[test]

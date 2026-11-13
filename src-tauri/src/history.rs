@@ -710,7 +710,12 @@ pub fn preview_bundle(conn: &Connection, bundle: &ChangeBundle) -> AppResult<Mer
 fn ignored_derived_field(field: &str) -> bool {
     matches!(
         field,
-        "network_name" | "asset_name" | "source_network_name" | "target_network_name"
+        "network_name"
+            | "asset_name"
+            | "source_network_name"
+            | "target_network_name"
+            | "source_name"
+            | "target_name"
     )
 }
 
@@ -1308,9 +1313,11 @@ fn interface_firewall_ids(current: &Option<Value>, resolved: &Option<Value>) -> 
 fn entity_order(entity_type: &str, deleting: bool) -> usize {
     let rank = match entity_type {
         "case" => 0,
+        "site" => 0,
         "network" => 1,
         "asset" => 2,
         "network_interface" => 3,
+        "asset_relation" => 3,
         "clock_profile" => 3,
         "firewall" => 3,
         "firewall_interface" => 4,
@@ -1335,8 +1342,8 @@ fn entity_order(entity_type: &str, deleting: bool) -> usize {
 mod tests {
     use super::*;
     use crate::db::{
-        get_assets, get_network_interfaces, get_networks, init_database, initialize_history,
-        update_asset, update_network, update_network_interface,
+        get_asset_relations, get_assets, get_network_interfaces, get_networks, init_database,
+        initialize_history, merge_assets, update_asset, update_network, update_network_interface,
     };
 
     fn actor(name: &str) -> ActorIdentity {
@@ -1898,5 +1905,101 @@ mod tests {
         assert!(status.last_change_at.is_some());
         mark_shared_baseline(&conn).unwrap();
         assert_eq!(handover_status(&conn).unwrap().commits_since_base, 0);
+    }
+
+    /// Two experts start from the same copy that holds a duplicated machine. One
+    /// merges the duplicate; the other replays that merge from the bundle.
+    #[test]
+    fn a_merge_of_duplicate_assets_replays_from_a_bundle() {
+        fn seed() -> Connection {
+            let conn = seeded_asset_case();
+            conn.execute_batch(
+                "INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,created_at)
+                 VALUES('asset-2','network-1','pc.corp.local','10.0.0.5','AA:BB:CC:00:11:22','workstation','Windows 11',NULL,0,'unknown','not_started',NULL,NULL,'2025-01-01T00:00:00Z');
+                 INSERT INTO network_interfaces(id,asset_id,name,ip_address,mac_address,network_id,is_primary)
+                 VALUES('nic-3','asset-2','Ethernet','10.0.0.5','AA:BB:CC:00:11:22','network-1',1);
+                 INSERT INTO timeline_events(id,asset_id,timestamp,event_type,description,severity,created_at)
+                 VALUES('event-1','asset-2','2025-01-02T00:00:00Z','login','Odd login','info','2025-01-02T00:00:00Z');
+                 INSERT INTO asset_relations(id,source_asset_id,target_asset_id,relation_type,note,created_at)
+                 VALUES('rel-1','asset-2','asset-1','depends_on','','2025-01-02T00:00:00Z');",
+            )
+            .unwrap();
+            initialize_history(&conn).unwrap();
+            conn
+        }
+        let mut incoming = seed();
+        let mut local = seed();
+        let bob = actor("Bob");
+        let summary = merge_assets(&mut incoming, &bob, "asset-1", "asset-2").unwrap();
+        // The relation between the two would point at itself and disappears.
+        assert_eq!(summary.relations, 1);
+        assert!(get_asset_relations(&incoming).unwrap().is_empty());
+
+        let bundle = export_change_bundle(&incoming, &bob).unwrap();
+        let preview = preview_bundle(&local, &bundle).unwrap();
+        assert!(preview.common_base);
+        assert!(
+            preview
+                .changes
+                .iter()
+                .all(|change| change.classification == "clean"),
+            "{:?}",
+            preview
+                .changes
+                .iter()
+                .map(|c| (&c.entity_type, &c.classification))
+                .collect::<Vec<_>>()
+        );
+        let decisions: Vec<MergeDecision> = preview
+            .changes
+            .iter()
+            .map(|change| MergeDecision {
+                change_id: change.id.clone(),
+                selected: true,
+                resolved_after: None,
+            })
+            .collect();
+        apply_bundle(&mut local, &actor("Alice"), &bundle, &preview, &decisions).unwrap();
+
+        let assets = get_assets(&local).unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].id, "asset-1");
+        assert_eq!(assets[0].os.as_deref(), Some("Windows 11"));
+        assert!(get_asset_relations(&local).unwrap().is_empty());
+        let owner: String = local
+            .query_row(
+                "SELECT asset_id FROM timeline_events WHERE id='event-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, "asset-1");
+        // The duplicate's NIC was the same one (same address) and only added the MAC.
+        let learned: Option<String> = local
+            .query_row(
+                "SELECT mac_address FROM network_interfaces WHERE id='nic-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(learned.as_deref(), Some("AA:BB:CC:00:11:22"));
+        let gone: i64 = local
+            .query_row(
+                "SELECT COUNT(*) FROM network_interfaces WHERE id='nic-3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(gone, 0);
+        // Both copies now agree on every asset-side table.
+        for sql in [
+            "SELECT COUNT(*) FROM network_interfaces WHERE asset_id='asset-1'",
+            "SELECT COUNT(*) FROM assets",
+            "SELECT COUNT(*) FROM asset_relations",
+        ] {
+            let left: i64 = local.query_row(sql, [], |row| row.get(0)).unwrap();
+            let right: i64 = incoming.query_row(sql, [], |row| row.get(0)).unwrap();
+            assert_eq!(left, right, "{sql}");
+        }
     }
 }

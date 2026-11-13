@@ -10,7 +10,7 @@ import { branding } from '@/config/branding';
 import { buildZip, type ZipEntry } from './zip-writer';
 
 export type TopologyExportNodeKind = 'root' | 'zone' | 'asset' | 'firewall';
-export type TopologyExportEdgeKind = 'connection' | 'nic' | 'branch';
+export type TopologyExportEdgeKind = 'connection' | 'nic' | 'branch' | 'hosting';
 
 export interface TopologyExportNode {
   id: string;
@@ -95,6 +95,9 @@ function drawioEdgeStyle(edge: TopologyExportEdge): string {
   }
   if (edge.kind === 'connection') {
     return 'edgeStyle=none;rounded=1;dashed=1;strokeColor=#0891B2;strokeWidth=3;fontSize=9';
+  }
+  if (edge.kind === 'hosting') {
+    return 'edgeStyle=none;rounded=1;dashed=1;strokeColor=#8B5CF6;strokeWidth=2;endArrow=block;fontSize=9';
   }
   return 'edgeStyle=none;rounded=1;dashed=1;dashPattern=1 4;strokeColor=#7C3AED;strokeWidth=2;fontSize=8';
 }

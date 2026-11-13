@@ -4,7 +4,7 @@
  * the screen that holds it with the record in view.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Clock, FileText, Inbox, Loader2, Route, Search, Server, Shield, ShieldAlert, Wifi } from 'lucide-react';
+import { Clock, FileText, Inbox, Loader2, MapPin, Route, Search, Server, Shield, ShieldAlert, Wifi } from 'lucide-react';
 import { invoke } from '@/lib/api';
 import type { ApiResponse, SearchHit } from '@/types';
 
@@ -15,6 +15,7 @@ interface Props {
 
 const GROUPS: { type: string; label: string; icon: React.ReactNode }[] = [
   { type: 'asset', label: 'Assets', icon: <Server size={14} /> },
+  { type: 'site', label: 'Sites', icon: <MapPin size={14} /> },
   { type: 'network', label: 'Networks', icon: <Wifi size={14} /> },
   { type: 'firewall', label: 'Firewalls', icon: <Shield size={14} /> },
   { type: 'ioc', label: 'Indicators', icon: <ShieldAlert size={14} /> },

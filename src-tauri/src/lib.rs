@@ -919,9 +919,10 @@ fn create_new_network(
     network_type: String,
     description: String,
     vlan_id: Option<String>,
+    context: Option<NetworkContext>,
 ) -> Response<Network> {
     with_actor_conn(&state, |conn, actor| {
-        create_network(
+        create_network_with_context(
             conn,
             actor,
             &name,
@@ -929,6 +930,7 @@ fn create_new_network(
             &network_type,
             &description,
             vlan_id.as_deref(),
+            &context.clone().unwrap_or_default(),
         )
     })
 }
@@ -941,9 +943,10 @@ fn update_existing_network(
     network_type: String,
     description: String,
     vlan_id: Option<String>,
+    context: Option<NetworkContext>,
 ) -> Response<Network> {
     with_actor_conn(&state, |conn, actor| {
-        update_network(
+        update_network_with_context(
             conn,
             actor,
             &id,
@@ -952,6 +955,7 @@ fn update_existing_network(
             &network_type,
             &description,
             vlan_id.as_deref(),
+            &context.clone().unwrap_or_default(),
         )
     })
 }
@@ -998,9 +1002,10 @@ fn create_new_asset(
     investigation_status: String,
     properties: Option<String>,
     scan_results: Option<String>,
+    context: Option<AssetContext>,
 ) -> Response<Asset> {
     with_actor_conn(&state, |conn, actor| {
-        create_asset(
+        create_asset_with_context(
             conn,
             actor,
             network_id.as_deref(),
@@ -1014,6 +1019,7 @@ fn create_new_asset(
             &investigation_status,
             properties.as_deref(),
             scan_results.as_deref(),
+            &context.clone().unwrap_or_default(),
         )
     })
 }
@@ -1033,9 +1039,10 @@ fn update_existing_asset(
     investigation_status: String,
     properties: Option<String>,
     scan_results: Option<String>,
+    context: Option<AssetContext>,
 ) -> Response<Asset> {
     with_actor_conn(&state, |conn, actor| {
-        update_asset(
+        update_asset_with_context(
             conn,
             actor,
             &id,
@@ -1050,6 +1057,7 @@ fn update_existing_asset(
             &investigation_status,
             properties.as_deref(),
             scan_results.as_deref(),
+            &context.clone().unwrap_or_default(),
         )
     })
 }
@@ -1082,6 +1090,119 @@ fn set_entity_quick_note(
 fn remove_asset(state: State<DbState>, id: String) -> Response<bool> {
     with_actor_conn(&state, |conn, actor| {
         delete_asset(conn, actor, &id).map(|_| true)
+    })
+}
+
+// ---- sites, asset relations, and merging duplicate assets ------------------------
+
+#[tauri::command]
+fn list_sites(state: State<DbState>) -> Response<Vec<Site>> {
+    with_conn(&state, |conn| get_sites(conn))
+}
+
+#[tauri::command]
+fn create_new_site(
+    state: State<DbState>,
+    name: String,
+    location: Option<String>,
+    description: Option<String>,
+) -> Response<Site> {
+    with_actor_conn(&state, |conn, actor| {
+        create_site(
+            conn,
+            actor,
+            &name,
+            location.as_deref().unwrap_or(""),
+            description.as_deref().unwrap_or(""),
+        )
+    })
+}
+
+#[tauri::command]
+fn update_existing_site(
+    state: State<DbState>,
+    id: String,
+    name: String,
+    location: Option<String>,
+    description: Option<String>,
+) -> Response<Site> {
+    with_actor_conn(&state, |conn, actor| {
+        update_site(
+            conn,
+            actor,
+            &id,
+            &name,
+            location.as_deref().unwrap_or(""),
+            description.as_deref().unwrap_or(""),
+        )
+    })
+}
+
+#[tauri::command]
+fn remove_site(state: State<DbState>, id: String) -> Response<bool> {
+    with_actor_conn(&state, |conn, actor| {
+        delete_site(conn, actor, &id).map(|_| true)
+    })
+}
+
+#[tauri::command]
+fn list_asset_relations(state: State<DbState>) -> Response<Vec<AssetRelation>> {
+    with_conn(&state, |conn| get_asset_relations(conn))
+}
+
+#[tauri::command]
+fn create_new_asset_relation(
+    state: State<DbState>,
+    source_asset_id: String,
+    target_asset_id: String,
+    relation_type: String,
+    note: Option<String>,
+) -> Response<AssetRelation> {
+    with_actor_conn(&state, |conn, actor| {
+        create_asset_relation(
+            conn,
+            actor,
+            &source_asset_id,
+            &target_asset_id,
+            &relation_type,
+            note.as_deref().unwrap_or(""),
+        )
+    })
+}
+
+#[tauri::command]
+fn update_existing_asset_relation(
+    state: State<DbState>,
+    id: String,
+    relation_type: String,
+    note: Option<String>,
+) -> Response<AssetRelation> {
+    with_actor_conn(&state, |conn, actor| {
+        update_asset_relation(
+            conn,
+            actor,
+            &id,
+            &relation_type,
+            note.as_deref().unwrap_or(""),
+        )
+    })
+}
+
+#[tauri::command]
+fn remove_asset_relation(state: State<DbState>, id: String) -> Response<bool> {
+    with_actor_conn(&state, |conn, actor| {
+        delete_asset_relation(conn, actor, &id).map(|_| true)
+    })
+}
+
+#[tauri::command]
+fn merge_asset_records(
+    state: State<DbState>,
+    keep_id: String,
+    remove_id: String,
+) -> Response<AssetMergeSummary> {
+    with_actor_conn(&state, |conn, actor| {
+        merge_assets(conn, actor, &keep_id, &remove_id)
     })
 }
 
@@ -2868,6 +2989,15 @@ pub fn run() {
             create_new_capture,
             update_existing_capture,
             remove_capture,
+            list_sites,
+            create_new_site,
+            update_existing_site,
+            remove_site,
+            list_asset_relations,
+            create_new_asset_relation,
+            update_existing_asset_relation,
+            remove_asset_relation,
+            merge_asset_records,
             load_case_drafts,
             save_case_drafts,
             search_case_records,

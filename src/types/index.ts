@@ -20,7 +20,56 @@ export interface Network {
   description: string;
   vlan_id?: string;
   quick_note?: string | null;
+  site_id?: string | null;
+  /** Who the client says owns or governs the segment. */
+  owner?: string | null;
+  /** Who runs it day to day (admin team, MSP, vendor). */
+  operator?: string | null;
   created_at: string;
+}
+
+/** How the case learned of an asset. */
+export type AssetOrigin = 'unknown' | 'client_inventory' | 'discovered';
+export type RelationType = 'runs_on' | 'managed_by' | 'backs_up_to' | 'depends_on' | 'connects_to' | 'other';
+
+/** A location: head office, plant, data center. Networks and assets point at one. */
+export interface Site {
+  id: string;
+  name: string;
+  location: string;
+  description: string;
+  created_at: string;
+}
+
+/** A directed link between two assets, e.g. a VM `runs_on` its hypervisor host. */
+export interface AssetRelation {
+  id: string;
+  source_asset_id: string;
+  source_name?: string | null;
+  target_asset_id: string;
+  target_name?: string | null;
+  relation_type: RelationType;
+  note: string;
+  created_at: string;
+}
+
+/** The environment fields sent beside an asset. Omitted keeps the stored value on update; an empty string clears. */
+export interface AssetContextInput {
+  siteId?: string;
+  owner?: string;
+  operator?: string;
+  origin?: string;
+  lastObserved?: string;
+}
+
+export interface AssetMergeSummary {
+  asset: Asset;
+  interfaces_moved: number;
+  interfaces_dropped: number;
+  timeline_events: number;
+  sightings: number;
+  attack_edges: number;
+  relations: number;
 }
 
 export type CompromiseStatus = 'unknown' | 'clean' | 'suspected' | 'infected';
@@ -42,6 +91,12 @@ export interface Asset {
   properties?: string;
   scan_results?: string;
   quick_note?: string | null;
+  site_id?: string | null;
+  owner?: string | null;
+  operator?: string | null;
+  origin?: AssetOrigin;
+  /** RFC 3339: when the asset was last seen active (ARP entry, scan, lease). */
+  last_observed?: string | null;
   created_at: string;
 }
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@/lib/api';
+import { relationTitle } from '@/lib/environment';
 import { GitMerge, RefreshCw, SquareKanban, Users, UserRound } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -50,6 +51,8 @@ const ENTITY_COLORS: Record<string, string> = {
   topology_view: 'bg-cyan-100 text-cyan-800',
   case: 'bg-slate-200 text-slate-700',
   capture: 'bg-cyan-100 text-cyan-800',
+  site: 'bg-emerald-100 text-emerald-800',
+  asset_relation: 'bg-emerald-100 text-emerald-800',
 };
 
 const IGNORED_DIFF_FIELDS = new Set(['id', 'created_at', 'updated_at', 'case_id']);
@@ -336,6 +339,8 @@ function fieldDiffs(change: HistoryChange): { field: string; before?: JsonValue;
 
 function changeTitle(change: HistoryChange): string {
   for (const value of [change.after, change.before]) {
+    const relation = relationTitle(value);
+    if (relation) return relation;
     if (isObject(value)) {
       for (const key of ['name', 'title', 'value', 'description', 'ip_address']) {
         const item = value[key];

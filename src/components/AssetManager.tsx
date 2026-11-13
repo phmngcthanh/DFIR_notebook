@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { downloadBytes, downloadText, invoke } from '@/lib/api';
-import { ArrowUpDown, Boxes, Brain, Cable, ChevronDown, ChevronRight, ChevronUp, Copy, Download, Pencil, Plus, Search, Star, Trash2, X } from 'lucide-react';
+import { ArrowUpDown, Boxes, Brain, Cable, ChevronDown, ChevronRight, ChevronUp, Copy, Download, GitMerge, Pencil, Plus, Radar, Search, Star, Trash2, X } from 'lucide-react';
 import { toast } from 'sonner';
+import AssetRelationsPanel from '@/components/AssetRelationsPanel';
+import DiscoveryImportPanel from '@/components/DiscoveryImportPanel';
+import DuplicateAssetsPanel from '@/components/DuplicateAssetsPanel';
 import QuickNoteCell from '@/components/QuickNoteCell';
 import VmInventoryImportPanel from '@/components/VmInventoryImportPanel';
 import { Badge } from '@/components/ui/badge';
@@ -12,33 +15,40 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Textarea } from '@/components/ui/textarea';
+import { describeReasons, findAssetMatches, findDuplicatePairs } from '@/lib/asset-match';
 import { sortAssets, type AssetSort, type AssetSortKey } from '@/lib/asset-sort';
 import { useDraft } from '@/lib/drafts';
+import { ASSET_ORIGINS, fromLocalInput, observedLabel, originLabel, toLocalInput } from '@/lib/environment';
 import { copyText, exportFileName, toCsv, toTsv, type ListTable } from '@/lib/list-export';
 import { matchNetworkForIp } from '@/lib/subnet-match';
 import { buildXmindArchiveFromTree } from '@/lib/topology-export';
 import { buildVmHostTree, platformLabel, readStoredVmInventory } from '@/lib/vm-inventory';
-import type { ApiResponse, Asset, Case, CompromiseStatus, ExpertIdentity, InfectionSummary, InvestigationStatus, Network, NetworkInterface } from '@/types';
+import type { ApiResponse, Asset, AssetOrigin, AssetRelation, Case, CompromiseStatus, ExpertIdentity, InfectionSummary, InvestigationStatus, Network, NetworkInterface, Site } from '@/types';
 
 interface Props { refreshTrigger: number; expert: ExpertIdentity }
 interface AssetFormState {
   networkId: string; name: string; ipAddress: string; macAddress: string; assetType: string; os: string; userName: string;
   compromiseStatus: CompromiseStatus; investigationStatus: InvestigationStatus; properties: string; scanResults: string;
+  siteId: string; owner: string; operator: string; origin: AssetOrigin; lastObserved: string;
 }
 interface InterfaceFormState { name: string; ipAddress: string; macAddress: string; networkId: string; isPrimary: boolean }
 
-const EMPTY_ASSET: AssetFormState = { networkId: '', name: '', ipAddress: '', macAddress: '', assetType: 'workstation', os: '', userName: '', compromiseStatus: 'unknown', investigationStatus: 'not_started', properties: '', scanResults: '' };
+const EMPTY_ASSET: AssetFormState = { networkId: '', name: '', ipAddress: '', macAddress: '', assetType: 'workstation', os: '', userName: '', compromiseStatus: 'unknown', investigationStatus: 'not_started', properties: '', scanResults: '', siteId: '', owner: '', operator: '', origin: 'unknown', lastObserved: '' };
 const EMPTY_INTERFACE: InterfaceFormState = { name: '', ipAddress: '', macAddress: '', networkId: '', isPrimary: false };
 /** Asset types the core accepts (`ASSET_TYPES` in db.rs). */
-const ASSET_TYPES = ['workstation', 'server', 'vm', 'mobile', 'laptop', 'router', 'switch', 'firewall', 'other'];
+const ASSET_TYPES = ['workstation', 'server', 'vm', 'hypervisor', 'mobile', 'laptop', 'router', 'switch', 'firewall', 'other'];
 /** Network filter value for assets with no network on the asset or any NIC. */
 const NO_NETWORK = '__no_network__';
+/** Site filter value for assets that are not at any site. */
+const NO_SITE = '__no_site__';
 
 export default function AssetManager({ refreshTrigger, expert }: Props) {
   const [currentCase, setCurrentCase] = useState<Case | null>(null);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [networks, setNetworks] = useState<Network[]>([]);
   const [interfaces, setInterfaces] = useState<NetworkInterface[]>([]);
+  const [sites, setSites] = useState<Site[]>([]);
+  const [relations, setRelations] = useState<AssetRelation[]>([]);
   // Open forms survive switching screens (see `useDraft`).
   const [form, setForm] = useDraft<AssetFormState>('assets.form', EMPTY_ASSET, { persist: true });
   const [showForm, setShowForm] = useDraft('assets.showForm', false, { persist: true });
@@ -54,22 +64,31 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
   const [investigationFilter, setInvestigationFilter] = useState('all');
   const [focusOnly, setFocusOnly] = useState(expert.scope_network_ids.length > 0);
   const [showVmImport, setShowVmImport] = useDraft('assets.showImport', false, { persist: true });
+  const [showDiscovery, setShowDiscovery] = useDraft('assets.showDiscovery', false, { persist: true });
+  const [showDuplicates, setShowDuplicates] = useDraft('assets.showDuplicates', false);
+  const [siteFilter, setSiteFilter] = useState('all');
+  const [originFilter, setOriginFilter] = useState('all');
 
   const [infection, setInfection] = useState<InfectionSummary>({ entities: [], iocs: [] });
 
   const loadData = useCallback(async () => {
     try {
-      const [caseResponse, assetResponse, networkResponse, interfaceResponse, infectionResponse] = await Promise.all([
+      const [caseResponse, assetResponse, networkResponse, interfaceResponse, infectionResponse, siteResponse, relationResponse] = await Promise.all([
         invoke<ApiResponse<Case | null>>('get_current_case_info'),
         invoke<ApiResponse<Asset[]>>('list_assets'), invoke<ApiResponse<Network[]>>('list_networks'),
         invoke<ApiResponse<NetworkInterface[]>>('list_network_interfaces', { assetId: null }),
         invoke<ApiResponse<InfectionSummary>>('get_infection_summary'),
+        invoke<ApiResponse<Site[]>>('list_sites'),
+        invoke<ApiResponse<AssetRelation[]>>('list_asset_relations'),
       ]);
       if (!caseResponse.success) throw new Error(caseResponse.error);
       if (!assetResponse.success) throw new Error(assetResponse.error);
       if (!networkResponse.success) throw new Error(networkResponse.error);
       if (!interfaceResponse.success) throw new Error(interfaceResponse.error);
       if (!infectionResponse.success) throw new Error(infectionResponse.error);
+      if (!siteResponse.success) throw new Error(siteResponse.error);
+      if (!relationResponse.success) throw new Error(relationResponse.error);
+      setSites(siteResponse.data ?? []); setRelations(relationResponse.data ?? []);
       setCurrentCase(caseResponse.data ?? null);
       setAssets(assetResponse.data ?? []); setNetworks(networkResponse.data ?? []); setInterfaces(interfaceResponse.data ?? []);
       setInfection(infectionResponse.data ?? { entities: [], iocs: [] });
@@ -83,16 +102,32 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
     setEditingId(asset.id); setShowForm(true);
     setForm({ networkId: asset.network_id ?? '', name: asset.name, ipAddress: asset.ip_address, macAddress: asset.mac_address ?? '', assetType: asset.asset_type,
       os: asset.os ?? '', userName: asset.user_name ?? '', compromiseStatus: asset.compromise_status, investigationStatus: asset.investigation_status,
-      properties: asset.properties ?? '', scanResults: asset.scan_results ?? '' });
+      properties: asset.properties ?? '', scanResults: asset.scan_results ?? '', siteId: asset.site_id ?? '', owner: asset.owner ?? '', operator: asset.operator ?? '',
+      origin: asset.origin ?? 'unknown', lastObserved: toLocalInput(asset.last_observed) });
   };
 
   const saveAsset = async () => {
-    if (expert.scope_network_ids.length && form.networkId && !expert.scope_network_ids.includes(form.networkId)
+    // A draft saved before these fields existed restores without them.
+    const values = { ...EMPTY_ASSET, ...form };
+    if (expert.scope_network_ids.length && values.networkId && !expert.scope_network_ids.includes(values.networkId)
       && !confirm('This asset is outside your selected focus zones. Save it anyway?')) return;
+    if (!editingId) {
+      const matches = findAssetMatches({ name: values.name, ips: [values.ipAddress], macs: [values.macAddress] }, assets, interfaces);
+      if (matches.length) {
+        const list = matches.slice(0, 3).map((match) => `• ${match.asset.name}${match.asset.ip_address ? ` (${match.asset.ip_address})` : ''}: ${describeReasons(match.reasons)}`).join('\n');
+        if (!confirm(`This may already be in the case:\n${list}\n\nAdd it as a new asset anyway?`)) return;
+      }
+    }
+    // The time field shows minutes only: send it back only when it was changed,
+    // so an unrelated edit does not round the stored time.
+    const original = editingId ? assets.find((asset) => asset.id === editingId) : undefined;
+    const lastObserved = original && values.lastObserved === toLocalInput(original.last_observed) ? undefined : fromLocalInput(values.lastObserved);
     try {
       const response = await invoke<ApiResponse<Asset>>(editingId ? 'update_existing_asset' : 'create_new_asset', {
-        id: editingId, ...form, networkId: form.networkId || null, macAddress: form.macAddress || null, os: form.os || null,
-        userName: form.userName || null, properties: form.properties || null, scanResults: form.scanResults || null,
+        id: editingId, networkId: values.networkId || null, name: values.name, ipAddress: values.ipAddress, macAddress: values.macAddress || null,
+        assetType: values.assetType, os: values.os || null, userName: values.userName || null, compromiseStatus: values.compromiseStatus,
+        investigationStatus: values.investigationStatus, properties: values.properties || null, scanResults: values.scanResults || null,
+        context: { siteId: values.siteId, owner: values.owner, operator: values.operator, origin: values.origin, lastObserved },
       });
       if (!response.success) throw new Error(response.error || 'Failed to save asset');
       toast.success(editingId ? 'Asset updated' : 'Asset created'); resetAssetForm(); await loadData();
@@ -143,6 +178,14 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
     }
     return grouped;
   }, [interfaces]);
+  const siteNames = useMemo(() => new Map(sites.map((site): [string, string] => [site.id, site.name])), [sites]);
+  /** Where each VM runs, from its "runs on" link. */
+  const hostByAsset = useMemo(() => {
+    const hosts = new Map<string, string>();
+    for (const relation of relations) if (relation.relation_type === 'runs_on' && relation.target_name) hosts.set(relation.source_asset_id, relation.target_name);
+    return hosts;
+  }, [relations]);
+  const duplicateCount = useMemo(() => findDuplicatePairs(assets, interfaces).length, [assets, interfaces]);
   const filteredAssets = useMemo(() => {
     const term = search.trim().toLowerCase();
     return assets.filter((asset) => {
@@ -155,12 +198,15 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
           : assetInterfaces.some((item) => item.network_id === networkFilter));
       return scopeMatch && networkMatch && (compromiseFilter === 'all' || asset.compromise_status === compromiseFilter)
         && (investigationFilter === 'all' || asset.investigation_status === investigationFilter)
+        && (siteFilter === 'all' || (siteFilter === NO_SITE ? !asset.site_id : asset.site_id === siteFilter))
+        && (originFilter === 'all' || (asset.origin ?? 'unknown') === originFilter)
         && (!term || [
           asset.name, asset.ip_address, asset.mac_address, asset.os, asset.user_name, asset.network_name, asset.quick_note,
+          asset.owner, asset.operator, siteNames.get(asset.site_id ?? ''), hostByAsset.get(asset.id),
           vmInventory?.platform, vmInventory?.hypervisor, vmInventory?.inventoryScope, vmInventory?.nativeId,
         ].some((value) => value?.toLowerCase().includes(term)));
     });
-  }, [assets, interfacesByAsset, focusOnly, expert.scope_network_ids, networkFilter, compromiseFilter, investigationFilter, search]);
+  }, [assets, interfacesByAsset, focusOnly, expert.scope_network_ids, networkFilter, compromiseFilter, investigationFilter, siteFilter, originFilter, search, siteNames, hostByAsset]);
   const sortedAssets = useMemo(() => {
     const nicCounts = new Map(Array.from(interfacesByAsset, ([assetId, items]): [string, number] => [assetId, items.length]));
     return sortAssets(filteredAssets, nicCounts, sort);
@@ -171,7 +217,7 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
 
   // The list exactly as shown (filtered and sorted) leaves the app as CSV or clipboard text.
   const visibleAssetTable = (): ListTable => ({
-    header: ['Name', 'IP address', 'MAC address', 'Network', 'Type', 'OS', 'User / owner', 'Compromise', 'Progress', 'Other interface IPs', 'Hypervisor / host', 'Quick note'],
+    header: ['Name', 'IP address', 'MAC address', 'Network', 'Type', 'OS', 'User / owner', 'Compromise', 'Progress', 'Other interface IPs', 'Hypervisor / host', 'Site', 'Owner', 'Operated by', 'Origin', 'Last observed', 'Quick note'],
     rows: sortedAssets.map((asset) => {
       const inventory = readStoredVmInventory(asset.properties);
       const otherIps = (interfacesByAsset.get(asset.id) ?? [])
@@ -179,7 +225,8 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
         .map((item) => item.ip_address);
       return [asset.name, asset.ip_address, asset.mac_address, asset.network_name, asset.asset_type, asset.os, asset.user_name,
         label(asset.compromise_status), label(asset.investigation_status), otherIps.join('; '),
-        inventory?.hypervisor ?? inventory?.inventoryScope, asset.quick_note];
+        inventory?.hypervisor ?? inventory?.inventoryScope ?? hostByAsset.get(asset.id), siteNames.get(asset.site_id ?? ''), asset.owner, asset.operator,
+        originLabel(asset.origin), observedLabel(asset.last_observed), asset.quick_note];
     }),
   });
   const exportVisibleAssets = async () => {
@@ -210,22 +257,32 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
   return (
     <div className="space-y-4 p-6">
       <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-2xl font-bold text-slate-800">Assets and PC Configuration</h2><p className="text-sm text-slate-500">Primary configuration, investigation status, multi-homed interfaces, and virtual-machine inventory</p></div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => setShowDuplicates((value) => !value)} title="Find assets that share a MAC address, a name, or an address, and merge them"><GitMerge size={16} className="mr-2" />Possible duplicates{duplicateCount > 0 ? ` (${duplicateCount})` : ''}</Button>
+          <Button variant="outline" onClick={() => setShowDiscovery((value) => !value)} title="Paste ARP tables, ipconfig, ip addr, nmap, or DHCP lease output"><Radar size={16} className="mr-2" />Paste discovery output</Button>
           <Button variant="outline" onClick={() => setShowVmImport((value) => !value)} title="Paste hostnames, IP lists, CSV rows, adb output, or a VMware / Hyper-V / Proxmox inventory"><Boxes size={16} className="mr-2" />Paste / import assets</Button>
           <Button variant="outline" onClick={() => void exportVmXmind()} disabled={vmAssets.length === 0} title="Export the imported VM inventory as an XMind mindmap grouped by hypervisor host"><Brain size={16} className="mr-2" />Export VMs (XMind)</Button>
           <Button onClick={() => { resetAssetForm(); setShowForm(true); }} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add Asset</Button>
         </div>
       </div>
       {showVmImport && currentCase && <VmInventoryImportPanel
-        inventory={{ caseId: currentCase.id, assets, networks, networkInterfaces: interfaces }}
+        inventory={{ caseId: currentCase.id, assets, networks, networkInterfaces: interfaces, relations }}
         onApplied={loadData}
         onClose={() => setShowVmImport(false)}
       />}
+      {showDiscovery && currentCase && <DiscoveryImportPanel
+        inventory={{ caseId: currentCase.id, assets, networks, networkInterfaces: interfaces }}
+        onApplied={loadData}
+        onClose={() => setShowDiscovery(false)}
+      />}
+      {showDuplicates && <DuplicateAssetsPanel assets={assets} interfaces={interfaces} onMerged={loadData} onClose={() => setShowDuplicates(false)} />}
       <Card><CardContent className="flex flex-wrap items-end gap-3 p-3">
-        <div className="relative min-w-64 flex-1"><Search size={15} className="absolute left-3 top-2.5 text-slate-400" /><Input className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, IP, MAC, OS, or user…" /></div>
+        <div className="relative min-w-64 flex-1"><Search size={15} className="absolute left-3 top-2.5 text-slate-400" /><Input className="pl-9" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name, IP, MAC, OS, user, or owner…" /></div>
         <SmallSelect value={networkFilter} onChange={setNetworkFilter} label="Network" items={[['all','All networks'], [NO_NETWORK, 'No network (unresolved)'], ...networks.map((item): [string,string] => [item.id,item.name])]} />
         <SmallSelect value={compromiseFilter} onChange={setCompromiseFilter} label="Compromise" items={statusItems('compromise')} />
         <SmallSelect value={investigationFilter} onChange={setInvestigationFilter} label="Progress" items={statusItems('investigation')} />
+        {sites.length > 0 && <SmallSelect value={siteFilter} onChange={setSiteFilter} label="Site" items={[['all', 'All sites'], [NO_SITE, 'No site'], ...sites.map((item): [string, string] => [item.id, item.name])]} />}
+        <SmallSelect value={originFilter} onChange={setOriginFilter} label="Origin" items={[['all', 'All origins'], ['discovered', 'Discovered, not in client inventory'], ['client_inventory', "In the client's inventory"], ['unknown', 'Not recorded']]} />
         {expert.scope_network_ids.length > 0 && <label className="flex h-9 items-center gap-2 rounded border px-3 text-sm"><input type="checkbox" checked={focusOnly} onChange={(e) => setFocusOnly(e.target.checked)} />Focus zones only</label>}
         <div className="ml-auto flex gap-2">
           <Button variant="outline" size="sm" onClick={() => void exportVisibleAssets()} disabled={sortedAssets.length === 0} title="Download the assets in this list, as filtered and sorted, as CSV"><Download size={14} className="mr-1" />Export list</Button>
@@ -234,7 +291,7 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
       </CardContent></Card>
 
       {showForm && <FormDialog title={editingId ? 'Edit asset' : 'New asset'} onClose={resetAssetForm}>
-        <AssetForm form={form} setForm={setForm} networks={networks} editing={Boolean(editingId)} onSave={() => void saveAsset()} onCancel={resetAssetForm} />
+        <AssetForm form={{ ...EMPTY_ASSET, ...form }} setForm={setForm} networks={networks} sites={sites} editing={Boolean(editingId)} onSave={() => void saveAsset()} onCancel={resetAssetForm} />
       </FormDialog>}
 
       <Card><CardContent className="p-0"><Table><TableHeader><TableRow>
@@ -256,7 +313,8 @@ export default function AssetManager({ refreshTrigger, expert }: Props) {
             interfaceForm={interfaceForm} setInterfaceForm={setInterfaceForm} showInterfaceForm={showInterfaceForm && expandedAssetId === asset.id}
             editingInterfaceId={editingInterfaceId} networks={networks} onBeginInterface={beginInterface} onSaveInterface={() => void saveInterface()}
             onCancelInterface={() => setShowInterfaceForm(false)} onPrimary={(id) => void setPrimary(id)} onDeleteInterface={(id) => void deleteInterface(id)}
-            onNoteSaved={() => void loadData()} />;
+            onNoteSaved={() => void loadData()} siteName={siteNames.get(asset.site_id ?? '')} hostName={hostByAsset.get(asset.id)}
+            assets={assets} relations={relations} onRelationsChanged={() => void loadData()} />;
         })}
       </TableBody></Table></CardContent></Card>
     </div>
@@ -292,7 +350,7 @@ function SortHead({ label: text, sortKey, sort, onChange }: { label: string; sor
   );
 }
 
-function AssetForm({ form, setForm, networks, editing, onSave, onCancel }: { form: AssetFormState; setForm: (value: AssetFormState) => void; networks: Network[]; editing: boolean; onSave: () => void; onCancel: () => void }) {
+function AssetForm({ form, setForm, networks, sites, editing, onSave, onCancel }: { form: AssetFormState; setForm: (value: AssetFormState) => void; networks: Network[]; sites: Site[]; editing: boolean; onSave: () => void; onCancel: () => void }) {
   return <Card><CardHeader className="flex flex-row items-center justify-between space-y-0"><CardTitle className="text-sm">{editing ? 'Edit asset' : 'New asset'}</CardTitle><Button size="sm" variant="ghost" onClick={onCancel} aria-label="Close"><X size={16} /></Button></CardHeader><CardContent className="space-y-3">
     <div className="grid grid-cols-4 gap-3"><Field label="Name *"><Input autoFocus value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field><Field label="Primary network"><NetworkSelect value={form.networkId} networks={networks} onChange={(networkId) => setForm({ ...form, networkId })} /></Field>
       <Field label="IP address"><Input value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} /></Field><Field label="MAC address"><Input value={form.macAddress} onChange={(e) => setForm({ ...form, macAddress: e.target.value })} /></Field></div>
@@ -300,21 +358,25 @@ function AssetForm({ form, setForm, networks, editing, onSave, onCancel }: { for
       <Field label="OS"><Input value={form.os} onChange={(e) => setForm({ ...form, os: e.target.value })} /></Field><Field label="User / owner"><Input value={form.userName} onChange={(e) => setForm({ ...form, userName: e.target.value })} /></Field>
       <Field label="Compromise"><Select value={form.compromiseStatus} onValueChange={(compromiseStatus: CompromiseStatus) => setForm({ ...form, compromiseStatus })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['unknown','clean','suspected','infected'].map((value) => <SelectItem key={value} value={value}>{label(value)}</SelectItem>)}</SelectContent></Select></Field>
       <Field label="Investigation"><Select value={form.investigationStatus} onValueChange={(investigationStatus: InvestigationStatus) => setForm({ ...form, investigationStatus })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['not_started','in_progress','completed'].map((value) => <SelectItem key={value} value={value}>{label(value)}</SelectItem>)}</SelectContent></Select></Field></div>
+    <div className="grid grid-cols-5 gap-3"><Field label="Site"><SiteSelect value={form.siteId} sites={sites} onChange={(siteId) => setForm({ ...form, siteId })} /></Field>
+      <Field label="Owner (department)"><Input value={form.owner} onChange={(e) => setForm({ ...form, owner: e.target.value })} placeholder="Who owns it" /></Field><Field label="Operated by"><Input value={form.operator} onChange={(e) => setForm({ ...form, operator: e.target.value })} placeholder="Admin team, MSP, vendor" /></Field>
+      <Field label="Origin"><Select value={form.origin} onValueChange={(origin: AssetOrigin) => setForm({ ...form, origin })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{ASSET_ORIGINS.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent></Select></Field>
+      <Field label="Last observed"><Input type="datetime-local" value={form.lastObserved} onChange={(e) => setForm({ ...form, lastObserved: e.target.value })} /></Field></div>
     <div className="grid grid-cols-2 gap-3"><Field label="Properties / findings"><Textarea rows={3} value={form.properties} onChange={(e) => setForm({ ...form, properties: e.target.value })} placeholder="Free text: who owns it, where it runs, what was found…" /></Field><Field label="Scan results (JSON)"><Textarea rows={3} value={form.scanResults} onChange={(e) => setForm({ ...form, scanResults: e.target.value })} /></Field></div>
     <div className="flex gap-2"><Button onClick={onSave} className="bg-cyan-600 hover:bg-cyan-700">Save</Button><Button variant="outline" onClick={onCancel}>Cancel</Button></div>
   </CardContent></Card>;
 }
 
-interface AssetRowsProps { asset: Asset; sightingCount: number; interfaces: NetworkInterface[]; expanded: boolean; onToggle: () => void; onEdit: () => void; onDelete: () => void; interfaceForm: InterfaceFormState; setInterfaceForm: (value: InterfaceFormState) => void; showInterfaceForm: boolean; editingInterfaceId: string | null; networks: Network[]; onBeginInterface: (item?: NetworkInterface) => void; onSaveInterface: () => void; onCancelInterface: () => void; onPrimary: (id: string) => void; onDeleteInterface: (id: string) => void; onNoteSaved: () => void }
+interface AssetRowsProps { asset: Asset; sightingCount: number; interfaces: NetworkInterface[]; expanded: boolean; onToggle: () => void; onEdit: () => void; onDelete: () => void; interfaceForm: InterfaceFormState; setInterfaceForm: (value: InterfaceFormState) => void; showInterfaceForm: boolean; editingInterfaceId: string | null; networks: Network[]; onBeginInterface: (item?: NetworkInterface) => void; onSaveInterface: () => void; onCancelInterface: () => void; onPrimary: (id: string) => void; onDeleteInterface: (id: string) => void; onNoteSaved: () => void; siteName?: string; hostName?: string; assets: Asset[]; relations: AssetRelation[]; onRelationsChanged: () => void }
 function AssetRows(props: AssetRowsProps) {
   const { asset, interfaces, expanded } = props;
   const vmInventory = readStoredVmInventory(asset.properties);
   return <><TableRow className={asset.compromise_status === 'infected' ? 'bg-red-50' : asset.compromise_status === 'suspected' ? 'bg-amber-50' : ''}>
-    <TableCell><Button size="sm" variant="ghost" onClick={props.onToggle}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</Button></TableCell><TableCell className="font-medium">{asset.name}<div className="text-xs text-slate-400">{asset.user_name}</div></TableCell><TableCell><NetworkPlacement networkId={asset.network_id} networkName={asset.network_name} ipAddress={asset.ip_address} networks={props.networks} /></TableCell><TableCell className="font-mono text-xs">{asset.ip_address || '—'}</TableCell><TableCell><Badge variant="outline">{asset.asset_type}</Badge><div className="mt-1 text-xs text-slate-500">{asset.os}</div></TableCell>
+    <TableCell><Button size="sm" variant="ghost" onClick={props.onToggle}>{expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</Button></TableCell><TableCell className="font-medium">{asset.name}<div className="text-xs text-slate-400">{asset.user_name}</div><AssetChips asset={asset} siteName={props.siteName} hostName={props.hostName} /></TableCell><TableCell><NetworkPlacement networkId={asset.network_id} networkName={asset.network_name} ipAddress={asset.ip_address} networks={props.networks} /></TableCell><TableCell className="font-mono text-xs">{asset.ip_address || '—'}{asset.last_observed && <div className="font-sans text-[10px] text-slate-400" title="Last observed">seen {observedLabel(asset.last_observed)}</div>}</TableCell><TableCell><Badge variant="outline">{asset.asset_type}</Badge><div className="mt-1 text-xs text-slate-500">{asset.os}</div></TableCell>
     <TableCell><StatusBadge value={asset.compromise_status} />{props.sightingCount > 0 && <span className="ml-1 rounded bg-red-600 px-1.5 py-0.5 text-xs text-white" title={`${props.sightingCount} IOC sighting(s) recorded on this asset`}>⚠{props.sightingCount}</span>}</TableCell><TableCell><StatusBadge value={asset.investigation_status} /></TableCell><TableCell>{interfaces.length}</TableCell><TableCell className="min-w-40"><QuickNoteCell entityType="asset" id={asset.id} note={asset.quick_note} onSaved={props.onNoteSaved} /></TableCell><TableCell><div className="flex"><Button size="sm" variant="ghost" onClick={props.onEdit}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={props.onDelete}><Trash2 size={14} className="text-red-500" /></Button></div></TableCell>
   </TableRow>{expanded && <TableRow><TableCell colSpan={10} className="bg-slate-50 p-4">
     {vmInventory && <div className="mb-4 rounded border border-violet-200 bg-violet-50 p-3">
-      <div className="mb-2 flex flex-wrap items-center gap-2"><Boxes size={15} className="text-violet-600" /><strong className="text-sm">Imported virtualization inventory</strong><Badge variant="outline">{platformLabel(vmInventory.platform)}</Badge><Badge variant="outline">{vmInventory.kind}</Badge></div>
+      <div className="mb-2 flex flex-wrap items-center gap-2"><Boxes size={15} className="text-violet-600" /><strong className="text-sm">{vmInventory.platform === 'generic' ? 'Imported device record' : 'Imported virtualization inventory'}</strong><Badge variant="outline">{platformLabel(vmInventory.platform)}</Badge>{vmInventory.platform !== 'generic' && <Badge variant="outline">{vmInventory.kind}</Badge>}</div>
       <div className="grid gap-2 text-xs sm:grid-cols-3 lg:grid-cols-6">
         <InventoryField label="Native ID" value={vmInventory.nativeId} />
         <InventoryField label="Host / node" value={vmInventory.hypervisor ?? vmInventory.inventoryScope} />
@@ -327,6 +389,7 @@ function AssetRows(props: AssetRowsProps) {
     <div className="mb-3 flex items-center justify-between"><h3 className="flex items-center gap-2 text-sm font-semibold"><Cable size={15} />Network interfaces</h3><Button size="sm" variant="outline" onClick={() => props.onBeginInterface()}><Plus size={14} className="mr-1" />Add NIC</Button></div>
     <div className="grid gap-2">{interfaces.map((item) => <div key={item.id} className="flex items-center justify-between rounded border bg-white p-2 text-sm"><div className="flex items-center gap-3">{item.is_primary && <Star size={14} className="fill-amber-400 text-amber-500" />}<strong>{item.name}</strong><span><NetworkPlacement networkId={item.network_id} networkName={item.network_name} ipAddress={item.ip_address} networks={props.networks} /></span><code>{item.ip_address}</code><span className="text-slate-500">{item.mac_address}</span></div><div className="flex">{!item.is_primary && <Button size="sm" variant="ghost" onClick={() => props.onPrimary(item.id)} title="Make primary"><Star size={14} /></Button>}<Button size="sm" variant="ghost" onClick={() => props.onBeginInterface(item)}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={() => props.onDeleteInterface(item.id)}><Trash2 size={14} className="text-red-500" /></Button></div></div>)}</div>
     {props.showInterfaceForm && <div className="mt-3 grid grid-cols-6 items-end gap-2 rounded border bg-white p-3"><Field label="Name"><Input value={props.interfaceForm.name} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, name: e.target.value })} /></Field><Field label="Network"><NetworkSelect value={props.interfaceForm.networkId} networks={props.networks} onChange={(networkId) => props.setInterfaceForm({ ...props.interfaceForm, networkId })} /></Field><Field label="IP"><Input value={props.interfaceForm.ipAddress} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, ipAddress: e.target.value })} /></Field><Field label="MAC"><Input value={props.interfaceForm.macAddress} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, macAddress: e.target.value })} /></Field><label className="flex h-9 items-center gap-2"><input type="checkbox" checked={props.interfaceForm.isPrimary} onChange={(e) => props.setInterfaceForm({ ...props.interfaceForm, isPrimary: e.target.checked })} />Primary</label><div className="flex gap-1"><Button size="sm" onClick={props.onSaveInterface}>Save</Button><Button size="sm" variant="outline" onClick={props.onCancelInterface}>Cancel</Button></div></div>}
+    <AssetRelationsPanel asset={asset} assets={props.assets} relations={props.relations} onChanged={props.onRelationsChanged} />
   </TableCell></TableRow>}</>;
 }
 
@@ -343,6 +406,19 @@ function NetworkPlacement({ networkId, networkName, ipAddress, networks }: { net
   return <>Unassigned <span className="ml-1 whitespace-nowrap rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800" title={`${ipAddress} fits ${names}. Choose the right network in Edit.`}>{match.candidates.length} candidate networks</span></>;
 }
 
+/** Where an asset came from, who owns it, and where it sits, as small chips under its name. */
+function AssetChips({ asset, siteName, hostName }: { asset: Asset; siteName?: string; hostName?: string }) {
+  const origin = asset.origin ?? 'unknown';
+  const chips: { text: string; className: string; title: string }[] = [];
+  if (origin === 'discovered') chips.push({ text: 'discovered', className: 'bg-amber-100 text-amber-800', title: 'Found by us; not in the client inventory' });
+  if (origin === 'client_inventory') chips.push({ text: 'client inventory', className: 'bg-slate-100 text-slate-600', title: "Listed in the client's own inventory" });
+  if (asset.owner) chips.push({ text: asset.owner, className: 'bg-cyan-50 text-cyan-800', title: `Owner: ${asset.owner}` });
+  if (hostName) chips.push({ text: `on ${hostName}`, className: 'bg-violet-50 text-violet-800', title: `Runs on ${hostName}` });
+  if (siteName) chips.push({ text: siteName, className: 'bg-emerald-50 text-emerald-800', title: `Site: ${siteName}` });
+  if (!chips.length) return null;
+  return <div className="mt-1 flex flex-wrap gap-1">{chips.map((chip) => <span key={chip.text} title={chip.title} className={`rounded px-1.5 py-0.5 text-[10px] font-normal ${chip.className}`}>{chip.text}</span>)}</div>;
+}
+function SiteSelect({ value, sites, onChange }: { value: string; sites: Site[]; onChange: (value: string) => void }) { return <Select value={value || '__none__'} onValueChange={(next) => onChange(next === '__none__' ? '' : next)}><SelectTrigger aria-label="Site"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__none__">No site</SelectItem>{sites.map((site) => <SelectItem key={site.id} value={site.id}>{site.name}</SelectItem>)}</SelectContent></Select>; }
 function Field({ label: text, children }: { label: string; children: React.ReactNode }) { return <div className="space-y-1"><Label>{text}</Label>{children}</div>; }
 function NetworkSelect({ value, networks, onChange }: { value: string; networks: Network[]; onChange: (value: string) => void }) { return <Select value={value || '__none__'} onValueChange={(next) => onChange(next === '__none__' ? '' : next)}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__none__">Unassigned</SelectItem>{networks.map((network) => <SelectItem key={network.id} value={network.id}>{network.name}</SelectItem>)}</SelectContent></Select>; }
 function SmallSelect({ value, onChange, label: text, items }: { value: string; onChange: (value: string) => void; label: string; items: [string,string][] }) { return <div><Label className="text-xs">{text}</Label><Select value={value} onValueChange={onChange}><SelectTrigger className="w-44"><SelectValue /></SelectTrigger><SelectContent>{items.map(([id,name]) => <SelectItem key={id} value={id}>{name}</SelectItem>)}</SelectContent></Select></div>; }

@@ -36,6 +36,15 @@ pub struct Network {
     pub vlan_id: Option<String>,
     #[serde(default)]
     pub quick_note: Option<String>,
+    /// The site this segment is at, when recorded.
+    #[serde(default)]
+    pub site_id: Option<String>,
+    /// Who the client says owns or governs the segment (department, business unit).
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Who runs it day to day (admin team, managed service provider, vendor).
+    #[serde(default)]
+    pub operator: Option<String>,
     pub created_at: String,
 }
 
@@ -62,7 +71,85 @@ pub struct Asset {
     pub scan_results: Option<String>,
     #[serde(default)]
     pub quick_note: Option<String>,
+    #[serde(default)]
+    pub site_id: Option<String>,
+    /// Who the client says owns the asset (department, business owner).
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Who administers it (admin team, managed service provider, vendor).
+    #[serde(default)]
+    pub operator: Option<String>,
+    /// How the case learned of the asset: the client's own inventory, our own
+    /// discovery, or not recorded.
+    #[serde(default = "default_asset_origin")]
+    pub origin: String,
+    /// When the asset was last seen active (ARP entry, scan, lease), RFC 3339.
+    #[serde(default)]
+    pub last_observed: Option<String>,
     pub created_at: String,
+}
+
+/// A physical or organizational location: a head office, a plant, a data
+/// center. Networks and assets can say which site they are at.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Site {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub description: String,
+    pub created_at: String,
+}
+
+/// A directed link between two assets: a VM runs on a hypervisor host, a host
+/// is managed by a console, a server backs up to another. `source_name` and
+/// `target_name` are the asset names when the row was read, for display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetRelation {
+    pub id: String,
+    pub source_asset_id: String,
+    #[serde(default)]
+    pub source_name: Option<String>,
+    pub target_asset_id: String,
+    #[serde(default)]
+    pub target_name: Option<String>,
+    #[serde(default = "default_relation_type")]
+    pub relation_type: String,
+    #[serde(default)]
+    pub note: String,
+    pub created_at: String,
+}
+
+/// The environment fields of an asset that older callers do not send. On
+/// create a missing field takes its default; on update a missing field keeps
+/// the stored value and an empty string clears it, so a caller that predates
+/// these fields cannot erase them.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetContext {
+    #[serde(default)]
+    pub site_id: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub operator: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub last_observed: Option<String>,
+}
+
+/// The same for a network.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkContext {
+    #[serde(default)]
+    pub site_id: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub operator: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,10 +530,22 @@ pub struct ExportData {
     pub investigation_views: Vec<InvestigationView>,
     #[serde(default)]
     pub captures: Vec<Capture>,
+    #[serde(default)]
+    pub sites: Vec<Site>,
+    #[serde(default)]
+    pub asset_relations: Vec<AssetRelation>,
 }
 
 fn default_format_version() -> u32 {
     1
+}
+
+fn default_asset_origin() -> String {
+    "unknown".to_string()
+}
+
+fn default_relation_type() -> String {
+    "other".to_string()
 }
 
 fn default_capture_status() -> String {
@@ -511,6 +610,9 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             description TEXT NOT NULL DEFAULT '',
             vlan_id TEXT,
             quick_note TEXT,
+            site_id TEXT REFERENCES sites(id),
+            owner TEXT,
+            operator TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS assets (
@@ -528,6 +630,11 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             properties TEXT,
             scan_results TEXT,
             quick_note TEXT,
+            site_id TEXT REFERENCES sites(id),
+            owner TEXT,
+            operator TEXT,
+            origin TEXT NOT NULL DEFAULT 'unknown',
+            last_observed TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS network_interfaces (
@@ -763,6 +870,28 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
             changes_json TEXT NOT NULL,
             PRIMARY KEY (merge_commit_id, commit_id)
         );
+        -- Where equipment is. Networks and assets point at a site; a site cannot
+        -- be deleted while anything does.
+        CREATE TABLE IF NOT EXISTS sites (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            location TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        -- Directed links between assets (VM runs on host, managed by, backs up to).
+        CREATE TABLE IF NOT EXISTS asset_relations (
+            id TEXT PRIMARY KEY,
+            source_asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+            target_asset_id TEXT NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+            relation_type TEXT NOT NULL DEFAULT 'other',
+            note TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            CHECK (source_asset_id <> target_asset_id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_asset_relations_unique
+            ON asset_relations(source_asset_id, target_asset_id, relation_type);
+        CREATE INDEX IF NOT EXISTS idx_asset_relations_target ON asset_relations(target_asset_id);
         CREATE INDEX IF NOT EXISTS idx_assets_network ON assets(network_id);
         CREATE INDEX IF NOT EXISTS idx_timeline_asset ON timeline_events(asset_id);
         CREATE INDEX IF NOT EXISTS idx_timeline_time ON timeline_events(timestamp);
@@ -787,7 +916,7 @@ pub fn init_database(conn: &Connection) -> AppResult<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_investigation_views_name ON investigation_views(LOWER(name));
         CREATE INDEX IF NOT EXISTS idx_captures_status ON captures(status);
         CREATE INDEX IF NOT EXISTS idx_history_merged_commits_merge ON history_merged_commits(merge_commit_id);
-        PRAGMA user_version = 8;",
+        PRAGMA user_version = 9;",
     )
     .map_err(|e| e.to_string())
 }
@@ -985,6 +1114,25 @@ pub fn validate_and_migrate_case(conn: &mut Connection) -> AppResult<()> {
         conn.execute("ALTER TABLE timeline_events ADD COLUMN source_ref TEXT", [])
             .map_err(|e| e.to_string())?;
     }
+    // Schema 9: sites, who is responsible, and how an asset became known.
+    for (table, column, definition) in [
+        ("networks", "site_id", "TEXT REFERENCES sites(id)"),
+        ("networks", "owner", "TEXT"),
+        ("networks", "operator", "TEXT"),
+        ("assets", "site_id", "TEXT REFERENCES sites(id)"),
+        ("assets", "owner", "TEXT"),
+        ("assets", "operator", "TEXT"),
+        ("assets", "origin", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("assets", "last_observed", "TEXT"),
+    ] {
+        if !column_exists(conn, table, column)? {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
     repair_legacy_references(conn)?;
     backfill_primary_interfaces(conn)?;
     initialize_history(conn)?;
@@ -1014,6 +1162,24 @@ fn repair_legacy_references(conn: &mut Connection) -> AppResult<()> {
     tx.execute(
         "UPDATE timeline_events SET clock_profile_id=NULL WHERE clock_profile_id IS NOT NULL
          AND clock_profile_id NOT IN (SELECT id FROM clock_profiles)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE networks SET site_id=NULL WHERE site_id IS NOT NULL
+         AND site_id NOT IN (SELECT id FROM sites)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE assets SET site_id=NULL WHERE site_id IS NOT NULL
+         AND site_id NOT IN (SELECT id FROM sites)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM asset_relations WHERE source_asset_id NOT IN (SELECT id FROM assets)
+         OR target_asset_id NOT IN (SELECT id FROM assets)",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -1330,10 +1496,31 @@ fn map_case(row: &rusqlite::Row<'_>) -> rusqlite::Result<Case> {
     })
 }
 
-pub fn get_networks(conn: &Connection) -> AppResult<Vec<Network>> {
-    query_vec(conn, "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,created_at FROM networks ORDER BY name", [], |row| {
-        Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, quick_note: row.get(6)?, created_at: row.get(7)? })
+const NETWORK_SELECT: &str = "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,site_id,owner,operator,created_at FROM networks";
+
+fn map_network(row: &rusqlite::Row<'_>) -> rusqlite::Result<Network> {
+    Ok(Network {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        subnet: row.get(2)?,
+        network_type: row.get(3)?,
+        description: row.get(4)?,
+        vlan_id: row.get(5)?,
+        quick_note: row.get(6)?,
+        site_id: row.get(7)?,
+        owner: row.get(8)?,
+        operator: row.get(9)?,
+        created_at: row.get(10)?,
     })
+}
+
+pub fn get_networks(conn: &Connection) -> AppResult<Vec<Network>> {
+    query_vec(
+        conn,
+        &format!("{NETWORK_SELECT} ORDER BY name"),
+        [],
+        map_network,
+    )
 }
 
 fn validate_topology_layout(layout: &str) -> AppResult<()> {
@@ -1435,14 +1622,14 @@ pub fn save_topology_view(
 pub fn get_assets(conn: &Connection) -> AppResult<Vec<Asset>> {
     query_vec(conn,
         "SELECT a.id,a.network_id,n.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,
-                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.created_at
+                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.site_id,a.owner,a.operator,a.origin,a.last_observed,a.created_at
          FROM assets a LEFT JOIN networks n ON n.id=a.network_id ORDER BY a.name", [], map_asset)
 }
 
 pub fn get_assets_by_network(conn: &Connection, network_id: &str) -> AppResult<Vec<Asset>> {
     query_vec(conn,
         "SELECT DISTINCT a.id,a.network_id,pn.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,
-                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.created_at
+                a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.site_id,a.owner,a.operator,a.origin,a.last_observed,a.created_at
          FROM assets a LEFT JOIN networks pn ON pn.id=a.network_id
          LEFT JOIN network_interfaces ni ON ni.asset_id=a.id
          WHERE a.network_id=?1 OR ni.network_id=?1 ORDER BY a.name", params![network_id], map_asset)
@@ -1465,7 +1652,12 @@ fn map_asset(row: &rusqlite::Row<'_>) -> rusqlite::Result<Asset> {
         properties: row.get(12)?,
         scan_results: row.get(13)?,
         quick_note: row.get(14)?,
-        created_at: row.get(15)?,
+        site_id: row.get(15)?,
+        owner: row.get(16)?,
+        operator: row.get(17)?,
+        origin: row.get(18)?,
+        last_observed: row.get(19)?,
+        created_at: row.get(20)?,
     })
 }
 
@@ -1915,6 +2107,8 @@ const SEARCH_SOURCES: &[SearchSource] = &[
             ("MAC", "mac_address"),
             ("OS", "os"),
             ("user / owner", "user_name"),
+            ("owner", "owner"),
+            ("operated by", "operator"),
             ("quick note", "quick_note"),
             ("details", "properties"),
         ],
@@ -1940,7 +2134,20 @@ const SEARCH_SOURCES: &[SearchSource] = &[
             ("subnet", "subnet"),
             ("VLAN", "vlan_id"),
             ("description", "description"),
+            ("owner", "owner"),
+            ("operated by", "operator"),
             ("quick note", "quick_note"),
+        ],
+    },
+    SearchSource {
+        entity_type: "site",
+        from: "sites",
+        id_expr: "id",
+        title_expr: "name",
+        fields: &[
+            ("name", "name"),
+            ("location", "location"),
+            ("description", "description"),
         ],
     },
     SearchSource {
@@ -2513,10 +2720,23 @@ where
 /// Asset types every write path accepts: the Assets form, snapshot and bundle
 /// upserts, and reviewed imports. Keep in step with `BATCH_ASSET_TYPES` in
 /// `src/lib/vm-inventory.ts` and the type dropdown in `AssetManager.tsx`.
+const ASSET_ORIGINS: &[&str] = &["unknown", "client_inventory", "discovered"];
+const RELATION_TYPES: &[&str] = &[
+    "runs_on",
+    "managed_by",
+    "backs_up_to",
+    "depends_on",
+    "connects_to",
+    "other",
+];
+/// Owner and operator are names of departments or vendors, not documents.
+const MAX_PARTY_CHARS: usize = 200;
+
 const ASSET_TYPES: &[&str] = &[
     "workstation",
     "server",
     "vm",
+    "hypervisor",
     "mobile",
     "laptop",
     "router",
@@ -3002,7 +3222,86 @@ fn validate_network_model(value: &Network) -> AppResult<()> {
         "network type",
         &value.network_type,
         &["LAN", "DMZ", "DMS", "WAN", "GUEST", "MANAGEMENT", "OTHER"],
-    )
+    )?;
+    clean_text("Owner", value.owner.as_deref(), MAX_PARTY_CHARS)?;
+    clean_text("Operated by", value.operator.as_deref(), MAX_PARTY_CHARS)?;
+    Ok(())
+}
+
+/// Trimmed text, or `None` when it is empty. Text over `max` characters is refused.
+fn clean_text(label: &str, value: Option<&str>, max: usize) -> AppResult<Option<String>> {
+    let value = value.map(str::trim).filter(|item| !item.is_empty());
+    if let Some(item) = value {
+        if item.chars().count() > max {
+            return Err(format!("{label} is limited to {max} characters"));
+        }
+    }
+    Ok(value.map(String::from))
+}
+
+fn apply_asset_context(
+    conn: &Connection,
+    asset: &mut Asset,
+    context: &AssetContext,
+) -> AppResult<()> {
+    if let Some(site) = context.site_id.as_deref() {
+        let site = site.trim();
+        asset.site_id = if site.is_empty() {
+            None
+        } else if exists(conn, "sites", site)? {
+            Some(site.to_string())
+        } else {
+            return Err("Selected site was not found".into());
+        };
+    }
+    if let Some(owner) = context.owner.as_deref() {
+        asset.owner = clean_text("Owner", Some(owner), MAX_PARTY_CHARS)?;
+    }
+    if let Some(operator) = context.operator.as_deref() {
+        asset.operator = clean_text("Operated by", Some(operator), MAX_PARTY_CHARS)?;
+    }
+    if let Some(origin) = context.origin.as_deref() {
+        let origin = origin.trim();
+        asset.origin = if origin.is_empty() {
+            default_asset_origin()
+        } else {
+            validate_enum("asset origin", origin, ASSET_ORIGINS)?;
+            origin.to_string()
+        };
+    }
+    if let Some(observed) = context.last_observed.as_deref() {
+        let observed = observed.trim();
+        asset.last_observed = if observed.is_empty() {
+            None
+        } else {
+            Some(normalize_timestamp("Last observed", observed)?)
+        };
+    }
+    Ok(())
+}
+
+fn apply_network_context(
+    conn: &Connection,
+    network: &mut Network,
+    context: &NetworkContext,
+) -> AppResult<()> {
+    if let Some(site) = context.site_id.as_deref() {
+        let site = site.trim();
+        network.site_id = if site.is_empty() {
+            None
+        } else if exists(conn, "sites", site)? {
+            Some(site.to_string())
+        } else {
+            return Err("Selected site was not found".into());
+        };
+    }
+    if let Some(owner) = context.owner.as_deref() {
+        network.owner = clean_text("Owner", Some(owner), MAX_PARTY_CHARS)?;
+    }
+    if let Some(operator) = context.operator.as_deref() {
+        network.operator = clean_text("Operated by", Some(operator), MAX_PARTY_CHARS)?;
+    }
+    Ok(())
 }
 
 fn validate_asset_model(value: &Asset) -> AppResult<()> {
@@ -3020,7 +3319,32 @@ fn validate_asset_model(value: &Asset) -> AppResult<()> {
         &value.investigation_status,
         &["not_started", "in_progress", "completed"],
     )?;
+    validate_enum("asset origin", &value.origin, ASSET_ORIGINS)?;
+    if let Some(observed) = value.last_observed.as_deref() {
+        validate_timestamp("Last observed", observed)?;
+    }
+    clean_text("Owner", value.owner.as_deref(), MAX_PARTY_CHARS)?;
+    clean_text("Operated by", value.operator.as_deref(), MAX_PARTY_CHARS)?;
     validate_optional_json("Scan results", value.scan_results.as_deref())
+}
+
+fn validate_site_model(value: &Site) -> AppResult<()> {
+    validate_required("Site name", &value.name)?;
+    clean_text("Site name", Some(&value.name), 200)?;
+    clean_text("Site location", Some(&value.location), 300)?;
+    clean_text("Site description", Some(&value.description), 4_000)?;
+    Ok(())
+}
+
+fn validate_relation_model(value: &AssetRelation) -> AppResult<()> {
+    validate_enum("relation type", &value.relation_type, RELATION_TYPES)?;
+    validate_required("Relation source", &value.source_asset_id)?;
+    validate_required("Relation target", &value.target_asset_id)?;
+    if value.source_asset_id == value.target_asset_id {
+        return Err("An asset cannot be related to itself".into());
+    }
+    clean_text("Relation note", Some(&value.note), 2_000)?;
+    Ok(())
 }
 
 fn validate_interface_model(value: &NetworkInterface) -> AppResult<()> {
@@ -3494,6 +3818,12 @@ fn validate_export_data(data: &ExportData) -> AppResult<()> {
     for value in &data.captures {
         validate_capture_model(value)?;
     }
+    for value in &data.sites {
+        validate_site_model(value)?;
+    }
+    for value in &data.asset_relations {
+        validate_relation_model(value)?;
+    }
     Ok(())
 }
 
@@ -3530,12 +3860,10 @@ where
 pub fn get_entity_json(conn: &Connection, entity_type: &str, id: &str) -> AppResult<Option<Value>> {
     match entity_type {
         "case" => get_case(conn)?.filter(|v| v.id == id).map(|v| to_value(&v)).transpose(),
-        "network" => get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,created_at FROM networks WHERE id=?1", id, |row| {
-            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, quick_note: row.get(6)?, created_at: row.get(7)? })
-        })?.map(|v| to_value(&v)).transpose(),
+        "network" => get_row_optional(conn, &format!("{NETWORK_SELECT} WHERE id=?1"), id, map_network)?.map(|v| to_value(&v)).transpose(),
         "asset" => get_row_optional(conn,
             "SELECT a.id,a.network_id,n.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,a.suspicious,
-                    a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.created_at
+                    a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.site_id,a.owner,a.operator,a.origin,a.last_observed,a.created_at
              FROM assets a LEFT JOIN networks n ON n.id=a.network_id WHERE a.id=?1", id, map_asset)?.map(|v| to_value(&v)).transpose(),
         "network_interface" => get_row_optional(conn,
             "SELECT ni.id,ni.asset_id,ni.name,ni.ip_address,ni.mac_address,ni.network_id,n.name,ni.is_primary
@@ -3583,6 +3911,10 @@ pub fn get_entity_json(conn: &Connection, entity_type: &str, id: &str) -> AppRes
         "attack_edge" => get_row_optional(conn, &format!("{ATTACK_EDGE_SELECT} WHERE e.id=?1"), id, map_attack_edge)?
             .map(|v| to_value(&v)).transpose(),
         "capture" => get_row_optional(conn, &format!("{CAPTURE_SELECT} WHERE id=?1"), id, map_capture)?
+            .map(|v| to_value(&v)).transpose(),
+        "site" => get_row_optional(conn, &format!("{SITE_SELECT} WHERE id=?1"), id, map_site)?
+            .map(|v| to_value(&v)).transpose(),
+        "asset_relation" => get_row_optional(conn, &format!("{RELATION_SELECT} WHERE r.id=?1"), id, map_relation)?
             .map(|v| to_value(&v)).transpose(),
         _ => Err(format!("Unsupported entity type: {entity_type}")),
     }
@@ -3718,6 +4050,8 @@ fn link_unassigned_endpoints_to_network(
     Ok(changes)
 }
 
+/// Shorthand for callers (and tests) that have no environment fields to send.
+#[allow(dead_code)]
 pub fn create_network(
     conn: &mut Connection,
     actor: &ActorIdentity,
@@ -3727,6 +4061,29 @@ pub fn create_network(
     description: &str,
     vlan_id: Option<&str>,
 ) -> AppResult<Network> {
+    create_network_with_context(
+        conn,
+        actor,
+        name,
+        subnet,
+        network_type,
+        description,
+        vlan_id,
+        &NetworkContext::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_network_with_context(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    name: &str,
+    subnet: &str,
+    network_type: &str,
+    description: &str,
+    vlan_id: Option<&str>,
+    context: &NetworkContext,
+) -> AppResult<Network> {
     validate_required("Network name", name)?;
     validate_subnet(subnet.trim())?;
     validate_enum(
@@ -3734,7 +4091,7 @@ pub fn create_network(
         network_type,
         &["LAN", "DMZ", "DMS", "WAN", "GUEST", "MANAGEMENT", "OTHER"],
     )?;
-    let item = Network {
+    let mut item = Network {
         id: Uuid::new_v4().to_string(),
         name: name.trim().into(),
         subnet: subnet.trim().into(),
@@ -3745,12 +4102,16 @@ pub fn create_network(
             .filter(|v| !v.is_empty())
             .map(String::from),
         quick_note: None,
+        site_id: None,
+        owner: None,
+        operator: None,
         created_at: Utc::now().to_rfc3339(),
     };
+    apply_network_context(conn, &mut item, context)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT INTO networks(id,name,subnet,network_type,description,vlan_id,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        params![item.id,item.name,item.subnet,item.network_type,item.description,item.vlan_id,item.created_at],
+        "INSERT INTO networks(id,name,subnet,network_type,description,vlan_id,site_id,owner,operator,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![item.id,item.name,item.subnet,item.network_type,item.description,item.vlan_id,item.site_id,item.owner,item.operator,item.created_at],
     ).map_err(|e| e.to_string())?;
     let mut changes = vec![single_change(
         "network",
@@ -3773,6 +4134,8 @@ pub fn create_network(
     Ok(item)
 }
 
+/// Shorthand for callers (and tests) that have no environment fields to send.
+#[allow(dead_code)]
 pub fn update_network(
     conn: &mut Connection,
     actor: &ActorIdentity,
@@ -3783,6 +4146,31 @@ pub fn update_network(
     description: &str,
     vlan_id: Option<&str>,
 ) -> AppResult<Network> {
+    update_network_with_context(
+        conn,
+        actor,
+        id,
+        name,
+        subnet,
+        network_type,
+        description,
+        vlan_id,
+        &NetworkContext::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_network_with_context(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    id: &str,
+    name: &str,
+    subnet: &str,
+    network_type: &str,
+    description: &str,
+    vlan_id: Option<&str>,
+    context: &NetworkContext,
+) -> AppResult<Network> {
     validate_required("Network name", name)?;
     validate_subnet(subnet.trim())?;
     validate_enum(
@@ -3791,10 +4179,15 @@ pub fn update_network(
         &["LAN", "DMZ", "DMS", "WAN", "GUEST", "MANAGEMENT", "OTHER"],
     )?;
     let before: Network = require_existing(
-        get_row_optional(conn, "SELECT id,name,subnet,network_type,description,vlan_id,quick_note,created_at FROM networks WHERE id=?1", id, |row| {
-            Ok(Network { id: row.get(0)?, name: row.get(1)?, subnet: row.get(2)?, network_type: row.get(3)?, description: row.get(4)?, vlan_id: row.get(5)?, quick_note: row.get(6)?, created_at: row.get(7)? })
-        })?, "Network")?;
-    let after = Network {
+        get_row_optional(
+            conn,
+            &format!("{NETWORK_SELECT} WHERE id=?1"),
+            id,
+            map_network,
+        )?,
+        "Network",
+    )?;
+    let mut after = Network {
         name: name.trim().into(),
         subnet: subnet.trim().into(),
         network_type: network_type.into(),
@@ -3805,9 +4198,10 @@ pub fn update_network(
             .map(String::from),
         ..before.clone()
     };
+    apply_network_context(conn, &mut after, context)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    let changed = tx.execute("UPDATE networks SET name=?1,subnet=?2,network_type=?3,description=?4,vlan_id=?5 WHERE id=?6",
-        params![after.name,after.subnet,after.network_type,after.description,after.vlan_id,id]).map_err(|e| e.to_string())?;
+    let changed = tx.execute("UPDATE networks SET name=?1,subnet=?2,network_type=?3,description=?4,vlan_id=?5,site_id=?6,owner=?7,operator=?8 WHERE id=?9",
+        params![after.name,after.subnet,after.network_type,after.description,after.vlan_id,after.site_id,after.owner,after.operator,id]).map_err(|e| e.to_string())?;
     if changed == 0 {
         return Err("Network was not found".into());
     }
@@ -3875,6 +4269,8 @@ pub fn delete_network(conn: &mut Connection, actor: &ActorIdentity, id: &str) ->
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// Shorthand for callers (and tests) that have no environment fields to send.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn create_asset(
     conn: &mut Connection,
@@ -3890,6 +4286,41 @@ pub fn create_asset(
     investigation_status: &str,
     properties: Option<&str>,
     scan_results: Option<&str>,
+) -> AppResult<Asset> {
+    create_asset_with_context(
+        conn,
+        actor,
+        network_id,
+        name,
+        ip_address,
+        mac_address,
+        asset_type,
+        os,
+        user_name,
+        compromise_status,
+        investigation_status,
+        properties,
+        scan_results,
+        &AssetContext::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_asset_with_context(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    network_id: Option<&str>,
+    name: &str,
+    ip_address: &str,
+    mac_address: Option<&str>,
+    asset_type: &str,
+    os: Option<&str>,
+    user_name: Option<&str>,
+    compromise_status: &str,
+    investigation_status: &str,
+    properties: Option<&str>,
+    scan_results: Option<&str>,
+    context: &AssetContext,
 ) -> AppResult<Asset> {
     validate_required("Asset name", name)?;
     validate_ip(ip_address.trim())?;
@@ -3929,7 +4360,7 @@ pub fn create_asset(
             .map_or((None, None), |(id, name)| (Some(id), name)),
     };
     let suspicious = matches!(compromise_status, "suspected" | "infected");
-    let item = Asset {
+    let mut item = Asset {
         id: Uuid::new_v4().to_string(),
         network_id,
         network_name,
@@ -3960,14 +4391,21 @@ pub fn create_asset(
             .filter(|v| !v.is_empty())
             .map(String::from),
         quick_note: None,
+        site_id: None,
+        owner: None,
+        operator: None,
+        origin: default_asset_origin(),
+        last_observed: None,
         created_at: Utc::now().to_rfc3339(),
     };
+    apply_asset_context(conn, &mut item, context)?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute(
-        "INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        "INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,site_id,owner,operator,origin,last_observed,created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         params![item.id,item.network_id,item.name,item.ip_address,item.mac_address,item.asset_type,item.os,item.user_name,
-            if item.suspicious {1} else {0},item.compromise_status,item.investigation_status,item.properties,item.scan_results,item.created_at]
+            if item.suspicious {1} else {0},item.compromise_status,item.investigation_status,item.properties,item.scan_results,
+            item.site_id,item.owner,item.operator,item.origin,item.last_observed,item.created_at]
     ).map_err(|e| e.to_string())?;
     let mut changes = vec![single_change(
         "asset",
@@ -4008,6 +4446,8 @@ pub fn create_asset(
     Ok(item)
 }
 
+/// Shorthand for callers (and tests) that have no environment fields to send.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn update_asset(
     conn: &mut Connection,
@@ -4024,6 +4464,43 @@ pub fn update_asset(
     investigation_status: &str,
     properties: Option<&str>,
     scan_results: Option<&str>,
+) -> AppResult<Asset> {
+    update_asset_with_context(
+        conn,
+        actor,
+        id,
+        network_id,
+        name,
+        ip_address,
+        mac_address,
+        asset_type,
+        os,
+        user_name,
+        compromise_status,
+        investigation_status,
+        properties,
+        scan_results,
+        &AssetContext::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn update_asset_with_context(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    id: &str,
+    network_id: Option<&str>,
+    name: &str,
+    ip_address: &str,
+    mac_address: Option<&str>,
+    asset_type: &str,
+    os: Option<&str>,
+    user_name: Option<&str>,
+    compromise_status: &str,
+    investigation_status: &str,
+    properties: Option<&str>,
+    scan_results: Option<&str>,
+    context: &AssetContext,
 ) -> AppResult<Asset> {
     validate_required("Asset name", name)?;
     validate_ip(ip_address.trim())?;
@@ -4069,7 +4546,7 @@ pub fn update_asset(
         }
         None => (None, None),
     };
-    let after = Asset {
+    let mut after = Asset {
         network_id,
         network_name,
         name: name.trim().into(),
@@ -4100,15 +4577,17 @@ pub fn update_asset(
             .map(String::from),
         ..before.clone()
     };
+    apply_asset_context(conn, &mut after, context)?;
     let primary_before = get_network_interfaces(conn, Some(id))?
         .into_iter()
         .find(|v| v.is_primary);
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let changed = tx.execute(
         "UPDATE assets SET network_id=?1,name=?2,ip_address=?3,mac_address=?4,asset_type=?5,os=?6,user_name=?7,suspicious=?8,
-         compromise_status=?9,investigation_status=?10,properties=?11,scan_results=?12 WHERE id=?13",
+         compromise_status=?9,investigation_status=?10,properties=?11,scan_results=?12,site_id=?13,owner=?14,operator=?15,origin=?16,last_observed=?17 WHERE id=?18",
         params![after.network_id,after.name,after.ip_address,after.mac_address,after.asset_type,after.os,after.user_name,
-            if after.suspicious {1}else{0},after.compromise_status,after.investigation_status,after.properties,after.scan_results,id]
+            if after.suspicious {1}else{0},after.compromise_status,after.investigation_status,after.properties,after.scan_results,
+            after.site_id,after.owner,after.operator,after.origin,after.last_observed,id]
     ).map_err(|e| e.to_string())?;
     if changed == 0 {
         return Err("Asset was not found".into());
@@ -4280,8 +4759,26 @@ pub fn delete_asset(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> A
                 || (edge.target_kind == "asset" && edge.target_id == id)
         })
         .collect();
+    let relations: Vec<AssetRelation> = get_asset_relations(conn)?
+        .into_iter()
+        .filter(|relation| relation.source_asset_id == id || relation.target_asset_id == id)
+        .collect();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let mut changes = Vec::new();
+    for relation in relations {
+        tx.execute(
+            "DELETE FROM asset_relations WHERE id=?1",
+            params![relation.id],
+        )
+        .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "asset_relation",
+            &relation.id,
+            "delete",
+            Some(to_value(&relation)?),
+            None,
+        ));
+    }
     for sighting in sightings {
         tx.execute(
             "DELETE FROM ioc_sightings WHERE id=?1",
@@ -6940,6 +7437,8 @@ pub fn export_case_data(conn: &Connection) -> AppResult<ExportData> {
             views
         },
         captures: get_captures(conn)?,
+        sites: get_sites(conn)?,
+        asset_relations: get_asset_relations(conn)?,
     })
 }
 
@@ -6984,11 +7483,17 @@ pub fn import_case_data(
             }
         }};
     }
+    for v in &data.sites {
+        insert_item!("sites","site",&v.id,"INSERT OR IGNORE INTO sites(id,name,location,description,created_at) VALUES (?1,?2,?3,?4,?5)",params![v.id,v.name,v.location,v.description,v.created_at],v);
+    }
     for v in &data.networks {
-        insert_item!("networks","network",&v.id,"INSERT OR IGNORE INTO networks(id,name,subnet,network_type,description,vlan_id,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.quick_note,v.created_at],v);
+        insert_item!("networks","network",&v.id,"INSERT OR IGNORE INTO networks(id,name,subnet,network_type,description,vlan_id,quick_note,site_id,owner,operator,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.quick_note,v.site_id,v.owner,v.operator,v.created_at],v);
     }
     for v in &data.assets {
-        insert_item!("assets","asset",&v.id,"INSERT OR IGNORE INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.quick_note,v.created_at],v);
+        insert_item!("assets","asset",&v.id,"INSERT OR IGNORE INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,quick_note,site_id,owner,operator,origin,last_observed,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.quick_note,v.site_id,v.owner,v.operator,v.origin,v.last_observed,v.created_at],v);
+    }
+    for v in &data.asset_relations {
+        insert_item!("asset_relations","asset_relation",&v.id,"INSERT OR IGNORE INTO asset_relations(id,source_asset_id,target_asset_id,relation_type,note,created_at) VALUES (?1,?2,?3,?4,?5,?6)",params![v.id,v.source_asset_id,v.target_asset_id,v.relation_type,v.note,v.created_at],v);
     }
     for v in &data.network_interfaces {
         insert_item!("network_interfaces","network_interface",&v.id,"INSERT OR IGNORE INTO network_interfaces(id,asset_id,name,ip_address,mac_address,network_id,is_primary) VALUES (?1,?2,?3,?4,?5,?6,?7)",params![v.id,v.asset_id,v.name,v.ip_address,v.mac_address,v.network_id,if v.is_primary{1}else{0}],v);
@@ -7096,12 +7601,28 @@ pub fn upsert_entity_json(tx: &Transaction<'_>, entity_type: &str, value: &Value
         "network" => {
             let v: Network = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             validate_network_model(&v)?;
-            tx.execute("INSERT INTO networks(id,name,subnet,network_type,description,vlan_id,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET name=excluded.name,subnet=excluded.subnet,network_type=excluded.network_type,description=excluded.description,vlan_id=excluded.vlan_id,quick_note=excluded.quick_note",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.quick_note,v.created_at]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO networks(id,name,subnet,network_type,description,vlan_id,quick_note,site_id,owner,operator,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(id) DO UPDATE SET name=excluded.name,subnet=excluded.subnet,network_type=excluded.network_type,description=excluded.description,vlan_id=excluded.vlan_id,quick_note=excluded.quick_note,site_id=excluded.site_id,owner=excluded.owner,operator=excluded.operator",params![v.id,v.name,v.subnet,v.network_type,v.description,v.vlan_id,v.quick_note,v.site_id,v.owner,v.operator,v.created_at]).map_err(|e|e.to_string())?;
+        }
+        "site" => {
+            let v: Site = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            validate_site_model(&v)?;
+            tx.execute("INSERT INTO sites(id,name,location,description,created_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET name=excluded.name,location=excluded.location,description=excluded.description",params![v.id,v.name,v.location,v.description,v.created_at]).map_err(|e|e.to_string())?;
+        }
+        "asset_relation" => {
+            let v: AssetRelation =
+                serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+            validate_relation_model(&v)?;
+            if !exists(tx, "assets", &v.source_asset_id)?
+                || !exists(tx, "assets", &v.target_asset_id)?
+            {
+                return Err("Both assets of a relation must exist".into());
+            }
+            tx.execute("INSERT INTO asset_relations(id,source_asset_id,target_asset_id,relation_type,note,created_at) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET source_asset_id=excluded.source_asset_id,target_asset_id=excluded.target_asset_id,relation_type=excluded.relation_type,note=excluded.note",params![v.id,v.source_asset_id,v.target_asset_id,v.relation_type,v.note,v.created_at]).map_err(relation_sql_error)?;
         }
         "asset" => {
             let v: Asset = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
             validate_asset_model(&v)?;
-            tx.execute("INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,quick_note,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,ip_address=excluded.ip_address,mac_address=excluded.mac_address,asset_type=excluded.asset_type,os=excluded.os,user_name=excluded.user_name,suspicious=excluded.suspicious,compromise_status=excluded.compromise_status,investigation_status=excluded.investigation_status,properties=excluded.properties,scan_results=excluded.scan_results,quick_note=excluded.quick_note",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.quick_note,v.created_at]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO assets(id,network_id,name,ip_address,mac_address,asset_type,os,user_name,suspicious,compromise_status,investigation_status,properties,scan_results,quick_note,site_id,owner,operator,origin,last_observed,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20) ON CONFLICT(id) DO UPDATE SET network_id=excluded.network_id,name=excluded.name,ip_address=excluded.ip_address,mac_address=excluded.mac_address,asset_type=excluded.asset_type,os=excluded.os,user_name=excluded.user_name,suspicious=excluded.suspicious,compromise_status=excluded.compromise_status,investigation_status=excluded.investigation_status,properties=excluded.properties,scan_results=excluded.scan_results,quick_note=excluded.quick_note,site_id=excluded.site_id,owner=excluded.owner,operator=excluded.operator,origin=excluded.origin,last_observed=excluded.last_observed",params![v.id,v.network_id,v.name,v.ip_address,v.mac_address,v.asset_type,v.os,v.user_name,if v.suspicious{1}else{0},v.compromise_status,v.investigation_status,v.properties,v.scan_results,v.quick_note,v.site_id,v.owner,v.operator,v.origin,v.last_observed,v.created_at]).map_err(|e|e.to_string())?;
         }
         "network_interface" => {
             let v: NetworkInterface =
@@ -7327,11 +7848,756 @@ pub fn delete_entity_direct(tx: &Transaction<'_>, entity_type: &str, id: &str) -
         "ioc_sighting" => "ioc_sightings",
         "attack_edge" => "attack_edges",
         "capture" => "captures",
+        "site" => "sites",
+        "asset_relation" => "asset_relations",
         _ => return Err(format!("Unsupported deletion type: {entity_type}")),
     };
     tx.execute(&format!("DELETE FROM {table} WHERE id=?1"), params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ---- sites -----------------------------------------------------------------
+
+const SITE_SELECT: &str = "SELECT id,name,location,description,created_at FROM sites";
+
+fn map_site(row: &rusqlite::Row<'_>) -> rusqlite::Result<Site> {
+    Ok(Site {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        location: row.get(2)?,
+        description: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
+pub fn get_sites(conn: &Connection) -> AppResult<Vec<Site>> {
+    query_vec(
+        conn,
+        &format!("{SITE_SELECT} ORDER BY name COLLATE NOCASE"),
+        [],
+        map_site,
+    )
+}
+
+fn site_name_taken(conn: &Connection, name: &str, except_id: Option<&str>) -> AppResult<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sites WHERE LOWER(name)=LOWER(?1) AND (?2 IS NULL OR id<>?2))",
+        params![name, except_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|value| value != 0)
+    .map_err(|e| e.to_string())
+}
+
+pub fn create_site(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    name: &str,
+    location: &str,
+    description: &str,
+) -> AppResult<Site> {
+    let item = Site {
+        id: Uuid::new_v4().to_string(),
+        name: name.trim().into(),
+        location: location.trim().into(),
+        description: description.trim().into(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    validate_site_model(&item)?;
+    if site_name_taken(conn, &item.name, None)? {
+        return Err(format!("A site named '{}' already exists", item.name));
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sites(id,name,location,description,created_at) VALUES (?1,?2,?3,?4,?5)",
+        params![
+            item.id,
+            item.name,
+            item.location,
+            item.description,
+            item.created_at
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    record_commit_tx(
+        &tx,
+        actor,
+        &format!("Created site {}", item.name),
+        vec![single_change(
+            "site",
+            &item.id,
+            "create",
+            None,
+            Some(to_value(&item)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(item)
+}
+
+pub fn update_site(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    id: &str,
+    name: &str,
+    location: &str,
+    description: &str,
+) -> AppResult<Site> {
+    let before = require_existing(
+        get_row_optional(conn, &format!("{SITE_SELECT} WHERE id=?1"), id, map_site)?,
+        "Site",
+    )?;
+    let after = Site {
+        name: name.trim().into(),
+        location: location.trim().into(),
+        description: description.trim().into(),
+        ..before.clone()
+    };
+    validate_site_model(&after)?;
+    if site_name_taken(conn, &after.name, Some(id))? {
+        return Err(format!("A site named '{}' already exists", after.name));
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE sites SET name=?1,location=?2,description=?3 WHERE id=?4",
+        params![after.name, after.location, after.description, id],
+    )
+    .map_err(|e| e.to_string())?;
+    record_commit_tx(
+        &tx,
+        actor,
+        &format!("Updated site {}", after.name),
+        vec![single_change(
+            "site",
+            id,
+            "update",
+            Some(to_value(&before)?),
+            Some(to_value(&after)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(after)
+}
+
+/// A site cannot be deleted while a network or an asset is still at it, the
+/// same rule as networks, so nothing silently loses its place.
+pub fn delete_site(conn: &mut Connection, actor: &ActorIdentity, id: &str) -> AppResult<()> {
+    let before = require_existing(get_entity_json(conn, "site", id)?, "Site")?;
+    let mut used = Vec::new();
+    for (label, sql) in [
+        ("networks", "SELECT COUNT(*) FROM networks WHERE site_id=?1"),
+        ("assets", "SELECT COUNT(*) FROM assets WHERE site_id=?1"),
+    ] {
+        let count: i64 = conn
+            .query_row(sql, params![id], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        if count > 0 {
+            used.push(format!("{count} {label}"));
+        }
+    }
+    if !used.is_empty() {
+        return Err(format!(
+            "Site is still used by {}. Move those records to another site first.",
+            used.join(", ")
+        ));
+    }
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM sites WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    record_commit_tx(
+        &tx,
+        actor,
+        "Deleted site",
+        vec![single_change("site", id, "delete", Some(before), None)],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+// ---- asset relations ---------------------------------------------------------
+
+const RELATION_SELECT: &str = "SELECT r.id,r.source_asset_id,s.name,r.target_asset_id,t.name,r.relation_type,r.note,r.created_at FROM asset_relations r JOIN assets s ON s.id=r.source_asset_id JOIN assets t ON t.id=r.target_asset_id";
+
+fn map_relation(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetRelation> {
+    Ok(AssetRelation {
+        id: row.get(0)?,
+        source_asset_id: row.get(1)?,
+        source_name: row.get(2)?,
+        target_asset_id: row.get(3)?,
+        target_name: row.get(4)?,
+        relation_type: row.get(5)?,
+        note: row.get(6)?,
+        created_at: row.get(7)?,
+    })
+}
+
+pub fn get_asset_relations(conn: &Connection) -> AppResult<Vec<AssetRelation>> {
+    query_vec(
+        conn,
+        &format!("{RELATION_SELECT} ORDER BY s.name COLLATE NOCASE,r.relation_type,t.name COLLATE NOCASE"),
+        [],
+        map_relation,
+    )
+}
+
+fn relation_sql_error(error: rusqlite::Error) -> String {
+    let text = error.to_string();
+    if text.contains("UNIQUE") {
+        "Those assets are already related this way".to_string()
+    } else {
+        text
+    }
+}
+
+pub fn relation_phrase(relation_type: &str) -> &'static str {
+    match relation_type {
+        "runs_on" => "runs on",
+        "managed_by" => "is managed by",
+        "backs_up_to" => "backs up to",
+        "depends_on" => "depends on",
+        "connects_to" => "connects to",
+        _ => "is related to",
+    }
+}
+
+pub fn create_asset_relation(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    source_asset_id: &str,
+    target_asset_id: &str,
+    relation_type: &str,
+    note: &str,
+) -> AppResult<AssetRelation> {
+    let source = require_existing(get_asset(conn, source_asset_id)?, "Source asset")?;
+    let target = require_existing(get_asset(conn, target_asset_id)?, "Target asset")?;
+    let item = AssetRelation {
+        id: Uuid::new_v4().to_string(),
+        source_asset_id: source.id.clone(),
+        source_name: Some(source.name.clone()),
+        target_asset_id: target.id.clone(),
+        target_name: Some(target.name.clone()),
+        relation_type: relation_type.trim().into(),
+        note: note.trim().into(),
+        created_at: Utc::now().to_rfc3339(),
+    };
+    validate_relation_model(&item)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO asset_relations(id,source_asset_id,target_asset_id,relation_type,note,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+        params![item.id, item.source_asset_id, item.target_asset_id, item.relation_type, item.note, item.created_at],
+    )
+    .map_err(relation_sql_error)?;
+    record_commit_tx(
+        &tx,
+        actor,
+        &format!(
+            "Linked {} {} {}",
+            source.name,
+            relation_phrase(&item.relation_type),
+            target.name
+        ),
+        vec![single_change(
+            "asset_relation",
+            &item.id,
+            "create",
+            None,
+            Some(to_value(&item)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(item)
+}
+
+pub fn update_asset_relation(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    id: &str,
+    relation_type: &str,
+    note: &str,
+) -> AppResult<AssetRelation> {
+    let before = require_existing(
+        get_row_optional(
+            conn,
+            &format!("{RELATION_SELECT} WHERE r.id=?1"),
+            id,
+            map_relation,
+        )?,
+        "Relation",
+    )?;
+    let after = AssetRelation {
+        relation_type: relation_type.trim().into(),
+        note: note.trim().into(),
+        ..before.clone()
+    };
+    validate_relation_model(&after)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE asset_relations SET relation_type=?1,note=?2 WHERE id=?3",
+        params![after.relation_type, after.note, id],
+    )
+    .map_err(relation_sql_error)?;
+    record_commit_tx(
+        &tx,
+        actor,
+        "Updated asset relation",
+        vec![single_change(
+            "asset_relation",
+            id,
+            "update",
+            Some(to_value(&before)?),
+            Some(to_value(&after)?),
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(after)
+}
+
+pub fn delete_asset_relation(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    id: &str,
+) -> AppResult<()> {
+    let before = require_existing(get_entity_json(conn, "asset_relation", id)?, "Relation")?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM asset_relations WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    record_commit_tx(
+        &tx,
+        actor,
+        "Removed asset relation",
+        vec![single_change(
+            "asset_relation",
+            id,
+            "delete",
+            Some(before),
+            None,
+        )],
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+// ---- merging duplicate assets ------------------------------------------------
+
+const ASSET_SELECT: &str = "SELECT a.id,a.network_id,n.name,a.name,a.ip_address,a.mac_address,a.asset_type,a.os,a.user_name,a.suspicious,a.compromise_status,a.investigation_status,a.properties,a.scan_results,a.quick_note,a.site_id,a.owner,a.operator,a.origin,a.last_observed,a.created_at FROM assets a LEFT JOIN networks n ON n.id=a.network_id";
+
+fn get_asset(conn: &Connection, id: &str) -> AppResult<Option<Asset>> {
+    get_row_optional(
+        conn,
+        &format!("{ASSET_SELECT} WHERE a.id=?1"),
+        id,
+        map_asset,
+    )
+}
+
+/// What a merge moved onto the surviving asset.
+#[derive(Debug, Clone, Serialize)]
+pub struct AssetMergeSummary {
+    pub asset: Asset,
+    pub interfaces_moved: usize,
+    pub interfaces_dropped: usize,
+    pub timeline_events: usize,
+    pub sightings: usize,
+    pub attack_edges: usize,
+    pub relations: usize,
+}
+
+fn ids_where<P: rusqlite::Params>(conn: &Connection, sql: &str, args: P) -> AppResult<Vec<String>> {
+    query_vec(conn, sql, args, |row| row.get::<_, String>(0))
+}
+
+fn tracked_update<P: rusqlite::Params>(
+    tx: &Transaction<'_>,
+    changes: &mut Vec<EntityChangeInput>,
+    entity_type: &str,
+    id: &str,
+    sql: &str,
+    args: P,
+) -> AppResult<()> {
+    let before = get_entity_json(tx, entity_type, id)?;
+    tx.execute(sql, args).map_err(|e| e.to_string())?;
+    let after = get_entity_json(tx, entity_type, id)?;
+    if before != after {
+        changes.push(single_change(entity_type, id, "update", before, after));
+    }
+    Ok(())
+}
+
+fn tracked_delete(
+    tx: &Transaction<'_>,
+    changes: &mut Vec<EntityChangeInput>,
+    entity_type: &str,
+    id: &str,
+    table: &str,
+) -> AppResult<()> {
+    let before = get_entity_json(tx, entity_type, id)?;
+    tx.execute(&format!("DELETE FROM {table} WHERE id=?1"), params![id])
+        .map_err(|e| e.to_string())?;
+    if before.is_some() {
+        changes.push(single_change(entity_type, id, "delete", before, None));
+    }
+    Ok(())
+}
+
+fn plain_mac(value: Option<&str>) -> String {
+    value
+        .unwrap_or_default()
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// The same NIC recorded twice: the same address, and hardware addresses that
+/// agree or are missing on one side (an ARP entry knows the MAC, a typed one
+/// does not). Two NICs with nothing to compare are not assumed to be one.
+fn same_interface(left: &NetworkInterface, right: &NetworkInterface) -> bool {
+    let (left_mac, right_mac) = (
+        plain_mac(left.mac_address.as_deref()),
+        plain_mac(right.mac_address.as_deref()),
+    );
+    let ip = left.ip_address.trim();
+    if ip.is_empty() && left_mac.is_empty() && right_mac.is_empty() {
+        return false;
+    }
+    ip.eq_ignore_ascii_case(right.ip_address.trim())
+        && (left_mac == right_mac || left_mac.is_empty() || right_mac.is_empty())
+}
+
+/// For merging: an unknown status loses to a determination, and a clean
+/// determination loses to any suspicion.
+fn merge_status_rank(status: &str) -> u8 {
+    match status {
+        "infected" => 3,
+        "suspected" => 2,
+        "clean" => 1,
+        _ => 0,
+    }
+}
+
+fn origin_rank(origin: &str) -> u8 {
+    match origin {
+        "client_inventory" => 2,
+        "discovered" => 1,
+        _ => 0,
+    }
+}
+
+/// Fold the asset `remove` into the asset `keep`. Everything that pointed at
+/// `remove` (interfaces, timeline events, IOC sightings, attack paths, relations)
+/// points at `keep` afterwards, `keep`'s empty fields are filled from `remove`,
+/// the worse compromise status and the better origin win, and `remove` is
+/// deleted. One commit records every change, so a bundle replays the merge.
+pub fn merge_assets(
+    conn: &mut Connection,
+    actor: &ActorIdentity,
+    keep_id: &str,
+    remove_id: &str,
+) -> AppResult<AssetMergeSummary> {
+    if keep_id == remove_id {
+        return Err("Choose two different assets to merge".into());
+    }
+    let keep = require_existing(get_asset(conn, keep_id)?, "Asset to keep")?;
+    let remove = require_existing(get_asset(conn, remove_id)?, "Asset to merge away")?;
+    let keep_before = to_value(&keep)?;
+    let keep_nics = get_network_interfaces(conn, Some(keep_id))?;
+    let remove_nics = get_network_interfaces(conn, Some(remove_id))?;
+    let event_ids = ids_where(
+        conn,
+        "SELECT id FROM timeline_events WHERE asset_id=?1",
+        params![remove_id],
+    )?;
+    let sighting_ids = ids_where(
+        conn,
+        "SELECT id FROM ioc_sightings WHERE asset_id=?1",
+        params![remove_id],
+    )?;
+    let edge_ids = ids_where(
+        conn,
+        "SELECT id FROM attack_edges WHERE (source_kind='asset' AND source_id=?1) OR (target_kind='asset' AND target_id=?1)",
+        params![remove_id],
+    )?;
+    let relation_ids = ids_where(
+        conn,
+        "SELECT id FROM asset_relations WHERE source_asset_id=?1 OR target_asset_id=?1",
+        params![remove_id],
+    )?;
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut changes: Vec<EntityChangeInput> = Vec::new();
+    let mut summary = AssetMergeSummary {
+        asset: keep.clone(),
+        interfaces_moved: 0,
+        interfaces_dropped: 0,
+        timeline_events: 0,
+        sightings: 0,
+        attack_edges: 0,
+        relations: 0,
+    };
+
+    // An asset whose address lives only on its own row gets that NIC first, so
+    // the interfaces moved over cannot displace it.
+    let mut keep_has_primary = keep_nics.iter().any(|nic| nic.is_primary);
+    if keep_nics.is_empty() && (keep.network_id.is_some() || !keep.ip_address.is_empty()) {
+        let nic = NetworkInterface {
+            id: Uuid::new_v4().to_string(),
+            asset_id: keep_id.to_string(),
+            name: "Primary".into(),
+            ip_address: keep.ip_address.clone(),
+            mac_address: keep.mac_address.clone(),
+            network_id: keep.network_id.clone(),
+            network_name: keep.network_name.clone(),
+            is_primary: true,
+        };
+        tx.execute(
+            "INSERT INTO network_interfaces(id,asset_id,name,ip_address,mac_address,network_id,is_primary) VALUES (?1,?2,?3,?4,?5,?6,1)",
+            params![nic.id, nic.asset_id, nic.name, nic.ip_address, nic.mac_address, nic.network_id],
+        )
+        .map_err(|e| e.to_string())?;
+        changes.push(single_change(
+            "network_interface",
+            &nic.id,
+            "create",
+            None,
+            Some(to_value(&nic)?),
+        ));
+        keep_has_primary = true;
+    }
+    for nic in &remove_nics {
+        if let Some(existing) = keep_nics
+            .iter()
+            .find(|existing| same_interface(existing, nic))
+        {
+            // The surviving NIC keeps its identity and learns the MAC it lacked.
+            if plain_mac(existing.mac_address.as_deref()).is_empty()
+                && !plain_mac(nic.mac_address.as_deref()).is_empty()
+            {
+                tracked_update(
+                    &tx,
+                    &mut changes,
+                    "network_interface",
+                    &existing.id,
+                    "UPDATE network_interfaces SET mac_address=?1 WHERE id=?2",
+                    params![nic.mac_address, existing.id],
+                )?;
+            }
+            tracked_delete(
+                &tx,
+                &mut changes,
+                "network_interface",
+                &nic.id,
+                "network_interfaces",
+            )?;
+            summary.interfaces_dropped += 1;
+            continue;
+        }
+        let make_primary = !keep_has_primary && nic.is_primary;
+        keep_has_primary |= make_primary;
+        tracked_update(
+            &tx,
+            &mut changes,
+            "network_interface",
+            &nic.id,
+            "UPDATE network_interfaces SET asset_id=?1,is_primary=?2 WHERE id=?3",
+            params![keep_id, if make_primary { 1 } else { 0 }, nic.id],
+        )?;
+        summary.interfaces_moved += 1;
+    }
+    if !keep_has_primary {
+        // Nothing was primary on either side: promote one, recorded.
+        let first = ids_where(
+            &tx,
+            "SELECT id FROM network_interfaces WHERE asset_id=?1 ORDER BY rowid LIMIT 1",
+            params![keep_id],
+        )?;
+        if let Some(first) = first.first() {
+            tracked_update(
+                &tx,
+                &mut changes,
+                "network_interface",
+                first,
+                "UPDATE network_interfaces SET is_primary=1 WHERE id=?1",
+                params![first],
+            )?;
+        }
+    }
+
+    for id in &event_ids {
+        tracked_update(
+            &tx,
+            &mut changes,
+            "timeline_event",
+            id,
+            "UPDATE timeline_events SET asset_id=?1 WHERE id=?2",
+            params![keep_id, id],
+        )?;
+        summary.timeline_events += 1;
+    }
+    for id in &sighting_ids {
+        tracked_update(
+            &tx,
+            &mut changes,
+            "ioc_sighting",
+            id,
+            "UPDATE ioc_sightings SET asset_id=?1 WHERE id=?2",
+            params![keep_id, id],
+        )?;
+        summary.sightings += 1;
+    }
+    for id in &edge_ids {
+        let edge = require_existing(get_entity_json(&tx, "attack_edge", id)?, "Attack edge")?;
+        let field = |name: &str| edge[name].as_str().unwrap_or_default().to_string();
+        let (source_kind, target_kind) = (field("source_kind"), field("target_kind"));
+        let source = if source_kind == "asset" && field("source_id") == remove_id {
+            keep_id.to_string()
+        } else {
+            field("source_id")
+        };
+        let target = if target_kind == "asset" && field("target_id") == remove_id {
+            keep_id.to_string()
+        } else {
+            field("target_id")
+        };
+        if source_kind == target_kind && source == target {
+            // An edge between the two duplicates would now point at itself.
+            tracked_delete(&tx, &mut changes, "attack_edge", id, "attack_edges")?;
+        } else {
+            tracked_update(
+                &tx,
+                &mut changes,
+                "attack_edge",
+                id,
+                "UPDATE attack_edges SET source_id=?1,target_id=?2 WHERE id=?3",
+                params![source, target, id],
+            )?;
+        }
+        summary.attack_edges += 1;
+    }
+    for id in &relation_ids {
+        let relation = require_existing(get_entity_json(&tx, "asset_relation", id)?, "Relation")?;
+        let field = |name: &str| relation[name].as_str().unwrap_or_default().to_string();
+        let source = if field("source_asset_id") == remove_id {
+            keep_id.to_string()
+        } else {
+            field("source_asset_id")
+        };
+        let target = if field("target_asset_id") == remove_id {
+            keep_id.to_string()
+        } else {
+            field("target_asset_id")
+        };
+        let already: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM asset_relations WHERE source_asset_id=?1 AND target_asset_id=?2 AND relation_type=?3 AND id<>?4",
+                params![source, target, field("relation_type"), id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if source == target || already > 0 {
+            tracked_delete(&tx, &mut changes, "asset_relation", id, "asset_relations")?;
+        } else {
+            tracked_update(
+                &tx,
+                &mut changes,
+                "asset_relation",
+                id,
+                "UPDATE asset_relations SET source_asset_id=?1,target_asset_id=?2 WHERE id=?3",
+                params![source, target, id],
+            )?;
+        }
+        summary.relations += 1;
+    }
+
+    // The surviving record keeps its own values and takes what it lacked.
+    let compromise = if merge_status_rank(&remove.compromise_status)
+        > merge_status_rank(&keep.compromise_status)
+    {
+        remove.compromise_status.clone()
+    } else {
+        keep.compromise_status.clone()
+    };
+    let investigation = if keep.investigation_status == remove.investigation_status {
+        keep.investigation_status.clone()
+    } else {
+        "in_progress".to_string()
+    };
+    let origin = if origin_rank(&remove.origin) > origin_rank(&keep.origin) {
+        remove.origin.clone()
+    } else {
+        keep.origin.clone()
+    };
+    let last_observed = match (
+        keep.last_observed.as_deref(),
+        remove.last_observed.as_deref(),
+    ) {
+        (Some(a), Some(b)) => Some(if b > a { b } else { a }.to_string()),
+        (Some(a), None) => Some(a.to_string()),
+        (None, Some(b)) => Some(b.to_string()),
+        (None, None) => None,
+    };
+    let mut quick_note = match (keep.quick_note.as_deref(), remove.quick_note.as_deref()) {
+        (Some(a), Some(b)) if a != b => Some(format!("{a} | {b}")),
+        (Some(a), _) => Some(a.to_string()),
+        (None, Some(b)) => Some(b.to_string()),
+        (None, None) => None,
+    };
+    if !keep.name.eq_ignore_ascii_case(&remove.name) {
+        let alias = format!("also known as {}", remove.name);
+        quick_note = Some(match quick_note {
+            Some(note) => format!("{note} | {alias}"),
+            None => alias,
+        });
+    }
+    tx.execute(
+        "UPDATE assets SET os=?1,user_name=?2,site_id=?3,owner=?4,operator=?5,origin=?6,last_observed=?7,
+         compromise_status=?8,investigation_status=?9,suspicious=?10,properties=?11,scan_results=?12,quick_note=?13 WHERE id=?14",
+        params![
+            keep.os.clone().or_else(|| remove.os.clone()),
+            keep.user_name.clone().or_else(|| remove.user_name.clone()),
+            keep.site_id.clone().or_else(|| remove.site_id.clone()),
+            keep.owner.clone().or_else(|| remove.owner.clone()),
+            keep.operator.clone().or_else(|| remove.operator.clone()),
+            origin,
+            last_observed,
+            compromise,
+            investigation,
+            if matches!(compromise.as_str(), "suspected" | "infected") { 1 } else { 0 },
+            keep.properties.clone().or_else(|| remove.properties.clone()),
+            keep.scan_results.clone().or_else(|| remove.scan_results.clone()),
+            quick_note,
+            keep_id,
+        ],
+    )
+    .map_err(|e| e.to_string())?;
+    // The address, zone, and MAC columns follow the primary interface.
+    reconcile_asset_primary_interface(&tx, keep_id)?;
+
+    tracked_delete(&tx, &mut changes, "asset", remove_id, "assets")?;
+    let keep_after = require_existing(get_entity_json(&tx, "asset", keep_id)?, "Asset to keep")?;
+    if keep_after != keep_before {
+        changes.push(single_change(
+            "asset",
+            keep_id,
+            "update",
+            Some(keep_before),
+            Some(keep_after),
+        ));
+    }
+    record_commit_tx(
+        &tx,
+        actor,
+        &format!("Merged asset {} into {}", remove.name, keep.name),
+        changes,
+        &[],
+    )?;
+    tx.commit().map_err(|e| e.to_string())?;
+    summary.asset = require_existing(get_asset(conn, keep_id)?, "Asset to keep")?;
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -7964,12 +9230,33 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            8
+            9
         );
         // The v7 investigation tables exist after migrating a legacy case.
         for table in ["ioc_sightings", "attack_edges", "investigation_views"] {
             assert!(table_exists(&conn, table).unwrap(), "{table} missing");
         }
+        // Schema 9: sites, relations, and the environment columns, defaulted.
+        for table in ["sites", "asset_relations"] {
+            assert!(table_exists(&conn, table).unwrap(), "{table} missing");
+        }
+        for (table, column) in [
+            ("networks", "site_id"),
+            ("networks", "owner"),
+            ("networks", "operator"),
+            ("assets", "site_id"),
+            ("assets", "owner"),
+            ("assets", "operator"),
+            ("assets", "origin"),
+            ("assets", "last_observed"),
+        ] {
+            assert!(
+                column_exists(&conn, table, column).unwrap(),
+                "{table}.{column}"
+            );
+        }
+        assert_eq!(asset.origin, "unknown");
+        assert!(asset.site_id.is_none() && asset.owner.is_none() && asset.last_observed.is_none());
     }
 
     #[test]
@@ -8373,6 +9660,9 @@ mod tests {
             description: String::new(),
             vlan_id: None,
             quick_note: None,
+            site_id: None,
+            owner: None,
+            operator: None,
             created_at: Utc::now().to_rfc3339(),
         });
         malformed.assets.push(Asset {
@@ -8391,6 +9681,11 @@ mod tests {
             properties: None,
             scan_results: None,
             quick_note: None,
+            site_id: None,
+            owner: None,
+            operator: None,
+            origin: "unknown".into(),
+            last_observed: None,
             created_at: Utc::now().to_rfc3339(),
         });
         assert!(import_case_data(&mut target, &target_actor, &malformed).is_err());
@@ -9145,6 +10440,550 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        // Migrating always ends on the current schema, not the one it added.
+        assert_eq!(version, 9);
+    }
+
+    fn plain_asset(
+        conn: &mut Connection,
+        actor: &ActorIdentity,
+        name: &str,
+        ip: &str,
+        asset_type: &str,
+    ) -> Asset {
+        create_asset(
+            conn,
+            actor,
+            None,
+            name,
+            ip,
+            None,
+            asset_type,
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn sites_owners_and_origin_are_recorded_kept_and_cleared_explicitly() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let hq = create_site(
+            &mut conn,
+            &active_expert,
+            " HQ Berlin ",
+            "Alexanderplatz 1",
+            "Head office",
+        )
+        .unwrap();
+        assert_eq!(hq.name, "HQ Berlin");
+        let duplicate = create_site(&mut conn, &active_expert, "hq berlin", "", "").unwrap_err();
+        assert!(duplicate.contains("already exists"), "{duplicate}");
+
+        let context = NetworkContext {
+            site_id: Some(hq.id.clone()),
+            owner: Some("Plant IT".into()),
+            operator: Some("  SecureCo MSP ".into()),
+        };
+        let network = create_network_with_context(
+            &mut conn,
+            &active_expert,
+            "Plant LAN",
+            "10.20.0.0/16",
+            "LAN",
+            "",
+            None,
+            &context,
+        )
+        .unwrap();
+        assert_eq!(network.site_id.as_deref(), Some(hq.id.as_str()));
+        assert_eq!(network.operator.as_deref(), Some("SecureCo MSP"));
+
+        let asset = create_asset_with_context(
+            &mut conn,
+            &active_expert,
+            None,
+            "APP01",
+            "10.20.0.15",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+            &AssetContext {
+                site_id: Some(hq.id.clone()),
+                owner: Some("Finance".into()),
+                operator: Some("SecureCo MSP".into()),
+                origin: Some("discovered".into()),
+                last_observed: Some("2026-11-13T08:30:00+01:00".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(asset.origin, "discovered");
+        assert_eq!(
+            asset.last_observed.as_deref(),
+            Some("2026-11-13T07:30:00.000Z")
+        );
+        // The subnet linked it to the zone as before.
+        assert_eq!(asset.network_id.as_deref(), Some(network.id.as_str()));
+
+        // A caller that predates these fields cannot erase them.
+        let renamed = update_asset(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            asset.network_id.as_deref(),
+            "APP01-renamed",
+            "10.20.0.15",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(renamed.owner.as_deref(), Some("Finance"));
+        assert_eq!(renamed.origin, "discovered");
+        assert_eq!(renamed.site_id.as_deref(), Some(hq.id.as_str()));
+        let stored = get_assets(&conn).unwrap().pop().unwrap();
+        assert_eq!(stored.operator.as_deref(), Some("SecureCo MSP"));
+
+        // An empty string clears; a value replaces.
+        let cleared = update_asset_with_context(
+            &mut conn,
+            &active_expert,
+            &asset.id,
+            asset.network_id.as_deref(),
+            "APP01-renamed",
+            "10.20.0.15",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+            &AssetContext {
+                owner: Some("".into()),
+                origin: Some("client_inventory".into()),
+                site_id: Some("".into()),
+                ..AssetContext::default()
+            },
+        )
+        .unwrap();
+        assert!(cleared.owner.is_none() && cleared.site_id.is_none());
+        assert_eq!(cleared.origin, "client_inventory");
+        assert_eq!(cleared.operator.as_deref(), Some("SecureCo MSP"));
+
+        for (context, expected) in [
+            (
+                AssetContext {
+                    origin: Some("rumour".into()),
+                    ..AssetContext::default()
+                },
+                "Invalid asset origin",
+            ),
+            (
+                AssetContext {
+                    site_id: Some("nope".into()),
+                    ..AssetContext::default()
+                },
+                "site was not found",
+            ),
+            (
+                AssetContext {
+                    last_observed: Some("yesterday".into()),
+                    ..AssetContext::default()
+                },
+                "RFC 3339",
+            ),
+            (
+                AssetContext {
+                    owner: Some("x".repeat(201)),
+                    ..AssetContext::default()
+                },
+                "limited to 200",
+            ),
+        ] {
+            let error = update_asset_with_context(
+                &mut conn,
+                &active_expert,
+                &asset.id,
+                None,
+                "APP01-renamed",
+                "10.20.0.15",
+                None,
+                "server",
+                None,
+                None,
+                "unknown",
+                "not_started",
+                None,
+                None,
+                &context,
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+
+        // The site stays while the network is at it.
+        let refused = delete_site(&mut conn, &active_expert, &hq.id).unwrap_err();
+        assert!(refused.contains("1 networks"), "{refused}");
+        update_network_with_context(
+            &mut conn,
+            &active_expert,
+            &network.id,
+            "Plant LAN",
+            "10.20.0.0/16",
+            "LAN",
+            "",
+            None,
+            &NetworkContext {
+                site_id: Some("".into()),
+                ..NetworkContext::default()
+            },
+        )
+        .unwrap();
+        delete_site(&mut conn, &active_expert, &hq.id).unwrap();
+        assert!(get_sites(&conn).unwrap().is_empty());
+        let history = get_history(&conn, 3).unwrap();
+        assert_eq!(history[0].message, "Deleted site");
+    }
+
+    #[test]
+    fn hypervisor_hosts_and_the_vms_that_run_on_them_are_linked_and_replayed_in_snapshots() {
+        let (mut conn, case, active_expert) = fresh_case();
+        let host = plain_asset(
+            &mut conn,
+            &active_expert,
+            "ESX01",
+            "10.0.9.10",
+            "hypervisor",
+        );
+        let vm = plain_asset(&mut conn, &active_expert, "APP01", "10.0.0.15", "vm");
+        let relation = create_asset_relation(
+            &mut conn,
+            &active_expert,
+            &vm.id,
+            &host.id,
+            "runs_on",
+            "vCenter export",
+        )
+        .unwrap();
+        assert_eq!(relation.source_name.as_deref(), Some("APP01"));
+        assert_eq!(relation.target_name.as_deref(), Some("ESX01"));
+        assert_eq!(
+            get_history(&conn, 1).unwrap()[0].message,
+            "Linked APP01 runs on ESX01"
+        );
+
+        let again =
+            create_asset_relation(&mut conn, &active_expert, &vm.id, &host.id, "runs_on", "")
+                .unwrap_err();
+        assert!(again.contains("already related"), "{again}");
+        assert!(
+            create_asset_relation(&mut conn, &active_expert, &vm.id, &vm.id, "runs_on", "")
+                .unwrap_err()
+                .contains("itself")
+        );
+        assert!(
+            create_asset_relation(&mut conn, &active_expert, &vm.id, &host.id, "owns", "")
+                .unwrap_err()
+                .contains("Invalid relation type")
+        );
+        // The same pair may be related in a different way.
+        create_asset_relation(
+            &mut conn,
+            &active_expert,
+            &vm.id,
+            &host.id,
+            "backs_up_to",
+            "",
+        )
+        .unwrap();
+        let updated = update_asset_relation(
+            &mut conn,
+            &active_expert,
+            &relation.id,
+            "managed_by",
+            "now via vCenter",
+        )
+        .unwrap();
+        assert_eq!(updated.relation_type, "managed_by");
+
+        // Snapshots carry sites and relations, and an import rebuilds them.
+        let site = create_site(&mut conn, &active_expert, "DC East", "", "").unwrap();
+        let exported = export_case_data(&conn).unwrap();
+        assert_eq!(exported.sites.len(), 1);
+        assert_eq!(exported.asset_relations.len(), 2);
+        let mut target = Connection::open_in_memory().unwrap();
+        init_database(&target).unwrap();
+        target.execute("INSERT INTO cases(id,name,description,client_name,investigator,status,created_at,updated_at,metadata) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)", params![case.id,case.name,case.description,case.client_name,case.investigator,case.status,case.created_at,case.updated_at,case.metadata]).unwrap();
+        initialize_history(&target).unwrap();
+        let summary = import_case_data(&mut target, &actor("Merger"), &exported).unwrap();
+        assert_eq!(summary.entities["sites"].inserted, 1);
+        assert_eq!(summary.entities["asset_relations"].inserted, 2);
+        assert_eq!(get_sites(&target).unwrap()[0].id, site.id);
+        assert_eq!(get_asset_relations(&target).unwrap().len(), 2);
+
+        // Deleting the host removes its relations, each recorded.
+        delete_asset(&mut conn, &active_expert, &host.id).unwrap();
+        assert!(get_asset_relations(&conn).unwrap().is_empty());
+        let last = &get_history(&conn, 1).unwrap()[0];
+        let removed: Vec<_> = last
+            .changes
+            .iter()
+            .filter(|c| c.entity_type == "asset_relation")
+            .collect();
+        assert_eq!(removed.len(), 2);
+        assert!(removed.iter().all(|c| c.operation == "delete"));
+    }
+
+    fn seed_duplicate_pair(conn: &mut Connection, actor: &ActorIdentity) -> (Asset, Asset, Asset) {
+        let keep = create_asset_with_context(
+            conn,
+            actor,
+            None,
+            "APP01",
+            "10.0.0.5",
+            None,
+            "server",
+            None,
+            None,
+            "unknown",
+            "not_started",
+            None,
+            None,
+            &AssetContext {
+                origin: Some("discovered".into()),
+                last_observed: Some("2026-11-10T08:00:00Z".into()),
+                ..AssetContext::default()
+            },
+        )
+        .unwrap();
+        let remove = create_asset_with_context(
+            conn,
+            actor,
+            None,
+            "app01.corp.local",
+            "10.0.0.5",
+            Some("AA:BB:CC:DD:EE:FF"),
+            "server",
+            Some("Windows Server 2022"),
+            Some("svc-app"),
+            "suspected",
+            "in_progress",
+            Some("ownership notes"),
+            None,
+            &AssetContext {
+                owner: Some("Finance".into()),
+                origin: Some("client_inventory".into()),
+                last_observed: Some("2026-11-12T09:00:00Z".into()),
+                ..AssetContext::default()
+            },
+        )
+        .unwrap();
+        let other = plain_asset(conn, actor, "DB02", "10.0.0.40", "server");
+        create_network_interface(
+            conn,
+            actor,
+            &remove.id,
+            "eth1",
+            "192.168.1.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        create_network_interface(
+            conn,
+            actor,
+            &remove.id,
+            "mgmt",
+            "172.16.5.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        // The same NIC recorded on both: the copy on the merged-away asset is dropped.
+        create_network_interface(
+            conn,
+            actor,
+            &keep.id,
+            "eth9",
+            "192.168.1.5",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO timeline_events(id,asset_id,timestamp,event_type,description,severity,created_at)
+               VALUES('event-1','{remove}','2026-11-11T10:00:00Z','login','Odd login','medium','2026-11-11T10:00:00Z');
+             INSERT INTO iocs(id,ioc_type,value,description,threat_level,created_at)
+               VALUES('ioc-1','IP','198.51.100.7','','medium','2026-11-11T10:00:00Z');
+             INSERT INTO ioc_sightings(id,ioc_id,asset_id,created_at) VALUES('sight-1','ioc-1','{remove}','2026-11-11T10:00:00Z');
+             INSERT INTO attack_edges(id,source_kind,source_id,target_kind,target_id,title,created_at)
+               VALUES('edge-between','asset','{keep}','asset','{remove}','A to B','2026-11-11T10:00:00Z'),
+                     ('edge-out','asset','{remove}','asset','{other}','B to DB02','2026-11-11T10:00:00Z');",
+            remove = remove.id, keep = keep.id, other = other.id
+        ))
+        .unwrap();
+        create_asset_relation(conn, actor, &remove.id, &other.id, "depends_on", "").unwrap();
+        create_asset_relation(conn, actor, &keep.id, &other.id, "depends_on", "").unwrap();
+        (keep, remove, other)
+    }
+
+    #[test]
+    fn merging_assets_moves_everything_and_records_one_commit() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let (keep, remove, other) = seed_duplicate_pair(&mut conn, &active_expert);
+
+        let summary = merge_assets(&mut conn, &active_expert, &keep.id, &remove.id).unwrap();
+        assert_eq!(
+            (
+                summary.interfaces_moved,
+                summary.interfaces_dropped,
+                summary.timeline_events,
+                summary.sightings,
+                summary.attack_edges,
+                summary.relations
+            ),
+            (1, 2, 1, 1, 2, 1)
+        );
+        assert!(get_asset(&conn, &remove.id).unwrap().is_none());
+
+        let merged = get_asset(&conn, &keep.id).unwrap().unwrap();
+        // The survivor keeps its identity and takes what it lacked.
+        assert_eq!(merged.name, "APP01");
+        assert_eq!(merged.owner.as_deref(), Some("Finance"));
+        assert_eq!(merged.os.as_deref(), Some("Windows Server 2022"));
+        assert_eq!(merged.user_name.as_deref(), Some("svc-app"));
+        assert_eq!(merged.properties.as_deref(), Some("ownership notes"));
+        assert_eq!(merged.origin, "client_inventory");
+        assert_eq!(
+            merged.last_observed.as_deref(),
+            Some("2026-11-12T09:00:00.000Z")
+        );
+        assert_eq!(merged.compromise_status, "suspected");
+        assert!(merged.suspicious);
+        assert_eq!(merged.investigation_status, "in_progress");
+        assert_eq!(
+            merged.quick_note.as_deref(),
+            Some("also known as app01.corp.local")
+        );
+
+        // Interfaces: both duplicated NICs collapse (the survivor's primary learns
+        // the MAC), the management NIC moves over, and exactly one stays primary.
+        let nics = get_network_interfaces(&conn, Some(&keep.id)).unwrap();
+        assert_eq!(nics.len(), 3);
+        assert_eq!(nics.iter().filter(|nic| nic.is_primary).count(), 1);
+        let primary = nics.iter().find(|nic| nic.is_primary).unwrap();
+        assert_eq!(primary.ip_address, "10.0.0.5");
+        assert_eq!(primary.mac_address.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
+        assert!(nics.iter().any(|nic| nic.ip_address == "172.16.5.5"));
+        assert_eq!(merged.ip_address, "10.0.0.5");
+        assert_eq!(merged.mac_address.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
+
+        // Everything that pointed at the merged-away asset points at the survivor.
+        let event_owner: String = conn
+            .query_row(
+                "SELECT asset_id FROM timeline_events WHERE id='event-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(event_owner, keep.id);
+        let sighting_owner: String = conn
+            .query_row(
+                "SELECT asset_id FROM ioc_sightings WHERE id='sight-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sighting_owner, keep.id);
+        let edges: Vec<(String, String, String)> = query_vec(
+            &conn,
+            "SELECT id,source_id,target_id FROM attack_edges ORDER BY id",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+        // The edge between the two duplicates would point at itself, so it is gone.
+        assert_eq!(
+            edges,
+            vec![("edge-out".to_string(), keep.id.clone(), other.id.clone())]
+        );
+        // The two "depends on DB02" relations collapse into one.
+        let relations = get_asset_relations(&conn).unwrap();
+        assert_eq!(relations.len(), 1);
+        assert_eq!(
+            (
+                relations[0].source_asset_id.as_str(),
+                relations[0].target_asset_id.as_str()
+            ),
+            (keep.id.as_str(), other.id.as_str())
+        );
+
+        // One commit carries all of it.
+        let commit = &get_history(&conn, 1).unwrap()[0];
+        assert_eq!(commit.message, "Merged asset app01.corp.local into APP01");
+        let kinds: std::collections::BTreeSet<_> = commit
+            .changes
+            .iter()
+            .map(|c| c.entity_type.as_str())
+            .collect();
+        for kind in [
+            "asset",
+            "network_interface",
+            "timeline_event",
+            "ioc_sighting",
+            "attack_edge",
+            "asset_relation",
+        ] {
+            assert!(kinds.contains(kind), "{kind} missing from {kinds:?}");
+        }
+        assert!(commit.changes.iter().any(|c| c.entity_type == "asset"
+            && c.operation == "delete"
+            && c.entity_id == remove.id));
+        assert!(commit.changes.iter().any(|c| c.entity_type == "asset"
+            && c.operation == "update"
+            && c.entity_id == keep.id));
+    }
+
+    #[test]
+    fn merging_assets_refuses_nonsense_and_leaves_the_case_alone() {
+        let (mut conn, _, active_expert) = fresh_case();
+        let first = plain_asset(&mut conn, &active_expert, "A", "10.0.0.1", "server");
+        let before = get_history(&conn, 50).unwrap().len();
+        assert!(
+            merge_assets(&mut conn, &active_expert, &first.id, &first.id)
+                .unwrap_err()
+                .contains("two different")
+        );
+        assert!(
+            merge_assets(&mut conn, &active_expert, &first.id, "missing")
+                .unwrap_err()
+                .contains("not found")
+        );
+        assert!(
+            merge_assets(&mut conn, &active_expert, "missing", &first.id)
+                .unwrap_err()
+                .contains("not found")
+        );
+        assert_eq!(get_history(&conn, 50).unwrap().len(), before);
+        assert!(get_asset(&conn, &first.id).unwrap().is_some());
     }
 }

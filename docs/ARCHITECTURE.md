@@ -2,7 +2,7 @@
 
 Document version: 1.0  
 Application version: 1.0.20
-Last reviewed: 2026-11-12
+Last reviewed: 2026-11-14
 
 ## 1. Architectural objective
 
@@ -120,7 +120,7 @@ PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
 ```
 
-The current schema version is `PRAGMA user_version = 8`. Version 8 added the capture inbox (`captures`), persisted drafts (`drafts`), contributor attribution for merges (`history_merged_commits`), and the `timeline_events.source_ref` column. The migration is additive: a version 7 case opens and upgrades in place, and an older build refuses a version 8 file.
+The current schema version is `PRAGMA user_version = 9`. Version 8 added the capture inbox (`captures`), persisted drafts (`drafts`), contributor attribution for merges (`history_merged_commits`), and the `timeline_events.source_ref` column. Version 9 added `sites`, `asset_relations`, `site_id`/`owner`/`operator` on `networks` and `assets`, and `origin`/`last_observed` on `assets` (plus the `hypervisor` asset type, which needs no schema change). Both migrations are additive: a version 7 or 8 case opens and upgrades in place, and an older build refuses a newer file. New columns on existing tables are added by `ALTER TABLE` after the idempotent `CREATE TABLE IF NOT EXISTS` pass, and no index is created on them, so the same DDL serves new and migrating files.
 
 Topology presentation is stored in `topology_views`, independently for each layout mode. A saved view contains device and layout-anchor positions plus the Cytoscape pan/zoom camera. This state belongs to the physical case database but is intentionally excluded from evidence history and expert export/merge bundles.
 
@@ -170,8 +170,10 @@ erDiagram
 | Table | Purpose | Important fields |
 |---|---|---|
 | `cases` | Single persistent case record | name, description, client, status, timestamps, optional metadata; an obsolete investigator field is retained only for file compatibility |
-| `networks` | Logical network zones | name, optional CIDR subnet (empty for an unresolved L2-only VLAN), LAN/DMZ/DMS/WAN/etc. type, VLAN, description |
-| `assets` | Computers and devices | primary zone/IP/MAC projection, type, OS, user, compromise status, investigation status, JSON properties/scan results; imported VM identity/provenance uses `dfir-vm-inventory-v1` properties |
+| `networks` | Logical network zones | name, optional CIDR subnet (empty for an unresolved L2-only VLAN), LAN/DMZ/DMS/WAN/etc. type, VLAN, description, optional `site_id`, `owner` (who governs it) and `operator` (who runs it) |
+| `assets` | Computers and devices | primary zone/IP/MAC projection, type (including `hypervisor`), OS, user, compromise status, investigation status, JSON properties/scan results, optional `site_id`, `owner`, `operator`, `origin` (`unknown`, `client_inventory`, `discovered`) and `last_observed`; imported VM identity/provenance uses `dfir-vm-inventory-v1` properties |
+| `sites` | Where equipment is | name (unique ignoring case through the commands), location, description; cannot be deleted while a network or asset is at it |
+| `asset_relations` | Directed links between assets | source and target asset (cascade on delete, `CHECK` they differ), relation type (`runs_on`, `managed_by`, `backs_up_to`, `depends_on`, `connects_to`, `other`), note; unique per (source, target, type). JSON also carries the two asset names as read, for display |
 | `network_interfaces` | Physical/logical NICs and multi-homing | asset, interface name, IP, MAC, optional network, primary flag |
 | `network_connections` | Logical links between zones | source, target, connection type, device, description |
 | `firewalls` | Dedicated firewall records | primary/home network projection, name, vendor, model, legacy JSON rules, configuration text |
@@ -187,6 +189,16 @@ erDiagram
 | `notes` | Versioned investigator notes | title, Markdown text, created/updated timestamps |
 | `topology_views` | Case-local topology presentation | layout mode, node positions, pan/zoom camera, updated timestamp |
 | `investigation_views` | Named saved Investigation Graph views | unique name, description, validated state JSON (hidden entities, filters, display toggles, layout, positions, camera); presentation state excluded from history and expert bundles but included in snapshots |
+
+### 4.1b Environment fields, and how they are written
+
+`create_asset`, `update_asset`, `create_network` and `update_network` keep their original signatures for callers that know nothing of these fields; the `*_with_context` variants take an `AssetContext` or `NetworkContext`. On create a missing field takes its default. On update a missing field keeps the stored value and an empty string clears it, so a caller that predates the fields (or an expert's older build) cannot erase them. Both shells' commands take the context as one optional `context` object.
+
+Discovery and VM-import behavior is decided in the frontend (`discovery-parse.ts`, `discovery-import.ts`, `vm-inventory.ts`, `asset-match.ts`) and only ever reaches the core as reviewed partial-import changes, so it gets the same validation, dry run, stale-preview check, and attributed commit as every other bulk entry. Partial-import ordering applies `site` before `network` and `asset`, and `asset_relation` after both assets; a relation's preview title ("APP01 runs on ESX01") is filled from the dry-run transaction.
+
+### 4.1c Merging duplicate assets
+
+`merge_assets(keep, remove)` is one transaction and one commit. It moves the removed asset's interfaces (dropping one that is the same interface, and giving the kept one the MAC it lacked), timeline events, IOC sightings, attack-path ends, and relations to the kept asset; deletes a relation or attack edge that would point at itself or duplicate an existing relation; fills the kept asset's empty fields; takes the worse compromise status, the better origin, and the later observation time; promotes a primary interface if neither side had one; and deletes the removed asset. Every touched row is recorded as an ordinary entity change (before and after), so an expert's change bundle replays the merge on any copy of the case. Two interfaces are "the same" when their addresses are equal and their MAC addresses agree or one side has none; `same_interface` in `db.rs` and `sameNic` in `asset-match.ts` implement the same rule and must stay in step.
 
 ### 4.2 Primary-interface projection
 

@@ -18,6 +18,7 @@ import { readStoredDeviceConfig } from '@/lib/network-config';
 import type {
   ApiResponse,
   Asset,
+  AssetRelation,
   Case,
   Firewall,
   FirewallInterface,
@@ -43,12 +44,14 @@ const STYLESHEET: cytoscape.StylesheetJson = [
   { selector: 'node.asset[compromise="infected"]', style: { 'background-color': '#fef2f2', 'border-color': '#dc2626', 'border-width': 4 } },
   { selector: 'node.asset.router', style: { shape: 'diamond', width: 116, height: 78, 'background-color': '#eef2ff', 'border-color': '#4f46e5', 'border-width': 3 } },
   { selector: 'node.asset.switch', style: { shape: 'rectangle', width: 132, height: 54, 'background-color': '#ecfeff', 'border-color': '#0e7490', 'border-width': 3 } },
+  { selector: 'node.asset.hypervisor', style: { shape: 'barrel', width: 140, height: 66, 'background-color': '#f5f3ff', 'border-color': '#7c3aed', 'border-width': 3 } },
   { selector: 'node.firewall', style: { shape: 'hexagon', width: 126, height: 70, 'background-color': '#fef3c7', 'border-color': '#d97706', 'border-width': 3 } },
   { selector: 'node.mindmap-root', style: { shape: 'roundrectangle', width: 190, height: 84, 'background-color': '#0e7490', 'border-color': '#155e75', 'border-width': 4, color: '#f8fafc', 'font-size': 14, 'font-weight': 700, 'text-outline-color': '#0e7490', 'text-outline-width': 3 } },
   { selector: 'node.layout-anchor', style: { width: 1, height: 1, opacity: 0, label: '' } },
   { selector: 'edge', style: { width: 2, 'line-color': '#94a3b8', 'target-arrow-color': '#94a3b8', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier', 'font-size': 9, color: '#334155', 'text-background-color': '#fff', 'text-background-opacity': 0.92, 'text-background-padding': '3px', 'text-rotation': 'autorotate' } },
   { selector: 'edge.network-link', style: { label: 'data(label)', 'line-style': 'dashed', 'line-color': '#0891b2', 'target-arrow-color': '#0891b2', width: 4, 'curve-style': 'unbundled-bezier', 'control-point-distances': 55 } },
   { selector: 'edge.secondary-nic', style: { label: '', 'line-style': 'dotted', 'line-color': '#7c3aed', 'target-arrow-color': '#7c3aed', width: 2, opacity: 0.58 } },
+  { selector: 'edge.hosting', style: { label: '', 'line-style': 'dashed', 'line-color': '#8b5cf6', 'target-arrow-color': '#8b5cf6', width: 2, opacity: 0.7 } },
   { selector: 'edge.firewall-nic', style: { label: '', 'line-style': 'dotted', 'line-color': '#d97706', 'target-arrow-color': '#d97706', width: 3, opacity: 0.68 } },
   { selector: 'edge.mindmap-branch', style: { label: '', 'target-arrow-shape': 'none', 'line-color': '#0e7490', width: 6, opacity: 0.4, 'curve-style': 'unbundled-bezier', 'control-point-distances': 60 } },
   { selector: 'edge:selected', style: { label: 'data(label)', opacity: 1, width: 5, 'z-index': 10 } },
@@ -77,6 +80,7 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
   const [firewalls, setFirewalls] = useState<Firewall[]>([]);
   const [firewallInterfaces, setFirewallInterfaces] = useState<FirewallInterface[]>([]);
   const [firewallNatRules, setFirewallNatRules] = useState<FirewallNatRule[]>([]);
+  const [relations, setRelations] = useState<AssetRelation[]>([]);
   const [caseInfo, setCaseInfo] = useState<Case | null>(null);
   const [layout, setLayout] = useState<TopologyLayoutName>('dagre');
   const [selectedNode, setSelectedNode] = useState<cytoscape.NodeDataDefinition | null>(null);
@@ -87,19 +91,21 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
   const [showImporter, setShowImporter] = useDraft('topology.showImporter', false);
   const [showVerifier, setShowVerifier] = useDraft('topology.showVerifier', false);
   const [infrastructureOnly, setInfrastructureOnly] = useState(false);
+  const [showHosting, setShowHosting] = useState(true);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [networkResponse, assetResponse, interfaceResponse, connectionResponse, firewallResponse, firewallInterfaceResponse, natResponse, caseResponse] = await Promise.all([
+      const [networkResponse, assetResponse, interfaceResponse, connectionResponse, firewallResponse, firewallInterfaceResponse, natResponse, caseResponse, relationResponse] = await Promise.all([
         invoke<ApiResponse<Network[]>>('list_networks'), invoke<ApiResponse<Asset[]>>('list_assets'),
         invoke<ApiResponse<NetworkInterface[]>>('list_network_interfaces', { assetId: null }),
         invoke<ApiResponse<NetworkConnection[]>>('list_network_connections'), invoke<ApiResponse<Firewall[]>>('list_firewalls'),
         invoke<ApiResponse<FirewallInterface[]>>('list_firewall_interfaces', { firewallId: null }),
         invoke<ApiResponse<FirewallNatRule[]>>('list_firewall_nat_rules', { firewallId: null }),
         invoke<ApiResponse<Case | null>>('get_current_case_info'),
+        invoke<ApiResponse<AssetRelation[]>>('list_asset_relations'),
       ]);
-      for (const response of [networkResponse, assetResponse, interfaceResponse, connectionResponse, firewallResponse, firewallInterfaceResponse, natResponse, caseResponse]) {
+      for (const response of [networkResponse, assetResponse, interfaceResponse, connectionResponse, firewallResponse, firewallInterfaceResponse, natResponse, caseResponse, relationResponse]) {
         if (!response.success) throw new Error(response.error);
       }
       setNetworks(networkResponse.data ?? []); setAssets(assetResponse.data ?? []); setInterfaces(interfaceResponse.data ?? []);
@@ -107,6 +113,7 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
       setFirewallInterfaces(firewallInterfaceResponse.data ?? []);
       setFirewallNatRules(natResponse.data ?? []);
       setCaseInfo(caseResponse.data ?? null);
+      setRelations(relationResponse.data ?? []);
     } catch (reason) { toast.error(String(reason)); } finally { setLoading(false); }
   }, []);
 
@@ -116,6 +123,13 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
     () => infrastructureOnly ? assets.filter((item) => ['router', 'switch'].includes(item.asset_type)) : assets,
     [assets, infrastructureOnly],
   );
+
+  /** How many guests each host runs, for the label on a hypervisor. */
+  const guestCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const relation of relations) if (relation.relation_type === 'runs_on') counts.set(relation.target_asset_id, (counts.get(relation.target_asset_id) ?? 0) + 1);
+    return counts;
+  }, [relations]);
 
   const automaticLayout = useMemo(
     () => buildTopologyLayout(layout, { networks, assets: visibleAssets, firewalls, connections }),
@@ -138,14 +152,20 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
         result.push({ group: 'edges', classes: 'mindmap-branch', data: { id: `mindmap-branch-${network.id}`, source: MINDMAP_ROOT_ID, target: parent } });
       }
     });
-    visibleAssets.forEach((asset) => result.push({ group: 'nodes', classes: `asset ${asset.asset_type}`, data: { id: `asset-${asset.id}`, label: `${asset.name}\n${['router', 'switch'].includes(asset.asset_type) ? asset.asset_type.toUpperCase() : asset.ip_address || 'No IP'}`, parent: asset.network_id ? `network-${asset.network_id}` : undefined, compromise: asset.compromise_status, rawData: asset } }));
+    visibleAssets.forEach((asset) => result.push({ group: 'nodes', classes: `asset ${asset.asset_type}`, data: { id: `asset-${asset.id}`, label: `${asset.name}\n${['router', 'switch'].includes(asset.asset_type) ? asset.asset_type.toUpperCase() : asset.asset_type === 'hypervisor' && guestCounts.get(asset.id) ? `${guestCounts.get(asset.id)} VM${guestCounts.get(asset.id) === 1 ? '' : 's'} · ${asset.ip_address || 'No IP'}` : asset.ip_address || 'No IP'}`, parent: asset.network_id ? `network-${asset.network_id}` : undefined, compromise: asset.compromise_status, rawData: asset } }));
     firewalls.forEach((firewall) => result.push({ group: 'nodes', classes: 'firewall', data: { id: `firewall-${firewall.id}`, label: `${firewall.name}\n${firewall.vendor ? `${firewall.vendor} ` : ''}Firewall`, parent: firewall.network_id ? `network-${firewall.network_id}` : undefined, rawData: firewall } }));
     connections.forEach((connection) => result.push({ group: 'edges', classes: 'network-link', data: { id: `connection-${connection.id}`, source: `network-${connection.source_network_id}`, target: `network-${connection.target_network_id}`, label: connection.device_name ? `${connection.connection_type} · ${connection.device_name}` : connection.connection_type, rawData: connection } }));
     const visibleAssetIds = new Set(visibleAssets.map((item) => item.id));
-    interfaces.filter((item) => visibleAssetIds.has(item.asset_id) && !item.is_primary && item.network_id).forEach((item) => result.push({ group: 'edges', classes: 'secondary-nic', data: { id: `interface-edge-${item.id}`, source: `asset-${item.asset_id}`, target: `network-${item.network_id}`, label: `${item.name} · ${item.ip_address || 'L2'}`, rawData: item } }));
+    // A second NIC on the asset's own zone would only draw a loop back to it.
+    const homeZone = new Map(visibleAssets.map((asset) => [asset.id, asset.network_id]));
+    interfaces.filter((item) => visibleAssetIds.has(item.asset_id) && !item.is_primary && item.network_id && item.network_id !== homeZone.get(item.asset_id)).forEach((item) => result.push({ group: 'edges', classes: 'secondary-nic', data: { id: `interface-edge-${item.id}`, source: `asset-${item.asset_id}`, target: `network-${item.network_id}`, label: `${item.name} · ${item.ip_address || 'L2'}`, rawData: item } }));
+    if (showHosting) {
+      relations.filter((item) => item.relation_type === 'runs_on' && visibleAssetIds.has(item.source_asset_id) && visibleAssetIds.has(item.target_asset_id))
+        .forEach((item) => result.push({ group: 'edges', classes: 'hosting', data: { id: `relation-edge-${item.id}`, source: `asset-${item.source_asset_id}`, target: `asset-${item.target_asset_id}`, label: 'runs on', rawData: item } }));
+    }
     firewallInterfaces.filter((item) => item.network_id && (!item.is_primary || !firewalls.find((firewall) => firewall.id === item.firewall_id)?.network_id)).forEach((item) => result.push({ group: 'edges', classes: 'firewall-nic', data: { id: `firewall-interface-edge-${item.id}`, source: `firewall-${item.firewall_id}`, target: `network-${item.network_id}`, label: `${item.name} · ${item.ip_addresses.join(', ')}`, rawData: item } }));
     return result;
-  }, [layout, caseInfo, networks, visibleAssets, firewalls, connections, interfaces, firewallInterfaces]);
+  }, [layout, caseInfo, networks, visibleAssets, firewalls, connections, interfaces, firewallInterfaces, relations, showHosting, guestCounts]);
 
   const applyPositions = useCallback((savedView?: TopologyViewState | null, fit = true) => {
     const cy = cyRef.current;
@@ -272,7 +292,7 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
       edges.push({
         id: edge.id(), source: edge.source().id(), target: edge.target().id(),
         label: String(edge.data('label') ?? '') || undefined,
-        kind: edge.hasClass('mindmap-branch') ? 'branch' : edge.hasClass('network-link') ? 'connection' : 'nic',
+        kind: edge.hasClass('mindmap-branch') ? 'branch' : edge.hasClass('network-link') ? 'connection' : edge.hasClass('hosting') ? 'hosting' : 'nic',
       });
     });
     return { title: caseInfo?.name ?? 'Network topology', nodes, edges };
@@ -342,6 +362,7 @@ export default function NetworkTopology({ refreshTrigger }: Props) {
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
         <label className="flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs text-slate-600"><input type="checkbox" checked={infrastructureOnly} onChange={(event) => setInfrastructureOnly(event.target.checked)} />Infrastructure only</label>
+        {relations.some((item) => item.relation_type === 'runs_on') && <label className="flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-xs text-slate-600" title="Draw a dashed line from each VM to the hypervisor it runs on"><input type="checkbox" checked={showHosting} onChange={(event) => setShowHosting(event.target.checked)} />VM hosting links</label>}
         <Button size="sm" variant={showImporter ? 'default' : 'outline'} onClick={() => { setShowImporter((value) => !value); setShowVerifier(false); }} disabled={!caseInfo}><FileUp size={16} />Import config</Button>
         <Button size="sm" variant={showVerifier ? 'default' : 'outline'} onClick={() => { setShowVerifier((value) => !value); setShowImporter(false); }} disabled={!caseInfo}><SearchCheck size={16} />Verify connect</Button>
         <Badge variant={viewDirty ? 'destructive' : 'outline'}>{viewStatus}</Badge>

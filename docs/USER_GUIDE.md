@@ -2,7 +2,7 @@
 
 Document version: 1.0  
 Application version: 1.0.20
-Last reviewed: 2026-11-12
+Last reviewed: 2026-11-14
 
 ## 1. Purpose
 
@@ -97,6 +97,11 @@ Open **Networks → Zones** and record each known LAN, DMZ/DMS, WAN, guest, mana
 
 Do not wait for the map to be complete. Record confirmed information first and revise it as the team learns more.
 
+Clients often know only part of their own network, and different departments govern different segments. Record that as you learn it:
+
+- **Sites.** Open the **Sites** tab and add each office, plant, or data center (name, location, description). A zone or an asset can then say which site it is at, and the Assets list can be filtered by site. A site cannot be deleted while a zone or an asset is still at it.
+- **Owner and Operated by.** A zone has an *owner* (the department or business unit that governs it) and an *operator* (the admin team, managed service provider, or vendor that runs it). Assets have the same two fields, because a segment run by IT Operations can hold machines owned by Finance. Both are free text, and both are searchable.
+
 ### Step 2: Record connections and firewalls
 
 Use **Networks → Connections** to record links between zones and **Networks → Firewalls** for dedicated firewall devices. Select the interface/NAT button beside a firewall to manage its structured details.
@@ -121,7 +126,13 @@ Open **Assets** and add each workstation, server, VM, mobile device, firewall, a
 - operating system and observed user;
 - compromise status: `unknown`, `clean`, `suspected`, or `infected`;
 - investigation status: `not started`, `in progress`, or `completed`;
+- site, owner (department), and *operated by* (admin team, MSP, or vendor);
+- **origin**: whether the machine is in the client's own inventory, was discovered by your team, or is not recorded, and **last observed**, the time it was last seen active; and
 - free-text properties/findings (who owns it, where it runs, what was found) and optional JSON scan results.
+
+Origin answers the question a client cannot: *what is on my network that I did not know about?* Filter **Origin → Discovered, not in client inventory** to list exactly that. A machine the client's own inventory later lists keeps being tracked as the client's; discovery never downgrades it.
+
+The asset type **hypervisor** is for ESXi, Proxmox, and Hyper-V hosts. Under **Relations** in an expanded asset you can record how it relates to others: *runs on* (a VM and its host), *is managed by*, *backs up to*, *depends on*, *connects to*. The asset it points at, and everything that points at it, are listed there.
 
 Use the status filters to identify systems that have not been started or completed. This list should drive physical or remote responder assignments and reduce duplicate visits.
 
@@ -137,7 +148,31 @@ To add many assets at once, select **Paste / import assets**. The default source
 4. select **Parse and review** and inspect create/update/invalid rows and review points; and
 5. apply the reviewed records in one transaction.
 
+Tick **Also record the hypervisor hosts as assets, and which VM runs on which** (on by default for ESXi, Proxmox, and Hyper-V). Each host named in the inventory becomes a `hypervisor` asset, once, and every VM gets a *runs on* link to it. A host already in the case under that name is used as it is. If a VM moved to another host since the last import, its existing link is re-pointed and the review says so. **Topology** draws a dashed line from each VM to its host (toggle **VM hosting links**), and a host's node shows how many VMs it carries. Everything imported from a hypervisor inventory is marked as in the client's inventory.
+
+A machine you typed by hand before importing is not duplicated: when its MAC address matches, or its name and address both match, the import updates it, keeps the name you gave it, and says so in the review. A name alone, or an address alone, only produces a review point suggesting you check **Possible duplicates**.
+
 Imported guests are ordinary `vm` assets, not a separate inventory silo. Expand one to see its platform/native ID, host/node, runtime state, CPU, memory, disk, and imported NICs. An address attaches to an existing subnet only when exactly one is the most specific fit; ambiguous addresses are left unassigned and listed as review points. No new network is invented from an address alone. Re-imports preserve investigation/compromise state and reuse importer-managed identities. A VM missing from a later inventory is retained because absence from one export does not prove deletion. See [INPUT_FORMATS.md](INPUT_FORMATS.md#12-virtual-machine-inventories) for copy-ready vendor commands, field aliases, identity rules, and limitations.
+
+#### Paste discovery output
+
+What you pull from the client network can be pasted straight in. Select **Paste discovery output** and paste, or load a file of:
+
+| Output | Commands |
+|---|---|
+| ARP / neighbor table | `arp -a` (Windows, Linux, macOS), `arp -n`, `ip neigh`, Cisco `show ip arp` |
+| Windows adapter configuration | `ipconfig /all` |
+| Linux / BSD / macOS interfaces | `ip addr`, `ifconfig` (enter the host name, which those commands do not print) |
+| nmap | normal output (`-oN`) or greppable (`-oG`), including ping sweeps; XML is not read |
+| DHCP leases | ISC `dhcpd.leases`, `dnsmasq.leases`, `netsh dhcp server … show clients`, `Get-DhcpServerv4Lease` exported as CSV |
+
+The format is detected automatically; choose it by hand if detection is wrong. Broadcast and multicast entries, loopback and link-local addresses, and container bridges are skipped, and only IPv4 is read. Each host found is a row with a choice: **Add as new asset**, **Update** the asset it matches, or **Skip**. A host starts on:
+
+- *Update* when its MAC address matches an asset, or its name and address do, or (from live output, not DHCP history) when only its address does;
+- *Skip* when the same address now has a different MAC address (an address conflict, a replaced card, or spoofing; the review points list it), when only a short name matches, or when it is a gateway or DNS server that another host's output merely mentions; and
+- *Add as new asset* when nothing in the case matches.
+
+Choose the time the output was observed (default: now); DHCP and nmap files carry their own times where they have them. A new host is recorded with what the output says and nothing more: its name (or its address, which you can edit), type `other` (Windows when `ipconfig` says so), origin *discovered*, the time seen, its interfaces, and the zone whose subnet contains each address. nmap open ports and MAC vendor are kept in the asset's scan results. An existing asset only gains what it lacked: a MAC address on its interface, an interface it did not have, the observation time. Nothing is written until you select **Review** and **Apply**.
 
 ### Step 4: Add every NIC
 
@@ -145,7 +180,7 @@ Expand an asset to manage network interfaces. Create, edit, delete, or select th
 
 Rules:
 
-- an asset can have multiple interfaces;
+- an asset can have multiple interfaces (a duplicate of the same address and MAC is never added by the importers);
 - at most one interface is primary;
 - the asset's main network/IP/MAC fields mirror the primary interface; and
 - secondary interfaces create explicit cross-zone edges in the topology.
@@ -249,6 +284,19 @@ Captures wait in the **Capture inbox** until someone deals with each one:
 - **Mark processed** or **Dismiss** when nothing needs recording; **Reopen** brings it back.
 
 The captured text itself never changes. Processing only creates or links records.
+
+### Throughout: duplicate assets and merging them
+
+The same machine often enters the case twice: typed by hand, then imported; seen once by name and once by address; found by two teams. **Add Asset** checks what you are adding against the case and asks before it creates a probable twin. **Possible duplicates** (with a count) on the Assets screen lists pairs that share a MAC address, the same name at the same address, or just a name or an address, strongest first. A shared MAC address, or one MAC address on one side and none on the other at the same address, counts as one machine; two different MAC addresses never do.
+
+Choose which asset of a pair to keep. The other is folded into it:
+
+- its interfaces move over (one that duplicates an existing interface is dropped, and the kept interface learns its MAC address);
+- its timeline events, IOC sightings, attack paths, and relations point at the kept asset (a link between the two would point at itself, so it is dropped);
+- the kept asset takes any detail it lacked, the worse compromise status, the better origin, and the later observation time, and notes the merged-away name ("also known as…"); and
+- the merged-away asset is deleted.
+
+All of it is one attributed commit. The deleted record stays readable in case history, and the same commit replays when an expert's change bundle is merged elsewhere.
 
 ### Throughout: search the whole case
 

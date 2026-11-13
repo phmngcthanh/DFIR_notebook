@@ -394,6 +394,135 @@ fn captures_drafts_and_search_work_through_the_dispatcher() {
 }
 
 #[test]
+fn sites_relations_and_asset_merges_work_through_the_dispatcher() {
+    let server = TempServer::new(true);
+    let payload = create(&server.state, "correct-horse-battery").unwrap();
+    let context = session(&server.state, &payload);
+
+    let site = run(
+        &server.state,
+        &context,
+        "create_new_site",
+        json!({ "name": "HQ", "location": "Berlin" }),
+    )
+    .unwrap();
+    assert_eq!(site["name"], "HQ");
+    let revision = context.case.revision();
+    assert!(revision >= 1, "a site is case content");
+
+    // The nested context object carries camelCase keys like every other argument.
+    let network = run(
+        &server.state,
+        &context,
+        "create_new_network",
+        json!({
+            "name": "Office", "subnet": "10.0.0.0/24", "networkType": "LAN", "description": "",
+            "context": { "siteId": site["id"], "owner": "IT", "operator": "MSP" }
+        }),
+    )
+    .unwrap();
+    assert_eq!(network["site_id"], site["id"]);
+    assert_eq!(network["operator"], "MSP");
+
+    let asset_args = |name: &str, ip: &str, asset_type: &str, extra: serde_json::Value| {
+        let mut args = json!({
+            "name": name, "ipAddress": ip, "assetType": asset_type,
+            "compromiseStatus": "unknown", "investigationStatus": "not_started"
+        });
+        args["context"] = extra;
+        args
+    };
+    let host = run(
+        &server.state,
+        &context,
+        "create_new_asset",
+        asset_args(
+            "ESX01",
+            "10.0.0.10",
+            "hypervisor",
+            json!({ "origin": "client_inventory", "siteId": site["id"] }),
+        ),
+    )
+    .unwrap();
+    let vm = run(&server.state, &context, "create_new_asset", asset_args("APP01", "10.0.0.15", "vm", json!({ "origin": "discovered", "lastObserved": "2026-11-13T10:00:00Z", "owner": "Finance" }))).unwrap();
+    let copy = run(
+        &server.state,
+        &context,
+        "create_new_asset",
+        asset_args("app01.corp.local", "10.0.0.15", "vm", json!({})),
+    )
+    .unwrap();
+    assert_eq!(host["origin"], "client_inventory");
+    assert_eq!(vm["last_observed"], "2026-11-13T10:00:00.000Z");
+    assert_eq!(copy["origin"], "unknown");
+
+    // An update without a context leaves the environment fields alone.
+    let renamed = run(
+        &server.state,
+        &context,
+        "update_existing_asset",
+        json!({
+            "id": vm["id"], "networkId": vm["network_id"], "name": "APP01", "ipAddress": "10.0.0.15",
+            "assetType": "vm", "compromiseStatus": "unknown", "investigationStatus": "in_progress"
+        }),
+    )
+    .unwrap();
+    assert_eq!(renamed["owner"], "Finance");
+    assert_eq!(renamed["origin"], "discovered");
+
+    let link = run(
+        &server.state,
+        &context,
+        "create_new_asset_relation",
+        json!({ "sourceAssetId": vm["id"], "targetAssetId": host["id"], "relationType": "runs_on" }),
+    )
+    .unwrap();
+    assert_eq!(link["target_name"], "ESX01");
+    let duplicate = run(
+        &server.state,
+        &context,
+        "create_new_asset_relation",
+        json!({ "sourceAssetId": vm["id"], "targetAssetId": host["id"], "relationType": "runs_on" }),
+    );
+    assert!(duplicate.unwrap_err().contains("already related"));
+    let listed = run(&server.state, &context, "list_asset_relations", json!({})).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+
+    let before = context.case.revision();
+    let merged = run(
+        &server.state,
+        &context,
+        "merge_asset_records",
+        json!({ "keepId": vm["id"], "removeId": copy["id"] }),
+    )
+    .unwrap();
+    assert_eq!(merged["asset"]["id"], vm["id"]);
+    assert!(
+        context.case.revision() > before,
+        "a merge is a write the other browsers must hear about"
+    );
+    let assets = run(&server.state, &context, "list_assets", json!({})).unwrap();
+    assert_eq!(assets.as_array().unwrap().len(), 2);
+
+    // A site cannot go while something is at it.
+    let refused = run(
+        &server.state,
+        &context,
+        "remove_site",
+        json!({ "id": site["id"] }),
+    );
+    assert!(refused.unwrap_err().contains("still used"));
+    let hits = run(
+        &server.state,
+        &context,
+        "search_case_records",
+        json!({ "query": "berlin" }),
+    )
+    .unwrap();
+    assert_eq!(hits[0]["entity_type"], "site");
+}
+
+#[test]
 fn the_expert_team_travels_with_the_session_into_history() {
     let server = TempServer::new(true);
     let created = create(&server.state, "correct-horse-battery").unwrap();

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@/lib/api';
 import { useDraft } from '@/lib/drafts';
-import { Cable, Network as NetworkIcon, Pencil, Plus, Search, Shield, Trash2, Wifi } from 'lucide-react';
+import { Cable, MapPin, Network as NetworkIcon, Pencil, Plus, Search, Shield, Trash2, Wifi } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -13,12 +13,13 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import FirewallDetails from '@/components/FirewallDetails';
 import QuickNoteCell from '@/components/QuickNoteCell';
-import type { ApiResponse, Firewall, Network, NetworkConnection } from '@/types';
+import type { ApiResponse, Firewall, Network, NetworkConnection, Site } from '@/types';
 
 interface Props { refreshTrigger: number }
-type Section = 'zones' | 'connections' | 'firewalls';
+type Section = 'zones' | 'connections' | 'firewalls' | 'sites';
 
-const emptyNetwork = { name: '', subnet: '', networkType: 'LAN', description: '', vlanId: '' };
+const emptyNetwork = { name: '', subnet: '', networkType: 'LAN', description: '', vlanId: '', siteId: '', owner: '', operator: '' };
+const emptySite = { name: '', location: '', description: '' };
 const emptyConnection = { sourceNetworkId: '', targetNetworkId: '', connectionType: 'routed', description: '', deviceName: '' };
 const emptyFirewall = { networkId: '', name: '', vendor: '', model: '', rules: '', configText: '' };
 
@@ -28,24 +29,29 @@ export default function NetworkManager({ refreshTrigger }: Props) {
   const [networks, setNetworks] = useState<Network[]>([]);
   const [connections, setConnections] = useState<NetworkConnection[]>([]);
   const [firewalls, setFirewalls] = useState<Firewall[]>([]);
+  const [sites, setSites] = useState<Site[]>([]);
   const [search, setSearch] = useDraft('networks.search', '');
   const [showForm, setShowForm] = useDraft('networks.showForm', false, { persist: true });
   const [editingId, setEditingId] = useDraft<string | null>('networks.editingId', null, { persist: true });
   const [networkForm, setNetworkForm] = useDraft('networks.networkForm', emptyNetwork, { persist: true });
   const [connectionForm, setConnectionForm] = useDraft('networks.connectionForm', emptyConnection, { persist: true });
   const [firewallForm, setFirewallForm] = useDraft('networks.firewallForm', emptyFirewall, { persist: true });
+  const [siteForm, setSiteForm] = useDraft('networks.siteForm', emptySite, { persist: true });
   const [selectedFirewallId, setSelectedFirewallId] = useDraft<string | null>('networks.selectedFirewallId', null);
 
   const loadData = useCallback(async () => {
     try {
-      const [networkResponse, connectionResponse, firewallResponse] = await Promise.all([
+      const [networkResponse, connectionResponse, firewallResponse, siteResponse] = await Promise.all([
         invoke<ApiResponse<Network[]>>('list_networks'),
         invoke<ApiResponse<NetworkConnection[]>>('list_network_connections'),
         invoke<ApiResponse<Firewall[]>>('list_firewalls'),
+        invoke<ApiResponse<Site[]>>('list_sites'),
       ]);
       if (!networkResponse.success) throw new Error(networkResponse.error);
       if (!connectionResponse.success) throw new Error(connectionResponse.error);
       if (!firewallResponse.success) throw new Error(firewallResponse.error);
+      if (!siteResponse.success) throw new Error(siteResponse.error);
+      setSites(siteResponse.data ?? []);
       setNetworks(networkResponse.data ?? []);
       setConnections(connectionResponse.data ?? []);
       setFirewalls(firewallResponse.data ?? []);
@@ -55,15 +61,18 @@ export default function NetworkManager({ refreshTrigger }: Props) {
   useEffect(() => { void loadData(); }, [loadData, refreshTrigger]);
 
   const resetForm = () => {
-    setShowForm(false); setEditingId(null); setNetworkForm(emptyNetwork); setConnectionForm(emptyConnection); setFirewallForm(emptyFirewall);
+    setShowForm(false); setEditingId(null); setNetworkForm(emptyNetwork); setConnectionForm(emptyConnection); setFirewallForm(emptyFirewall); setSiteForm(emptySite);
   };
 
   const startAdd = () => { resetForm(); setShowForm(true); };
   const startNetworkEdit = (item: Network) => {
-    setEditingId(item.id); setNetworkForm({ name: item.name, subnet: item.subnet, networkType: item.network_type, description: item.description, vlanId: item.vlan_id ?? '' }); setShowForm(true);
+    setEditingId(item.id); setNetworkForm({ name: item.name, subnet: item.subnet, networkType: item.network_type, description: item.description, vlanId: item.vlan_id ?? '', siteId: item.site_id ?? '', owner: item.owner ?? '', operator: item.operator ?? '' }); setShowForm(true);
   };
   const startConnectionEdit = (item: NetworkConnection) => {
     setEditingId(item.id); setConnectionForm({ sourceNetworkId: item.source_network_id, targetNetworkId: item.target_network_id, connectionType: item.connection_type, description: item.description, deviceName: item.device_name ?? '' }); setShowForm(true);
+  };
+  const startSiteEdit = (item: Site) => {
+    setEditingId(item.id); setSiteForm({ name: item.name, location: item.location, description: item.description }); setShowForm(true);
   };
   const startFirewallEdit = (item: Firewall) => {
     setEditingId(item.id); setFirewallForm({ networkId: item.network_id ?? '', name: item.name, vendor: item.vendor ?? '', model: item.model ?? '', rules: item.rules ?? '', configText: item.config_text ?? '' }); setShowForm(true);
@@ -71,8 +80,18 @@ export default function NetworkManager({ refreshTrigger }: Props) {
 
   const saveNetwork = async () => {
     const command = editingId ? 'update_existing_network' : 'create_new_network';
-    const response = await invoke<ApiResponse<Network>>(command, { id: editingId, ...networkForm, vlanId: networkForm.vlanId || null });
+    // A draft saved before these fields existed restores without them.
+    const values = { ...emptyNetwork, ...networkForm };
+    const response = await invoke<ApiResponse<Network>>(command, {
+      id: editingId, name: values.name, subnet: values.subnet, networkType: values.networkType, description: values.description, vlanId: values.vlanId || null,
+      context: { siteId: values.siteId, owner: values.owner, operator: values.operator },
+    });
     if (!response.success) throw new Error(response.error || 'Failed to save network');
+  };
+  const saveSite = async () => {
+    const command = editingId ? 'update_existing_site' : 'create_new_site';
+    const response = await invoke<ApiResponse<Site>>(command, { id: editingId, name: siteForm.name, location: siteForm.location || null, description: siteForm.description || null });
+    if (!response.success) throw new Error(response.error || 'Failed to save site');
   };
   const saveConnection = async () => {
     const command = editingId ? 'update_existing_network_connection' : 'create_new_network_connection';
@@ -90,6 +109,7 @@ export default function NetworkManager({ refreshTrigger }: Props) {
       if (section === 'zones') await saveNetwork();
       if (section === 'connections') await saveConnection();
       if (section === 'firewalls') await saveFirewall();
+      if (section === 'sites') await saveSite();
       toast.success(editingId ? 'Changes saved' : 'Record created'); resetForm(); await loadData();
     } catch (reason) { toast.error(String(reason)); }
   };
@@ -104,32 +124,36 @@ export default function NetworkManager({ refreshTrigger }: Props) {
   };
 
   const normalized = search.trim().toLowerCase();
-  const filteredNetworks = useMemo(() => networks.filter((item) => !normalized || [item.name, item.subnet, item.network_type, item.description, item.vlan_id, item.quick_note].some((value) => value?.toLowerCase().includes(normalized))), [networks, normalized]);
+  const siteNames = useMemo(() => new Map(sites.map((site): [string, string] => [site.id, site.name])), [sites]);
+  const filteredNetworks = useMemo(() => networks.filter((item) => !normalized || [item.name, item.subnet, item.network_type, item.description, item.vlan_id, item.quick_note, item.owner, item.operator, siteNames.get(item.site_id ?? '')].some((value) => value?.toLowerCase().includes(normalized))), [networks, normalized, siteNames]);
+  const filteredSites = useMemo(() => sites.filter((item) => !normalized || [item.name, item.location, item.description].some((value) => value?.toLowerCase().includes(normalized))), [sites, normalized]);
   const filteredConnections = useMemo(() => connections.filter((item) => !normalized || [item.source_network_name, item.target_network_name, item.connection_type, item.device_name, item.description].some((value) => value?.toLowerCase().includes(normalized))), [connections, normalized]);
   const filteredFirewalls = useMemo(() => firewalls.filter((item) => !normalized || [item.name, item.network_name, item.vendor, item.model, item.quick_note].some((value) => value?.toLowerCase().includes(normalized))), [firewalls, normalized]);
 
   return (
     <div className="space-y-4 p-6">
       <div className="flex items-center justify-between">
-        <div><h2 className="text-2xl font-bold text-slate-800">Network Design</h2><p className="text-sm text-slate-500">Zones, logical links, and dedicated firewall records</p></div>
-        <Button onClick={startAdd} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add {section === 'zones' ? 'Zone' : section === 'connections' ? 'Connection' : 'Firewall'}</Button>
+        <div><h2 className="text-2xl font-bold text-slate-800">Network Design</h2><p className="text-sm text-slate-500">Sites, zones, logical links, and dedicated firewall records</p></div>
+        <Button onClick={startAdd} className="bg-cyan-600 hover:bg-cyan-700"><Plus size={16} className="mr-2" />Add {section === 'zones' ? 'Zone' : section === 'connections' ? 'Connection' : section === 'sites' ? 'Site' : 'Firewall'}</Button>
       </div>
       <Tabs value={section} onValueChange={(value) => { resetForm(); setSection(value as Section); }}>
         <div className="flex items-center justify-between gap-4">
-          <TabsList><TabsTrigger value="zones"><Wifi size={14} />Zones</TabsTrigger><TabsTrigger value="connections"><Cable size={14} />Connections</TabsTrigger><TabsTrigger value="firewalls"><Shield size={14} />Firewalls</TabsTrigger></TabsList>
+          <TabsList><TabsTrigger value="zones"><Wifi size={14} />Zones</TabsTrigger><TabsTrigger value="connections"><Cable size={14} />Connections</TabsTrigger><TabsTrigger value="firewalls"><Shield size={14} />Firewalls</TabsTrigger><TabsTrigger value="sites"><MapPin size={14} />Sites</TabsTrigger></TabsList>
           <div className="relative w-80"><Search size={15} className="absolute left-3 top-2.5 text-slate-400" /><Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search network records…" className="pl-9" /></div>
         </div>
 
         {showForm && (
           <Card className="mt-4"><CardHeader><CardTitle className="text-sm">{editingId ? 'Edit' : 'New'} {section.slice(0, -1)}</CardTitle></CardHeader><CardContent>
-            {section === 'zones' && <NetworkForm value={networkForm} onChange={setNetworkForm} />}
+            {section === 'zones' && <NetworkForm value={{ ...emptyNetwork, ...networkForm }} onChange={setNetworkForm} sites={sites} />}
+            {section === 'sites' && <SiteForm value={siteForm} onChange={setSiteForm} />}
             {section === 'connections' && <ConnectionForm value={connectionForm} onChange={setConnectionForm} networks={networks} />}
             {section === 'firewalls' && <FirewallForm value={firewallForm} onChange={setFirewallForm} networks={networks} />}
             <div className="mt-4 flex gap-2"><Button onClick={() => void handleSave()} className="bg-cyan-600 hover:bg-cyan-700">Save</Button><Button variant="outline" onClick={resetForm}>Cancel</Button></div>
           </CardContent></Card>
         )}
 
-        <TabsContent value="zones"><NetworkTable items={filteredNetworks} onEdit={startNetworkEdit} onDelete={(id) => void handleDelete('remove_network', id, 'network zone')} onNoteSaved={() => void loadData()} /></TabsContent>
+        <TabsContent value="sites"><SiteTable items={filteredSites} networks={networks} onEdit={startSiteEdit} onDelete={(id) => void handleDelete('remove_site', id, 'site')} /></TabsContent>
+        <TabsContent value="zones"><NetworkTable items={filteredNetworks} siteNames={siteNames} onEdit={startNetworkEdit} onDelete={(id) => void handleDelete('remove_network', id, 'network zone')} onNoteSaved={() => void loadData()} /></TabsContent>
         <TabsContent value="connections"><ConnectionTable items={filteredConnections} onEdit={startConnectionEdit} onDelete={(id) => void handleDelete('remove_network_connection', id, 'network connection')} /></TabsContent>
         <TabsContent value="firewalls" className="space-y-4"><FirewallTable items={filteredFirewalls} selectedId={selectedFirewallId} onManage={(id) => setSelectedFirewallId(selectedFirewallId === id ? null : id)} onEdit={startFirewallEdit} onDelete={(id) => void handleDelete('remove_firewall', id, 'firewall')} onNoteSaved={() => void loadData()} />{firewalls.find((item) => item.id === selectedFirewallId) && <FirewallDetails firewall={firewalls.find((item) => item.id === selectedFirewallId)!} networks={networks} onChanged={loadData} />}</TabsContent>
       </Tabs>
@@ -137,13 +161,25 @@ export default function NetworkManager({ refreshTrigger }: Props) {
   );
 }
 
-interface NetworkFormValue { name: string; subnet: string; networkType: string; description: string; vlanId: string }
-function NetworkForm({ value, onChange }: { value: NetworkFormValue; onChange: (value: NetworkFormValue) => void }) {
+interface NetworkFormValue { name: string; subnet: string; networkType: string; description: string; vlanId: string; siteId: string; owner: string; operator: string }
+function NetworkForm({ value, onChange, sites }: { value: NetworkFormValue; onChange: (value: NetworkFormValue) => void; sites: Site[] }) {
   return <div className="space-y-3"><div className="grid grid-cols-4 gap-3">
     <Field label="Name *"><Input value={value.name} onChange={(e) => onChange({ ...value, name: e.target.value })} /></Field>
     <Field label="Subnet (optional for L2 VLAN)"><Input value={value.subnet} placeholder="192.168.1.0/24" onChange={(e) => onChange({ ...value, subnet: e.target.value })} /></Field>
     <Field label="Type"><Select value={value.networkType} onValueChange={(networkType) => onChange({ ...value, networkType })}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{['LAN','DMZ','DMS','WAN','GUEST','MANAGEMENT','OTHER'].map((type) => <SelectItem key={type} value={type}>{type}</SelectItem>)}</SelectContent></Select></Field>
     <Field label="VLAN"><Input value={value.vlanId} onChange={(e) => onChange({ ...value, vlanId: e.target.value })} /></Field>
+  </div><div className="grid grid-cols-3 gap-3">
+    <Field label="Site"><Select value={value.siteId || '__none__'} onValueChange={(next) => onChange({ ...value, siteId: next === '__none__' ? '' : next })}><SelectTrigger aria-label="Site"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="__none__">No site</SelectItem>{sites.map((site) => <SelectItem key={site.id} value={site.id}>{site.name}</SelectItem>)}</SelectContent></Select></Field>
+    <Field label="Owner (who governs it)"><Input value={value.owner} onChange={(e) => onChange({ ...value, owner: e.target.value })} placeholder="Department or business unit" /></Field>
+    <Field label="Operated by"><Input value={value.operator} onChange={(e) => onChange({ ...value, operator: e.target.value })} placeholder="Admin team, MSP, or vendor" /></Field>
+  </div><Field label="Description"><Textarea value={value.description} onChange={(e) => onChange({ ...value, description: e.target.value })} /></Field></div>;
+}
+
+interface SiteFormValue { name: string; location: string; description: string }
+function SiteForm({ value, onChange }: { value: SiteFormValue; onChange: (value: SiteFormValue) => void }) {
+  return <div className="space-y-3"><div className="grid grid-cols-2 gap-3">
+    <Field label="Name *"><Input value={value.name} onChange={(e) => onChange({ ...value, name: e.target.value })} placeholder="Head office, Plant 2, DC East" /></Field>
+    <Field label="Location"><Input value={value.location} onChange={(e) => onChange({ ...value, location: e.target.value })} placeholder="Address, floor, room" /></Field>
   </div><Field label="Description"><Textarea value={value.description} onChange={(e) => onChange({ ...value, description: e.target.value })} /></Field></div>;
 }
 
@@ -173,7 +209,8 @@ function NetworkSelect({ value, networks, onChange, optional = false }: { value:
 }
 
 const Actions = ({ onEdit, onDelete }: { onEdit: () => void; onDelete: () => void }) => <div className="flex"><Button size="sm" variant="ghost" onClick={onEdit}><Pencil size={14} /></Button><Button size="sm" variant="ghost" onClick={onDelete}><Trash2 size={14} className="text-red-500" /></Button></div>;
-function NetworkTable({ items, onEdit, onDelete, onNoteSaved }: { items: Network[]; onEdit: (item: Network) => void; onDelete: (id: string) => void; onNoteSaved: () => void }) { return <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Subnet</TableHead><TableHead>Type</TableHead><TableHead>VLAN</TableHead><TableHead>Description</TableHead><TableHead>Note</TableHead><TableHead /></TableRow></TableHeader><TableBody>{items.length ? items.map((item) => <TableRow key={item.id}><TableCell className="font-medium">{item.name}</TableCell><TableCell className="font-mono text-xs">{item.subnet || 'Unresolved L2'}</TableCell><TableCell>{item.network_type}</TableCell><TableCell>{item.vlan_id || '—'}</TableCell><TableCell className="max-w-sm truncate">{item.description}</TableCell><TableCell className="min-w-40"><QuickNoteCell entityType="network" id={item.id} note={item.quick_note} onSaved={onNoteSaved} /></TableCell><TableCell><Actions onEdit={() => onEdit(item)} onDelete={() => onDelete(item.id)} /></TableCell></TableRow>) : <Empty columns={7} />}</TableBody></Table></CardContent></Card>; }
+function NetworkTable({ items, siteNames, onEdit, onDelete, onNoteSaved }: { items: Network[]; siteNames: Map<string, string>; onEdit: (item: Network) => void; onDelete: (id: string) => void; onNoteSaved: () => void }) { return <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Subnet</TableHead><TableHead>Type</TableHead><TableHead>VLAN</TableHead><TableHead>Site</TableHead><TableHead>Responsibility</TableHead><TableHead>Description</TableHead><TableHead>Note</TableHead><TableHead /></TableRow></TableHeader><TableBody>{items.length ? items.map((item) => <TableRow key={item.id}><TableCell className="font-medium">{item.name}</TableCell><TableCell className="font-mono text-xs">{item.subnet || 'Unresolved L2'}</TableCell><TableCell>{item.network_type}</TableCell><TableCell>{item.vlan_id || '—'}</TableCell><TableCell>{siteNames.get(item.site_id ?? '') || '—'}</TableCell><TableCell className="text-xs">{item.owner || item.operator ? <>{item.owner && <div>Owner: {item.owner}</div>}{item.operator && <div className="text-slate-500">Operated by: {item.operator}</div>}</> : '—'}</TableCell><TableCell className="max-w-sm truncate">{item.description}</TableCell><TableCell className="min-w-40"><QuickNoteCell entityType="network" id={item.id} note={item.quick_note} onSaved={onNoteSaved} /></TableCell><TableCell><Actions onEdit={() => onEdit(item)} onDelete={() => onDelete(item.id)} /></TableCell></TableRow>) : <Empty columns={9} />}</TableBody></Table></CardContent></Card>; }
+function SiteTable({ items, networks, onEdit, onDelete }: { items: Site[]; networks: Network[]; onEdit: (item: Site) => void; onDelete: (id: string) => void }) { return <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Location</TableHead><TableHead>Zones</TableHead><TableHead>Description</TableHead><TableHead /></TableRow></TableHeader><TableBody>{items.length ? items.map((item) => <TableRow key={item.id}><TableCell className="font-medium">{item.name}</TableCell><TableCell>{item.location || '—'}</TableCell><TableCell>{networks.filter((network) => network.site_id === item.id).map((network) => network.name).join(', ') || '—'}</TableCell><TableCell className="max-w-sm truncate">{item.description}</TableCell><TableCell><Actions onEdit={() => onEdit(item)} onDelete={() => onDelete(item.id)} /></TableCell></TableRow>) : <TableRow><TableCell colSpan={5} className="py-10 text-center text-slate-400">No sites recorded yet. Add the offices, plants, or data centers the client has, then say which zones and assets are at each.</TableCell></TableRow>}</TableBody></Table></CardContent></Card>; }
 function ConnectionTable({ items, onEdit, onDelete }: { items: NetworkConnection[]; onEdit: (item: NetworkConnection) => void; onDelete: (id: string) => void }) { return <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Source</TableHead><TableHead>Target</TableHead><TableHead>Type</TableHead><TableHead>Device</TableHead><TableHead>Description</TableHead><TableHead /></TableRow></TableHeader><TableBody>{items.length ? items.map((item) => <TableRow key={item.id}><TableCell>{item.source_network_name}</TableCell><TableCell>{item.target_network_name}</TableCell><TableCell>{item.connection_type}</TableCell><TableCell>{item.device_name || '—'}</TableCell><TableCell className="max-w-sm truncate">{item.description}</TableCell><TableCell><Actions onEdit={() => onEdit(item)} onDelete={() => onDelete(item.id)} /></TableCell></TableRow>) : <Empty columns={6} />}</TableBody></Table></CardContent></Card>; }
 function FirewallTable({ items, selectedId, onManage, onEdit, onDelete, onNoteSaved }: { items: Firewall[]; selectedId: string | null; onManage: (id: string) => void; onEdit: (item: Firewall) => void; onDelete: (id: string) => void; onNoteSaved: () => void }) { return <Card><CardContent className="p-0"><Table><TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Home zone</TableHead><TableHead>Vendor</TableHead><TableHead>Model</TableHead><TableHead>Configuration</TableHead><TableHead>Note</TableHead><TableHead /></TableRow></TableHeader><TableBody>{items.length ? items.map((item) => <TableRow key={item.id} className={selectedId === item.id ? 'bg-amber-50' : ''}><TableCell className="font-medium">{item.name}</TableCell><TableCell>{item.network_name || 'Unassigned'}</TableCell><TableCell>{item.vendor || '—'}</TableCell><TableCell>{item.model || '—'}</TableCell><TableCell className="max-w-sm truncate">{item.config_text || item.rules || '—'}</TableCell><TableCell className="min-w-40"><QuickNoteCell entityType="firewall" id={item.id} note={item.quick_note} onSaved={onNoteSaved} /></TableCell><TableCell><div className="flex"><Button size="sm" variant={selectedId === item.id ? 'secondary' : 'ghost'} title="Manage interfaces and NAT" onClick={() => onManage(item.id)}><NetworkIcon size={14} /></Button><Actions onEdit={() => onEdit(item)} onDelete={() => onDelete(item.id)} /></div></TableCell></TableRow>) : <Empty columns={7} />}</TableBody></Table></CardContent></Card>; }
 function Empty({ columns }: { columns: number }) { return <TableRow><TableCell colSpan={columns} className="py-10 text-center text-slate-400">No matching records.</TableCell></TableRow>; }

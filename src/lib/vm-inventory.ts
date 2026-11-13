@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
-import type { Asset, JsonValue, Network, NetworkInterface } from '@/types';
-import { matchNetworkForIp } from './subnet-match';
+import type { Asset, AssetRelation, JsonValue, Network, NetworkInterface } from '@/types';
+import { describeReasons, findAssetMatches, sameNic } from './asset-match';
+import { isIpAddress, matchNetworkForIp } from './subnet-match';
 import type { XmindTopic } from './topology-export';
 
 export type VmInventoryPlatform = 'esxi' | 'proxmox' | 'hyperv' | 'generic';
@@ -55,6 +56,16 @@ export interface VmImportInventory {
   assets: Asset[];
   networks: Network[];
   networkInterfaces: NetworkInterface[];
+  /** Existing asset links, so a re-import reuses a VM's "runs on" link instead of adding a second. */
+  relations?: AssetRelation[];
+}
+
+export interface VmImportOptions {
+  /**
+   * Also record each VM's hypervisor host as an asset (typed `hypervisor`) and
+   * a "runs on" link from the VM to it. Default on for hypervisor inventories.
+   */
+  includeHosts?: boolean;
 }
 
 interface PartialChange {
@@ -669,12 +680,80 @@ function change(
 export function buildVmInventoryImport(
   parsed: ParsedVmInventory,
   inventory: VmImportInventory,
+  options: VmImportOptions = {},
 ): BuiltVmInventoryImport {
   const changes: PartialChange[] = [];
   const warnings = new Set(parsed.warnings);
+  const includeHosts = (options.includeHosts ?? true) && parsed.platform !== 'generic';
+  const claimed = new Set<string>();
+  const hostIds = new Map<string, string>();
+
+  /**
+   * The asset a VM runs on, created once per host name. An asset already in the
+   * case under that name (typed by hand, or found by discovery) is used as it
+   * is; only its origin is raised when the client's inventory lists it.
+   */
+  const hostAsset = (rawName: string): string | undefined => {
+    const name = rawName.trim();
+    if (!name) return undefined;
+    const key = name.toLowerCase();
+    const known = hostIds.get(key);
+    if (known) return known;
+    const byAddress = isIpAddress(name);
+    const found = findAssetMatches(
+      { name: byAddress ? undefined : name, ips: byAddress ? [name] : [] },
+      inventory.assets,
+      inventory.networkInterfaces,
+    ).find((item) => !readStoredVmInventory(item.asset.properties) && item.reasons.some((reason) => reason === 'name' || byAddress));
+    if (found) {
+      hostIds.set(key, found.asset.id);
+      if (found.asset.origin !== 'client_inventory') {
+        change(changes, 'asset', found.asset.id, { origin: 'client_inventory' });
+      }
+      return found.asset.id;
+    }
+    const hostId = uuidv4();
+    hostIds.set(key, hostId);
+    const network = byAddress ? networkForIp(inventory.networks, name, name, warnings) : undefined;
+    change(changes, 'asset', hostId, {
+      name,
+      asset_type: 'hypervisor',
+      ip_address: byAddress ? name : '',
+      network_id: network?.id ?? null,
+      origin: 'client_inventory',
+    });
+    if (byAddress) {
+      change(changes, 'network_interface', uuidv4(), {
+        asset_id: hostId, name: 'Primary', ip_address: name, mac_address: null, network_id: network?.id ?? null, is_primary: true,
+      });
+    }
+    return hostId;
+  };
+
   for (const record of parsed.records) {
     const matched = existingAssetFor(record, inventory.assets);
-    const existing = matched?.asset;
+    let existing = matched?.asset;
+    // A machine the investigator typed keeps the name they gave it.
+    let keepName = false;
+    if (!existing) {
+      // A machine typed by hand (or found by discovery) before this inventory:
+      // a shared MAC, or the same name at the same address, is the same machine.
+      const candidates = findAssetMatches(
+        { name: record.name, ips: record.ipAddresses, macs: record.macAddresses },
+        inventory.assets.filter((asset) => !readStoredVmInventory(asset.properties) && !claimed.has(asset.id)),
+        inventory.networkInterfaces,
+      );
+      // A name alone never overwrites a machine typed by hand; it is only reported.
+      const strong = candidates.find((item) => item.strength === 'strong' && item.reasons.some((reason) => reason === 'mac' || reason === 'ip'));
+      if (strong) {
+        existing = strong.asset;
+        keepName = true;
+        warnings.add(`${record.name}: matched the existing asset ${strong.asset.name} (${describeReasons(strong.reasons)}) and updated it instead of adding a duplicate${strong.asset.name === record.name ? '' : '; its name was kept'}.`);
+      } else if (candidates.length) {
+        warnings.add(`${record.name} may be the same machine as ${candidates[0].asset.name} (${describeReasons(candidates[0].reasons)}); it was added as a separate asset. Use Possible duplicates to merge them if so.`);
+      }
+    }
+    if (existing) claimed.add(existing.id);
     const assetId = existing?.id ?? uuidv4();
     const desiredNics = Math.max(record.ipAddresses.length, record.macAddresses.length);
     const existingInventoryNics = inventory.networkInterfaces.filter((item) =>
@@ -691,7 +770,7 @@ export function buildVmInventoryImport(
     const primaryNetwork = primaryIp ? networkForIp(inventory.networks, primaryIp, record.name, warnings) : undefined;
     change(changes, 'asset', assetId, {
       network_id: primaryNetwork?.id ?? existing?.network_id ?? null,
-      name: record.name,
+      name: keepName && existing ? existing.name : record.name,
       ip_address: primaryIp,
       mac_address: primaryMac,
       asset_type: record.assetType
@@ -704,20 +783,40 @@ export function buildVmInventoryImport(
       investigation_status: existing?.investigation_status ?? 'not_started',
       properties: storedProperties(record, existing) as unknown as JsonValue,
       scan_results: existing?.scan_results ?? null,
+      // A hypervisor inventory is the client's own list; a pasted list says nothing about origin.
+      origin: parsed.platform === 'generic' ? existing?.origin ?? 'unknown' : 'client_inventory',
     });
+    const hostName = (record.hypervisor ?? parsed.inventoryScope ?? '').trim();
+    const hostId = includeHosts ? hostAsset(hostName) : undefined;
+    if (hostId && hostId !== assetId) {
+      const current = (inventory.relations ?? []).filter((item) => item.source_asset_id === assetId && item.relation_type === 'runs_on');
+      if (!current.some((item) => item.target_asset_id === hostId)) {
+        // A VM runs on one host at a time: a moved VM re-points its existing link.
+        const moved = current[0];
+        if (moved) warnings.add(`${record.name} now runs on ${hostName} (the case had it on ${moved.target_name ?? 'another host'}).`);
+        change(changes, 'asset_relation', moved?.id ?? uuidv4(), { source_asset_id: assetId, target_asset_id: hostId, relation_type: 'runs_on' });
+      }
+    }
 
     for (let index = 0; index < desiredNics; index += 1) {
       const name = `Inventory NIC ${index + 1}`;
-      const existingInterface = existingInventoryNics.find((item) => item.name === name);
       const ipAddress = record.ipAddresses[index] ?? '';
+      const macAddress = record.macAddresses[index] ?? '';
+      // The interface the investigator already typed for this address is the same
+      // interface: it gains the MAC instead of getting a twin beside it.
+      const sameManual = ipAddress
+        ? inventory.networkInterfaces.find((item) => item.asset_id === assetId && !/^Inventory NIC \d+$/.test(item.name)
+          && sameNic({ ip: item.ip_address, mac: item.mac_address }, { ip: ipAddress, mac: macAddress }))
+        : undefined;
+      const existingInterface = sameManual ?? existingInventoryNics.find((item) => item.name === name);
       const network = ipAddress ? networkForIp(inventory.networks, ipAddress, record.name, warnings) : undefined;
       change(changes, 'network_interface', existingInterface?.id ?? uuidv4(), {
         asset_id: assetId,
-        name,
+        name: sameManual ? sameManual.name : name,
         ip_address: ipAddress,
-        mac_address: record.macAddresses[index] ?? null,
+        mac_address: macAddress || sameManual?.mac_address || null,
         network_id: network?.id ?? existingInterface?.network_id ?? null,
-        is_primary: !preserveManualPrimary && index === 0,
+        is_primary: sameManual ? sameManual.is_primary : !preserveManualPrimary && index === 0,
       });
     }
     if (existingInventoryNics.length > desiredNics) {

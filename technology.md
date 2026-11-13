@@ -204,6 +204,9 @@ An investigator can use the application to:
 - preserve source timestamps and correlate incorrect server clocks;
 - import offline Windows EVTX, Windows event JSON, and Unix syslog copies into a searchable encrypted event-log sidecar, and promote chosen records into the attributed timeline;
 - create, edit, search, and filter timeline events, IOCs, and notes;
+- record sites, who owns and who runs each zone and asset, and which VM runs on which hypervisor (drawn in the topology), and mark whether the client's own inventory lists a machine or the team discovered it, with when it was last seen;
+- paste what was pulled from the client network (ARP tables, `ipconfig /all`, `ip addr`, nmap scans, DHCP leases) and turn it into reviewed assets that match, never duplicate, what the case already holds;
+- find assets that are probably the same machine recorded twice and merge them in one attributed, replayable change;
 - capture information verbatim the moment it is learned (Alt+C) and later turn it into reviewed assets, indicators, or notes from a Capture inbox;
 - paste indicator lists and reports in bulk, with refanging, type detection, and duplicate checks;
 - search the whole case for hostnames, addresses, hashes, indicators, and text from one box (Ctrl+K);

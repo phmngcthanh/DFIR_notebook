@@ -2,7 +2,7 @@
 
 Document version: 1.0  
 Application version: 1.0.20
-Last reviewed: 2026-11-12
+Last reviewed: 2026-11-14
 
 ## 1. Format selection
 
@@ -11,6 +11,7 @@ Last reviewed: 2026-11-12
 | SQLite case | `.db` | SQLCipher; database-file password required | Open a complete working case | Opens that database after unlock/validation |
 | Full backup (desktop) | `.db` with `.db.sha256`, plus `.dfirlogs` when the case has an event-log store | SQLCipher; the case password | Backup, and the master a lead hands back after the daily merge | Restore checks the checksums and password, copies the set to a new working file, and opens it; the backup is never changed |
 | Checksum file | `.sha256` beside a bundle or backup | No | `sha256sum`-format manifest for checking a file after transfer | Never; checked on restore, and checkable with `sha256sum -c` or `Get-FileHash` |
+| Discovery output | pasted text or `.txt`/`.log`/`.csv`/`.leases`: ARP tables, `ipconfig /all`, `ip addr`/`ifconfig`, nmap, DHCP leases | No | Hosts seen on the client network (**Assets → Paste discovery output**) | Only after per-host choice (add, update, skip), preview, and confirmation |
 | Pasted indicators | pasted text: a list, a report, or defanged values | No | Bulk IOC intake (**IOCs → Paste IOCs**) | Only after detection, review, and confirmation |
 | Capture | typed or pasted text (**Capture**, Alt+C) | Stored in the case | Record something the moment it is learned | Saved verbatim to the Capture inbox; records are created only when it is processed and confirmed |
 | Full snapshot | `.json` | No | Backup/legacy add-only transfer | Yes, after same-case validation |
@@ -98,15 +99,40 @@ adb devices -l
 
 CSV header matching ignores case, spaces, punctuation, and parentheses. `Name` is required. Common identifier aliases (`Id`, `VMId`, `vmid`), state aliases (`State`, `Status`, `PowerState`), host aliases (`VMHost`, `Node`, `ComputerName`), and resource aliases are accepted. Multi-value IP and MAC columns should use semicolons inside the CSV field as the copy-ready commands do. Generic CSV additionally accepts `Type` (asset type: `mobile`, `vm`, `workstation`, `server`, `laptop`, `router`, `switch`, `firewall`, `other`, with `pc`/`phone`/`tablet`-style aliases) and `User` columns; unknown type values are reported as review warnings and ignored. Generic native lines are positional `name, ip, mac, os, type`; a bare line of hostname tokens becomes one device per token.
 
-The optional **Inventory scope** should identify the ESXi host, Proxmox cluster, or Hyper-V host/failover-cluster inventory. It participates in the stored identity key. This is especially important for numeric ESXi `VMid` values, which are local to a host. Re-import matching checks the normalized identity first, then uses a unique same-platform native ID with a compatible scope or the same imported name/scope as a controlled fallback. It never name-matches and overwrites a manually created asset.
+The optional **Inventory scope** should identify the ESXi host, Proxmox cluster, or Hyper-V host/failover-cluster inventory. It participates in the stored identity key. This is especially important for numeric ESXi `VMid` values, which are local to a host. Re-import matching checks the normalized identity first, then uses a unique same-platform native ID with a compatible scope or the same imported name/scope as a controlled fallback. It never overwrites an asset an analyst created by hand because its name matches. An asset typed by hand (or found by discovery) is the same machine only on stronger evidence: a shared MAC address, or the same name at the same address (and no conflicting MAC). Then the import updates that asset instead of adding a twin, keeps the name the analyst gave it, and says so in the review; a name alone or an address alone is reported as a possible duplicate and the guest is added separately.
 
 Each recognized guest is created as an ordinary asset row, so it appears immediately in **Assets and PC Configuration** and in normal snapshots/history. The asset type covers both device classes: a guest OS that identifies as mobile (Android, iOS/iPadOS, watchOS, HarmonyOS, KaiOS, Tizen, Wear OS, Fuchsia) becomes `asset_type: "mobile"`; every PC/other-OS guest stays `asset_type: "vm"`. An explicit `Type` column (generic lists) wins over OS detection, and re-imports preserve an analyst-retyped asset type unless the classified OS says otherwise. Proxmox LXC guests remain `asset_type: "vm"` for the current schema but carry `kind: "container"` in their normalized properties. `adb` records use the device serial as the stable native ID, keep the adb state (unauthorized/offline rows import too, for transparent review) and model name, and carry `guestOs: "Android"`. Platform, source format/file, native ID, scope, host/node, runtime state, resources, addresses, configuration path, and the source row are stored under `schema: "dfir-vm-inventory-v1"` in encrypted asset `properties`. Existing non-inventory properties are retained as `legacyProperties`.
 
 Discovered IP/MAC pairs become `Inventory NIC N` records. An IPv4 or IPv6 address attaches automatically to the most specific existing case subnet when exactly one network is that fit. When two or more equally specific networks contain it (isolated sites reusing one range), the address stays unassigned and the preview lists it as a review point; unmatched addresses also stay unassigned rather than causing a network to be invented. A repeat import reuses those managed NIC IDs and preserves analyst-owned compromise state, investigation progress, user, OS when the inventory has no OS, scan results, and legacy properties.
 
+When a Discovered IP/MAC pair has the same address as an interface the analyst already typed for that asset (and a compatible MAC), that interface is reused and gains the MAC rather than getting an `Inventory NIC N` beside it.
+
+For ESXi, Proxmox, and Hyper-V inventories the importer also records where each guest runs, unless **Also record the hypervisor hosts** is unticked. The host is `hypervisor` (ESXi `VMHost`, Proxmox `node`, Hyper-V `ComputerName`, else the inventory scope), and one `asset_relation` of type `runs_on` points from the guest to it. A host is created once per name as an asset of type `hypervisor` with `origin: "client_inventory"` (named by its address when the inventory lists it by address, with a primary interface); a host already in the case under that name, of any asset type, is used as it is and only has its origin raised to `client_inventory`. An existing `runs_on` link of the guest to the same host is left alone; one to another host is re-pointed (the guest moved) and the review says so. Every guest imported from a hypervisor inventory has `origin: "client_inventory"`; a pasted generic list leaves origin as it was (`unknown` for new assets). Partial-import order guarantees the relation is applied after both of its assets.
+
 Inventory disappearance is not evidence of deletion. The workflow therefore never deletes an asset or an older inventory NIC merely because it is absent from a later file; it reports retained stale NICs for review. The importer does not query the hypervisor, fetch VM configuration/disks, or prove that reported runtime state is current.
 
 Vendor basis for the supported shapes: Broadcom documents both [`vim-cmd vmsvc/getallvms`](https://knowledge.broadcom.com/external/article?legacyId=1003738) and PowerCLI [`Get-VM`](https://developer.broadcom.com/powercli/latest/vmware.vimautomation.core/commands/get-vm); Proxmox documents `pvesh`, `qm`, and JSON output options in the [Proxmox VE Administration Guide](https://pve.proxmox.com/pve-docs/pve-admin-guide.pdf); Microsoft documents Hyper-V [`Get-VM`](https://learn.microsoft.com/en-us/windows-server/virtualization/hyper-v/powershell), PowerShell [`Export-Csv`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/export-csv), and [`ConvertTo-Json`](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/convertto-json).
+
+### 1.2b Discovery output
+
+**Assets → Paste discovery output** reads what a responder runs on a client machine or device. The format is detected from the text, or chosen by hand. Only IPv4 is read; loopback, link-local, multicast, broadcast, and container-bridge entries are skipped, and labels are matched in English.
+
+| Format | Accepted shapes | A host is |
+|---|---|---|
+| ARP / neighbor table | Windows `arp -a`; Linux/BSD/macOS `arp -a` (`name (10.0.0.1) at aa:bb:… [ether] on eth0`, including macOS short octets such as `0:1a:2b:…`); `arp -n`; `ip neigh` (entries without an `lladdr` are dropped); Cisco `show ip arp` (dotted `aabb.ccdd.eeff`) | a neighbor with its IP and MAC, named when the source names it |
+| `ipconfig /all` | the English Windows output; adapters with `Media disconnected` are skipped | the machine itself (`Host Name`) with one NIC per connected adapter and address, OS `Windows`; its default gateway, DHCP server, and DNS servers are listed as separate, unticked references |
+| `ip addr` / `ifconfig` | Linux `ip addr`, and `ifconfig` in the net-tools and BSD/macOS layouts; `lo`, `docker*`, `veth*`, `br-*`, `virbr*` and similar interfaces are skipped | the machine itself, named by the *Run on* field (the commands do not print it), one NIC per address |
+| nmap | normal output (`-oN`) and greppable output (`-oG`), including `-sn` ping sweeps; XML (`-oX`) is refused | a scanned host with name, MAC and vendor (when known), OS guess, open TCP/UDP ports, and the scan start time |
+| DHCP leases | ISC `dhcpd.leases` (the latest block per address wins; `starts` is the observed time; non-`active` leases are noted); `dnsmasq.leases`; `netsh dhcp server scope … show clients`; `Get-DhcpServerv4Lease … \| Export-Csv` (`IPAddress`, `ClientId`, `HostName`) | a lease holder with IP, MAC, and name |
+
+The same machine listed twice in one paste is one host: it is merged when a MAC address is shared, or an address is shared and one side has no MAC. One address seen with two MAC addresses stays two hosts and produces a review point.
+
+Every host then becomes a row to add as a new asset, use to update the asset it matches (matching uses the rules in [USER_GUIDE.md](USER_GUIDE.md#throughout-duplicate-assets-and-merging-them)), or skip. Nothing is applied until the chosen rows are previewed. What is recorded, as reviewed partial-import changes:
+
+- **new asset:** `name` (the host name, or its address), `asset_type` `other` (`workstation`/`server` when the OS says Windows or Windows Server, `mobile` for phone and tablet systems), `ip_address`, `mac_address`, `network_id` (the single most specific subnet; an ambiguous address stays unassigned and is listed), `os`, `origin: "discovered"`, `last_observed` (the host's own time, else the *Observed at* time, else now), and `scan_results` when nmap reported ports or a vendor, with one `network_interface` per address, the first primary;
+- **matched asset:** only `last_observed` (when later), `os` (when empty), `scan_results` (when empty, or when it was an earlier nmap result; any other stored value is kept and the review says so), an interface it lacked, and the MAC address of an interface that had none. `origin`, name, and everything else are untouched.
+
+`scan_results` written by discovery is JSON: `{ "source": "nmap", "scanned_at": "…", "open_ports": [{ "port": 22, "protocol": "tcp", "service": "ssh" }], "mac_vendor": "…", "os_guess": "…" }`.
 
 ### 1.3 Event logs
 
@@ -210,8 +236,10 @@ Fields listed as required are required when creating a record. Updates may conta
 | `entity_type` | Required create fields | Optional/update fields and accepted values |
 |---|---|---|
 | `case` | Update only | `name`, `description`, `client_name`, `status` (`active`, `closed`, `archived`), `metadata`; legacy `investigator` values are preserved but ignored |
-| `network` | `name` | `subnet` (CIDR, or empty while an L2 VLAN subnet is unresolved), `network_type` (`LAN`, `DMZ`, `DMS`, `WAN`, `GUEST`, `MANAGEMENT`, `OTHER`), `description`, `vlan_id`, `quick_note` (short investigator remark) |
-| `asset` | `name`, `ip_address` | `network_id`, `mac_address`, `asset_type` (`workstation`, `server`, `vm`, `mobile`, `laptop`, `router`, `switch`, `firewall`, `other`), `os`, `user_name`, `compromise_status` (`unknown`, `clean`, `suspected`, `infected`), `investigation_status` (`not_started`, `in_progress`, `completed`), `properties`, `scan_results`, `quick_note` (short investigator remark) |
+| `site` | `name` | `location`, `description`; names are unique case-insensitively through the app's commands |
+| `network` | `name` | `subnet` (CIDR, or empty while an L2 VLAN subnet is unresolved), `network_type` (`LAN`, `DMZ`, `DMS`, `WAN`, `GUEST`, `MANAGEMENT`, `OTHER`), `description`, `vlan_id`, `site_id`, `owner` (who governs it), `operator` (who runs it; both up to 200 characters), `quick_note` (short investigator remark) |
+| `asset` | `name`, `ip_address` | `network_id`, `mac_address`, `asset_type` (`workstation`, `server`, `vm`, `hypervisor`, `mobile`, `laptop`, `router`, `switch`, `firewall`, `other`), `os`, `user_name`, `compromise_status` (`unknown`, `clean`, `suspected`, `infected`), `investigation_status` (`not_started`, `in_progress`, `completed`), `properties`, `scan_results`, `site_id`, `owner`, `operator` (up to 200 characters each), `origin` (`unknown`, `client_inventory`, `discovered`), `last_observed` (RFC 3339), `quick_note` (short investigator remark) |
+| `asset_relation` | `source_asset_id`, `target_asset_id`, `relation_type` (`runs_on`, `managed_by`, `backs_up_to`, `depends_on`, `connects_to`, `other`) | `note`; the source "runs on" the target, so a VM's relation points at its host; both assets must exist, they must differ, and the same pair may carry one relation of each type |
 | `network_interface` | `asset_id`, `name`, `ip_address` | `network_id`, `mac_address`, `is_primary`; at most one primary NIC per asset |
 | `clock_profile` | `name`, `server_reference_raw`, `correct_reference_raw` | `description`, `server_timezone`, `correct_timezone`; UTC values and offset are derived by the app |
 | `firewall` | `name` | `network_id`, `vendor`, `model`, `rules`, `config_text`, `quick_note` (short investigator remark) |
@@ -386,11 +414,13 @@ A plain snapshot is formatted UTF-8 JSON with this root structure:
   "attack_edges": [],
   "investigation_views": [],
   "captures": [],
+  "sites": [],
+  "asset_relations": [],
   "notes": []
 }
 ```
 
-`ioc_sightings`, `attack_edges`, and `captures` are evidence entities and take part in history, expert bundles, and partial import. Saved drafts are never part of a snapshot. `investigation_views` are named saved Investigation Graph views (presentation state): imported by snapshot for convenience but excluded from history, expert bundles, and partial import. Snapshots written before these arrays existed remain valid; each missing array defaults to empty.
+`ioc_sightings`, `attack_edges`, `captures`, `sites`, and `asset_relations` are evidence entities and take part in history, expert bundles, and partial import. Saved drafts are never part of a snapshot. `investigation_views` are named saved Investigation Graph views (presentation state): imported by snapshot for convenience but excluded from history, expert bundles, and partial import. Snapshots written before these arrays existed remain valid; each missing array defaults to empty.
 
 Snapshot import requires the same `case_info.id`, inserts missing UUIDs, skips existing UUIDs, and never overwrites open-case metadata. A plain snapshot can also be loaded into the partial-import reviewer; there it is converted to reviewed upserts so the operator can explicitly select incoming updates.
 
